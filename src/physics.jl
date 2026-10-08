@@ -569,7 +569,7 @@ barotropic solve and `w` from the top-layer continuity), a uniform density stays
 although the discrete velocity there is `d eta/dt`; with rho ~ 1000 kg/m^3 that acts as a spurious source of
 rho*eta_t*dt/dz per step in the top row.
 Source: free-surface z-layer budget as in Casulli & Walters (2000), Int. J. Numer. Methods Fluids 32, 331-348, and the
-semi-implicit free surface of Casulli & Cheng (1992), J. Comput. Phys. 86, 56-74 (equation numbers not checked).
+semi-implicit free surface of Casulli & Cheng (1992), Int. J. Numer. Methods Fluids 15, 629-648 (equation numbers not checked).
 Stability: unsplit first-order upwind is monotone if dt*(outflow velocities/dx + outflow velocities/dz) <= 1 per cell.
 """
 function advect_density_upwind_top_layer!(

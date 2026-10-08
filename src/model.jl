@@ -1376,7 +1376,7 @@ thickness at the u-faces built from `eta_old` (`top_layer_face_thickness!`). The
 i.e. the continuity equation `eta_t + d(sum_k h_k u_k)/dx = 0` with `u^{n+1} = uhat - g*dt*d(eta^{n+1})/dx` in every layer
 and the thicknesses taken at the old time level (linear in `eta^{n+1}`). For `eta_old = 0` it reduces to the constant-depth
 system of `solve!`. The tridiagonal matrix is symmetric positive definite and is solved by the Thomas algorithm.
-Source: Casulli & Cheng (1992), J. Comput. Phys. 86, 56-74 (semi-implicit free surface; equation numbers not checked).
+Source: Casulli & Cheng (1992), Int. J. Numer. Methods Fluids 15, 629-648 (semi-implicit free surface; equation numbers not checked).
 """
 function solve_variable_thickness!(
     solver::BarotropicSolver,

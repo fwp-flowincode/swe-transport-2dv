@@ -363,7 +363,7 @@ grid that the variable top layer replaces with a different one (cross-referenced
 and `experiments/validation/audit_hydrostatic_continuity_free_surface.jl` (top-row continuity residual; see
 `test_verify_variable_top_layer_closes_kinematic_and_volume_budgets` for the variable-top-layer analogue).
 
-References: Casulli and Cheng (1992), J. Comput. Phys. 86, 56-74 (semi-implicit free surface); Casulli and Walters (2000), Int. J.
+References: Casulli and Cheng (1992), Int. J. Numer. Methods Fluids 15, 629-648 (semi-implicit free surface); Casulli and Walters (2000), Int. J.
 Numer. Methods Fluids 32, 331-348 (z-layer model with a variable top layer). Equation numbers of these papers were not checked.
 
 ### 14) Non-hydrostatic free surface: rigid-lid coupling fix, and a remaining dispersion limitation
