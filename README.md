@@ -1,6 +1,11 @@
 SweTransport2DV
 =================
 
+2DV (vertical plane) shallow-water and transport model with hydrostatic and
+non-hydrostatic modes, in Julia. It computes reference solutions for cases
+without an analytical solution, e.g. the lock exchange (gravity current
+after removal of a gate between two fluids of different density).
+
 Julia 1:1 port of the current Python package in 2dv_swe_transport, including:
 - State, diagnostics, physics, pressure, visualization, and model driver.
 - Matching regression tests (ported from test_model.py).
@@ -12,6 +17,8 @@ Folder Layout
 - src/: Julia package source.
 - test/runtests.jl: full translated test suite.
 - experiments/: translated benchmark/profile/run scripts.
+- analysis/lock_exchange/: Python tools: bulk reference values of the lock exchange and
+  evaluation of model runs (see its README).
 
 Install
 -------
@@ -128,3 +135,8 @@ The port was written with in-place kernels and reusable workspaces in computatio
 - Pressure correction solver buffers in src/pressure.jl.
 
 This avoids repeated per-step allocations in hotspot functions and is intended to provide substantial speedup over the original pure NumPy path.
+
+License
+-------
+
+MIT, see [LICENSE](LICENSE).

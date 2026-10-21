@@ -1,0 +1,7 @@
+# Model output and run logs (written by experiments/)
+output_barotropic/
+run_logs/
+# Python (analysis/)
+__pycache__/
+.pytest_cache/
+.venv/
