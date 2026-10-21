@@ -6,6 +6,23 @@ non-hydrostatic modes, in Julia. It computes reference solutions for cases
 without an analytical solution, e.g. the lock exchange (gravity current
 after removal of a gate between two fluids of different density).
 
+Example: lock exchange
+----------------------
+
+Density 100 s after the removal of the gate between heavy (yellow) and light
+(purple) water, 30 m x 4 m channel, dx = dz = 0.02 m
+(`experiments/lock_exchange/plot_density_hydro_vs_nonhydro_100s.jl`).
+
+Non-hydrostatic: Kelvin-Helmholtz billows on the interface behind the front.
+
+![Lock exchange, non-hydrostatic, animation](docs/images/lock_exchange_nonhydro.gif)
+
+![Lock exchange, non-hydrostatic, t = 100 s](docs/images/lock_exchange_nonhydro_t100s.png)
+
+Hydrostatic: no billows; the interface spreads into a diffuse wedge.
+
+![Lock exchange, hydrostatic, t = 100 s](docs/images/lock_exchange_hydro_t100s.png)
+
 Julia 1:1 port of the current Python package in 2dv_swe_transport, including:
 - State, diagnostics, physics, pressure, visualization, and model driver.
 - Matching regression tests (ported from test_model.py).
@@ -17,6 +34,7 @@ Folder Layout
 - src/: Julia package source.
 - test/runtests.jl: full translated test suite.
 - experiments/: translated benchmark/profile/run scripts.
+- docs/images/: illustrations in this README.
 - analysis/lock_exchange/: Python tools: bulk reference values of the lock exchange and
   evaluation of model runs (see its README).
 
