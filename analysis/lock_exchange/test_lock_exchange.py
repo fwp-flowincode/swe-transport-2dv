@@ -131,21 +131,44 @@ def test_verify_heavy_volume_of_initial_state():
     assert vol == pytest.approx(p.x_lock * p.H, rel=RTOL_EXACT)
 
 
-@pytest.mark.parametrize("nx, nz, dt_default_expected", [(120, 20, 1.0), (300, 40, 0.18), (600, 80, 0.05),
-                                                           (1500, 200, 0.02), (120, 200, 0.02)])
-def test_verify_time_step_bounds_document_setup(calc, nx, nz, dt_default_expected):
-    """Document grid keeps dt = 1 s; fine or flat-cell grids default to U dt/min(dx, dz) = 0.1; max stays at 0.5."""
-    from lock_exchange import COURANT_MAX, time_step_bounds
+@pytest.mark.parametrize("nx, nz, dt_default_expected, dt_min_expected",
+                         [(120, 20, 0.1, 0.001), (300, 40, 0.05, 0.0005), (600, 80, 0.02, 0.0002),
+                          (1500, 200, 0.01, 0.0001), (120, 200, 0.01, 0.0001)])
+def test_verify_time_step_bounds_document_setup(calc, nx, nz, dt_default_expected, dt_min_expected):
+    """Default U dt/min(dx, dz) <= 0.05 (0.1 s on the document grid), minimum 1/100 of it, 1-2-5 series up to
+    the stability maximum U dt/dx <= 0.5 or ten times the default (the document's 1 s stays selectable)."""
+    from lock_exchange import COURANT_DEFAULT, COURANT_MAX, DT_MAX_OVER_DEFAULT, time_step_bounds
     p = calc.params
     dx, dz, U = p.L / nx, p.H / nz, calc.front_speed()
     b = time_step_bounds(dx, dz, p.H, U)
-    assert b["default"] == pytest.approx(dt_default_expected, abs=1e-9)
-    assert b["step"] <= b["default"] <= b["max"]
+    assert b["default"] == pytest.approx(dt_default_expected, rel=1e-12)
+    assert b["min"] == pytest.approx(dt_min_expected, rel=1e-12)
+    assert b["options"] == sorted(b["options"]) and b["default"] in b["options"]
+    assert b["options"][0] == b["min"] and b["options"][-1] == b["max"]
+    for a, c in zip(b["options"], b["options"][1:]):
+        assert c / a == pytest.approx(2.0) or c / a == pytest.approx(2.5)      # 1-2-5 series
+    assert U * b["default"] / min(dx, dz) <= COURANT_DEFAULT + 1e-12
     assert U * b["max"] / dx <= COURANT_MAX + 1e-9
-    if b["max"] < 10.0 * b["default"] - 1e-9:  # not capped at DT_MAX_OVER_DEFAULT
-        assert U * b["max"] / dx > COURANT_MAX * 0.85  # rounding down to the step loses < 15 %
-    assert b["max"] / b["step"] <= 200  # slider stays usable
-    assert U * b["default"] / min(dx, dz) <= 0.45 + 1e-9
+    assert b["max"] <= DT_MAX_OVER_DEFAULT * b["default"] * (1 + 1e-9) * 1.17   # default rounded down < 17 %
+    assert all(round(v, b["decimals"]) == v for v in b["options"])
+    if (nx, nz) == (120, 20):
+        assert 1.0 in b["options"]                                               # the document's dt
+
+
+@pytest.mark.parametrize("nx, nz, dt_hydro_expected", [(120, 20, 0.1), (300, 40, 0.05), (1500, 200, 0.002)])
+def test_verify_time_step_bounds_hydrostatic_vertical_limit(calc, nx, nz, dt_hydro_expected):
+    """Hydrostatic: max|w| dt/dz <= 0.5 (default) and <= 1 (max) with w = 0.25 U H/dz; binding only on fine grids
+    (1500 x 200: 0.002 s, cf. 0.0025 s found by hand in plot_density_hydro_vs_nonhydro_100s.jl)."""
+    from lock_exchange import (VERTICAL_COURANT_DEFAULT, VERTICAL_COURANT_MAX, W_HYDROSTATIC_OVER_UH_DZ,
+                               time_step_bounds)
+    p = calc.params
+    dx, dz, U = p.L / nx, p.H / nz, calc.front_speed()
+    b = time_step_bounds(dx, dz, p.H, U, hydrostatic=True)
+    assert b["default"] == pytest.approx(dt_hydro_expected, rel=1e-12)
+    w = W_HYDROSTATIC_OVER_UH_DZ * U * p.H / dz
+    assert w * b["default"] / dz <= VERTICAL_COURANT_DEFAULT + 1e-12
+    assert w * b["max"] / dz <= VERTICAL_COURANT_MAX + 1e-12
+    assert b["default"] <= time_step_bounds(dx, dz, p.H, U)["default"]
 
 
 def test_verify_time_step_bounds_viscous_limit(calc):

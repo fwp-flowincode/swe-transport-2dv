@@ -10,7 +10,8 @@ reference. These tools
   potential energy, bulk Richardson number;
 * evaluate model output: front positions and fitted front speed, nose angle,
   heavy-fluid volume;
-* give time-step limits for model runs (Courant and diffusion limits).
+* give the time steps offered for model runs: default U Δt/min(Δx, Δz) ≤ 0.05 and, hydrostatic,
+  |w| Δt/Δz ≤ 0.5; maximum from the Courant, vertical Courant and diffusion limits.
 
 ```
 python -m pip install numpy pytest

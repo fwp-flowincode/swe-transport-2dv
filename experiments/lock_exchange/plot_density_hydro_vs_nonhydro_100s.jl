@@ -9,13 +9,22 @@
 # WHY: `momentum_advection_scheme` only switches the momentum advection; the density is always
 # transported by advect_density_upwind! (src/model.jl), independent of that setting.
 #
-# WHY: the hydrostatic cases use a 4x smaller time step than the non-hydrostatic one. In hydrostatic
+# The settings are those of the lock-exchange case description: inviscid (nu = 0), rho0 = (rho1 + rho2)/2,
+# a minimal Rayleigh damping, and time steps from the rule of analysis/lock_exchange/lock_exchange.py
+# (time_step_bounds): U dt/min(dx, dz) <= 0.05 and, hydrostatic, max|w| dt/dz <= 0.5.
+#
+# WHY: the hydrostatic cases use a 5x smaller time step than the non-hydrostatic one. In hydrostatic
 # mode w is only diagnosed from continuity and reaches ~2.5-5 m/s in single columns at the front;
 # with dt = 0.01 s the vertical CFL number |w|*dt/dz (dz = 0.02 m) exceeded 1 (up to 2.5 for tvd2,
 # 3.8 for upwind1), which produced grid-scale shocks ahead of the front, spurious mixing (density
 # drift in undisturbed regions via the density clamp / mass correction) and a stalled front. With
-# dt = 0.0025 s the vertical CFL stays below ~0.6. The non-hydrostatic w is ~0.1 m/s (CFL < 0.05).
+# dt = 0.002 s the vertical CFL stays below ~0.5. The non-hydrostatic w is ~0.1 m/s (CFL < 0.05).
 # The run loop tracks the vertical CFL every step and warns if it reaches VERTICAL_CFL_LIMIT.
+#
+# WHY: Rayleigh damping r = 0.002 1/s (damping time 500 s, five times the simulation time): the smallest value
+# that removes the vertical streaks / ripples of the inviscid hydrostatic solution (seen on 120 x 20 and 300 x 40
+# at any time step). It lowers the front Froude number by ~0.5-1 % (hydrostatic) and ~2.5 % (non-hydrostatic,
+# 300 x 40: 0.479 -> 0.467); the former r = 0.01 1/s lowered the non-hydrostatic value by ~11 % (-> 0.425).
 #
 # WHY: the hydrostatic cases also use the variable-thickness top layer (ModelConfig.variable_top_layer; now the
 # library default for use_hydrostatic=true, set explicitly below for clarity). Fixed layers with a zero density flux
@@ -50,8 +59,9 @@ using NPZ
 using Printf
 
 const T_END_S = 100.0                  # s, time at which the density field is plotted
+const RAYLEIGH_DAMPING_PER_S = 0.002    # 1/s, minimal Rayleigh damping (see header)
 const DT_NONHYDRO_S = 0.01             # s, time step of the non-hydrostatic case
-const DT_HYDRO_S = 0.0025              # s, time step of the hydrostatic cases (vertical-CFL limit, see header)
+const DT_HYDRO_S = 0.002               # s, time step of the hydrostatic cases (vertical-CFL limit, see header)
 const VERTICAL_CFL_LIMIT = 1.0         # -, stability limit of the explicit vertical advection (unsplit upwind/TVD)
 const NX_CELLS = 1500                 # -, cells in x (dx = 0.02 m for L = 30 m)
 const NZ_CELLS = 200                   # -, cells in z (dz = 0.02 m for H = 4 m)
@@ -85,7 +95,9 @@ base_cfg = ModelConfig(
     nt=round(Int, T_END_S / DT_NONHYDRO_S),
     use_hydrostatic=false,             # overridden per case below
     momentum_advection_scheme="tvd2",  # overridden per case below
-    rayleigh_damping=0.01,
+    rayleigh_damping=RAYLEIGH_DAMPING_PER_S,
+    nu=0.0,                            # m^2/s, inviscid (case description)
+    rho0=0.5 * (1000.722 + 999.972),   # kg/m^3, mean density (case description)
     apply_froude_limiter=true,
     max_froude=0.9,
     pressure_solver_method="spectral",

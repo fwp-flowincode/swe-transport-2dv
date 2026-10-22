@@ -375,56 +375,88 @@ def fit_front_speed_window(t: np.ndarray, x_front: np.ndarray, t_min: float, t_m
 # modes) no run failed at 0.5, while a non-hydrostatic 600 x 80 run blew up at 0.75. The vertical spacing does not
 # limit stability (runs with U_f dt/dz up to 250 stayed stable), only accuracy (below).
 COURANT_MAX = 0.5
-# Default Courant number U_f dt / min(dx, dz) on grids at least as coarse as the case description's baseline
-# (min(dx, dz)/H = 0.2/4), where the document's dt = 1 s (0.43) changes the front speed by < 4 %.
-COURANT_DEFAULT_COARSE = 0.45
-# Default Courant number U_f dt / min(dx, dz) on fine grids [-]. WHY: the front speed is time-step converged only
-# for small values there (600 x 80 hydrostatic: Fr = 0.39 at 0.17, 0.47 at 0.09; 1500 x 200: 0.37 at 0.21, 0.48 at
-# 0.09; 120 x 200, flat cells: 0.12 at 4.3, 0.50 at 0.4).
-COURANT_DEFAULT_FINE = 0.1
-# Resolution min(dx, dz)/H of the case description's baseline grid (dz = 4 m / 20 layers) [-].
-H_MIN_OVER_H_BASELINE = 0.2 / 4.0
+# Default Courant number U_f dt / min(dx, dz) on every grid [-]. WHY: measured on the case description's grid
+# (120 x 20, inviscid, no damping, t = 100 s, reference dt = 0.0025 s): at the document's dt = 1 s (0.43) spikes
+# form behind both fronts and the density field deviates by 3.4 % (hydrostatic) / 4.8 % (non-hydrostatic) of the
+# density difference on average; at dt = 0.1 s (0.043) by 0.2 % / 2.0 %, without artefacts. On fine grids the
+# front speed converges only below about 0.1 (600 x 80 hydrostatic: Fr = 0.39 at 0.17, 0.47 at 0.09; 1500 x 200:
+# 0.37 at 0.21, 0.48 at 0.09).
+COURANT_DEFAULT = 0.05
+# Hydrostatic mode: largest vertical velocity relative to U_f H / dz [-]. WHY: there w is only diagnosed from
+# continuity and grows with the vertical resolution; measured max|w| (inviscid, no damping, t <= 100 s): 0.42 m/s
+# on 120 x 20 (dz = 0.2 m), 1.04 m/s on 300 x 40 (dz = 0.1 m), 2.5-5 m/s on 1500 x 200 (dz = 0.02 m), i.e. about
+# 0.25 U_f H / dz with U_f = 0.086 m/s, H = 4 m.
+W_HYDROSTATIC_OVER_UH_DZ = 0.25
+# Hydrostatic mode: vertical Courant number max|w| dt / dz of the default and the maximum time step [-].
+# WHY: explicit vertical advection; at max|w| dt/dz > 1 (1500 x 200, dt = 0.01 s: up to 2.5) grid-scale shocks,
+# spurious mixing and a stalled front appear (experiments/lock_exchange/plot_density_hydro_vs_nonhydro_100s.jl).
+VERTICAL_COURANT_DEFAULT = 0.5
+VERTICAL_COURANT_MAX = 1.0
 # Explicit diffusion limit nu * dt * (1/dx^2 + 1/dz^2) <= 1/2, used with a safety factor of 0.8 [-].
 DIFFUSION_NUMBER_MAX = 0.4
 # Largest time step offered relative to the default [-]. WHY: on flat-cell grids the stability limit can be
-# thousands of times the accurate default (e.g. 29 s vs 0.011 s), which is useless and makes the slider unusable.
+# thousands of times the accurate default (e.g. 29 s vs 0.011 s), which is useless; with the default of the case
+# description's grid (0.1 s) the document's dt = 1 s stays selectable.
 DT_MAX_OVER_DEFAULT = 10.0
+# Smallest time step offered relative to the default [-] (e.g. 0.001 s on the case description's grid).
+DT_MIN_OVER_DEFAULT = 0.01
+# Mantissas of the offered time steps (1-2-5 series) [-].
+DT_SERIES = (1.0, 2.0, 5.0)
 
 
 def recommended_courant(dx: float, dz: float, H: float) -> float:
     """Default Courant number U_f dt / min(dx, dz) [-] for grid spacings dx, dz [m] and depth H [m].
 
-    Empirical: COURANT_DEFAULT_COARSE at the baseline resolution min(dx, dz)/H, decreasing with the power 1.5
-    towards COURANT_DEFAULT_FINE on finer grids (matches the measured time-step sensitivity; see the constants).
+    COURANT_DEFAULT on every grid (see the constant for the measurements); the arguments are kept so that callers
+    need not change if the rule becomes grid dependent again.
     """
-    scaled = COURANT_DEFAULT_COARSE * (min(dx, dz) / H / H_MIN_OVER_H_BASELINE) ** 1.5
-    return float(np.clip(scaled, COURANT_DEFAULT_FINE, COURANT_DEFAULT_COARSE))
+    return COURANT_DEFAULT
+
+
+def _series(lo: float, hi: float) -> list:
+    """Values m * 10^e (m in DT_SERIES) with lo <= value <= hi, ascending."""
+    out = []
+    for e in range(int(np.floor(np.log10(lo))) - 1, int(np.ceil(np.log10(hi))) + 1):
+        for m in DT_SERIES:
+            v = float(f"{m * 10.0 ** e:.12g}")
+            if lo * (1 - 1e-9) <= v <= hi * (1 + 1e-9):
+                out.append(v)
+    return out
 
 
 def time_step_bounds(dx: float, dz: float, H: float, front_speed: float, nu: float = 0.0,
-                     dt_document: float = 1.0) -> Dict[str, float]:
-    """Slider bounds for the model time step [s]: stability maximum, default and a round step size.
+                     hydrostatic: bool = False) -> Dict:
+    """Time steps [s] offered for the model: a 1-2-5 series from a small minimum to the stability maximum.
 
+    default: COURANT_DEFAULT * min(dx, dz) / U_f (at most the stability maximum), rounded down to the series;
+             hydrostatic also at most VERTICAL_COURANT_DEFAULT dz / w with w = W_HYDROSTATIC_OVER_UH_DZ U_f H / dz.
     max:     min(COURANT_MAX * dx / U_f, DIFFUSION_NUMBER_MAX / (nu (1/dx^2 + 1/dz^2)),
-             DT_MAX_OVER_DEFAULT * default), rounded down to `step`.
-    default: min(dt_document, recommended_courant * min(dx, dz) / U_f, max), rounded down to `step`.
-    step:    10^floor(log10(default / 2)), so the default keeps at least two slider positions below it.
+             DT_MAX_OVER_DEFAULT * default), rounded down to the series; hydrostatic also at most
+             VERTICAL_COURANT_MAX dz / w.
+    min:     DT_MIN_OVER_DEFAULT * default, rounded down to the series.
+
+    Returns {"options": [...], "default", "min", "max", "decimals"} (decimals: enough to show every option).
 
     Args:
         dx, dz: grid spacings [m]; H: depth [m]; front_speed: U_f = 0.5 sqrt(g' H) [m/s];
-        nu: kinematic viscosity [m^2/s]; dt_document: time step of the case description's setup [s].
+        nu: kinematic viscosity [m^2/s]; hydrostatic: the run includes the hydrostatic mode.
     """
-    dt_max = COURANT_MAX * dx / front_speed
+    dt_stable = COURANT_MAX * dx / front_speed
     if nu > 0.0:
-        dt_max = min(dt_max, DIFFUSION_NUMBER_MAX / (nu * (1.0 / dx ** 2 + 1.0 / dz ** 2)))
-    dt_default = min(dt_document, recommended_courant(dx, dz, H) * min(dx, dz) / front_speed, dt_max)
-    dt_max = min(dt_max, DT_MAX_OVER_DEFAULT * dt_default)
-    step = 10.0 ** np.floor(np.log10(dt_default / 2.0))
-    n_dec = max(0, int(round(-np.log10(step))))
+        dt_stable = min(dt_stable, DIFFUSION_NUMBER_MAX / (nu * (1.0 / dx ** 2 + 1.0 / dz ** 2)))
+    dt_accurate = recommended_courant(dx, dz, H) * min(dx, dz) / front_speed
+    if hydrostatic:
+        w_max = W_HYDROSTATIC_OVER_UH_DZ * front_speed * H / dz
+        dt_stable = min(dt_stable, VERTICAL_COURANT_MAX * dz / w_max)
+        dt_accurate = min(dt_accurate, VERTICAL_COURANT_DEFAULT * dz / w_max)
+    dt_default = min(dt_accurate, dt_stable)
+    dt_max = min(dt_stable, DT_MAX_OVER_DEFAULT * dt_default)
+    options = _series(DT_MIN_OVER_DEFAULT * dt_default / 5.0, dt_max)
 
-    def snap(value: float) -> float:
-        # WHY: the small epsilon keeps exact multiples (e.g. 1.0 / 0.1) from being rounded down a step.
-        return round(max(step, np.floor(value / step + 1e-9) * step), n_dec)
+    def down(value: float) -> float:
+        return max(v for v in options if v <= value * (1 + 1e-9))
 
-    return {"max": snap(dt_max), "default": snap(dt_default), "step": round(float(step), n_dec),
-            "decimals": n_dec}
+    lo, default, hi = down(DT_MIN_OVER_DEFAULT * dt_default), down(dt_default), down(dt_max)
+    options = [v for v in options if lo <= v <= hi]
+    decimals = max(0, max(len(f"{v:.12g}".split(".")[1]) if "." in f"{v:.12g}" else 0 for v in options))
+    return {"options": options, "default": default, "min": lo, "max": hi, "decimals": decimals}

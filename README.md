@@ -10,7 +10,8 @@ Example: lock exchange
 ----------------------
 
 Density 100 s after the removal of the gate between heavy (yellow) and light
-(purple) water, 30 m x 4 m channel, dx = dz = 0.02 m
+(purple) water, 30 m x 4 m channel, dx = dz = 0.02 m, inviscid (nu = 0), Rayleigh
+damping r = 0.002 1/s, dt = 0.01 s (non-hydrostatic) and 0.002 s (hydrostatic)
 (`experiments/lock_exchange/plot_density_hydro_vs_nonhydro_100s.jl`).
 
 Non-hydrostatic: Kelvin-Helmholtz billows on the interface behind the front.
@@ -19,7 +20,8 @@ Non-hydrostatic: Kelvin-Helmholtz billows on the interface behind the front.
 
 ![Lock exchange, non-hydrostatic, t = 100 s](docs/images/lock_exchange_nonhydro_t100s.png)
 
-Hydrostatic: no billows; the interface spreads into a diffuse wedge.
+Hydrostatic: no billows; steep, near-vertical fronts and a sloping, diffuse
+interface between them.
 
 ![Lock exchange, hydrostatic, t = 100 s](docs/images/lock_exchange_hydro_t100s.png)
 
