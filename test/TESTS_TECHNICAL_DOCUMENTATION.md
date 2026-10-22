@@ -6,31 +6,31 @@ This document provides technical background, governing equations, and literature
 
 The model advances incompressible 2DV flow with a free surface and active density transport:
 
-$$
+```math
 \frac{\partial u}{\partial t} + \mathcal{A}_u = -\frac{1}{\rho_0}\frac{\partial p}{\partial x},
-$$
+```
 
-$$
+```math
 \frac{\partial w}{\partial t} + \mathcal{A}_w = -\frac{1}{\rho_0}\frac{\partial p}{\partial z} + b,
-$$
+```
 
-$$
+```math
 \frac{\partial u}{\partial x} + \frac{\partial w}{\partial z} = 0,
-$$
+```
 
-$$
+```math
 \frac{\partial \eta}{\partial t} + \frac{\partial}{\partial x}\int_{-H}^{\eta} u\,dz = 0,
-$$
+```
 
-$$
+```math
 \frac{\partial \rho}{\partial t} + \nabla \cdot (\rho \mathbf{u}) = 0.
-$$
+```
 
 Hydrostatic and non-hydrostatic branches split pressure as:
 
-$$
+```math
 p = p_h + p', \qquad \frac{\partial p_h}{\partial z} = -\rho g.
-$$
+```
 
 ## Core references
 
@@ -50,21 +50,21 @@ This section documents the numerical methods currently implemented in `src/physi
 
 State variables are stored on a 2D staggered layout:
 
-$$
+```math
 u_{k,i+1/2},\quad w_{k+1/2,i},\quad p_{k,i},\ \rho_{k,i},\ \eta_i.
-$$
+```
 
 Discrete operators use centered first differences on their natural staggered locations:
 
-$$
+```math
 (\nabla_x p)_{k,i+1/2} = \frac{p_{k,i+1}-p_{k,i}}{\Delta x},
 \qquad
 (\nabla_z p)_{k+1/2,i} = \frac{p_{k+1,i}-p_{k,i}}{\Delta z},
-$$
+```
 
-$$
+```math
 (\nabla\cdot\mathbf{u})_{k,i} = \frac{u_{k,i+1/2}-u_{k,i-1/2}}{\Delta x} + \frac{w_{k+1/2,i}-w_{k-1/2,i}}{\Delta z}.
-$$
+```
 
 ### 2) Split time integration used in `step_forward!`
 
@@ -73,10 +73,10 @@ earlier ordering that had the free-surface solve AFTER the non-hydrostatic proje
 
 1. Compute momentum advection tendencies for $u$ and $w$.
 2. Build hydrostatic pressure predictor $p_h$.
-3. Form provisional velocities $(u^*,w^*)$ from advection, pressure gradients, and buoyancy.
-4. Advance free surface with depth-integrated transport using a barotropic solve (uses the un-projected $u^*$ in both
-   modes), and correct $u^*$ with the free-surface slope.
-5. Optionally apply non-hydrostatic projection to the (now surface-corrected) $(u^*,w^*)$ (when `use_hydrostatic=false`;
+3. Form provisional velocities $(u^{\ast},w^{\ast})$ from advection, pressure gradients, and buoyancy.
+4. Advance free surface with depth-integrated transport using a barotropic solve (uses the un-projected $u^{\ast}$ in both
+   modes), and correct $u^{\ast}$ with the free-surface slope.
+5. Optionally apply non-hydrostatic projection to the (now surface-corrected) $(u^{\ast},w^{\ast})$ (when `use_hydrostatic=false`;
    section 14).
 6. Enforce wall boundary values on $u$.
 7. Reconstruct $w$ from continuity and enforce top kinematic condition $w_{top}=\eta_t$.
@@ -89,32 +89,32 @@ earlier ordering that had the free-surface solve AFTER the non-hydrostatic proje
 
 For each advected component $\phi\in\{u,w\}$, the code computes conservative flux divergence:
 
-$$
+```math
 \mathcal{A}(\phi)=\frac{F^x_{i+1/2}-F^x_{i-1/2}}{\Delta x}+\frac{F^z_{k+1/2}-F^z_{k-1/2}}{\Delta z}.
-$$
+```
 
 `upwind1` (first-order upwind):
 
-$$
+```math
 F_{f}=v_f\,\phi_{upwind},
-$$
+```
 
 with donor-cell choice based on the sign of face velocity $v_f$.
 
 `tvd2` (MUSCL-type reconstruction with MC limiter):
 
-$$
+```math
 \phi^L_{i+1/2}=\phi_i+\frac{1}{2}s_i,\qquad
 \phi^R_{i+1/2}=\phi_{i+1}-\frac{1}{2}s_{i+1},
-$$
+```
 
-$$
+```math
 s_i = \mathrm{MC}(\Delta^-\phi_i,\Delta^+\phi_i),
-$$
+```
 
-$$
+```math
 \mathrm{MC}(a,b)=\mathrm{minmod}\!\left(\mathrm{minmod}(2a,2b),\frac{a+b}{2}\right).
-$$
+```
 
 The face flux is then upwinded between $(\phi^L,\phi^R)$ using the face velocity sign.
 
@@ -122,37 +122,37 @@ The face flux is then upwinded between $(\phi^L,\phi^R)$ using the face velocity
 
 Density is advanced by conservative first-order upwind fluxes:
 
-$$
+```math
 \rho^{n+1}=\rho^n-\Delta t\,\nabla\cdot(\rho\mathbf{u}).
-$$
+```
 
 Optional bound-preserving clamping is applied during update:
 
-$$
+```math
 \rho^{n+1}\leftarrow\mathrm{clip}(\rho^{n+1},\rho_{min},\rho_{max}).
-$$
+```
 
 ### 5) Optional scalar diffusion operator
 
 The library includes a second-order centered Laplacian diffusion operator:
 
-$$
+```math
 \mathcal{D}(\phi)=\nu\left(\frac{\phi_{i+1}-2\phi_i+\phi_{i-1}}{\Delta x^2} + \frac{\phi_{k+1}-2\phi_k+\phi_{k-1}}{\Delta z^2}\right).
-$$
+```
 
 ### 6) Hydrostatic pressure integration
 
 Hydrostatic pressure uses vertical integration with top reference $p_h=0$:
 
-$$
+```math
 \frac{\partial p_h}{\partial z}=-\rho g,
-$$
+```
 
 implemented discretely as
 
-$$
+```math
 p_{h,k}=p_{h,k+1}+\frac{1}{2}(\rho_{k+1}+\rho_k)g\Delta z,
-$$
+```
 
 integrated from the top cell downward.
 
@@ -160,9 +160,9 @@ integrated from the top cell downward.
 
 The projection step solves
 
-$$
-\nabla^2 p' = \frac{\rho_0}{\Delta t}\nabla\cdot\mathbf{u}^*.
-$$
+```math
+\nabla^2 p' = \frac{\rho_0}{\Delta t}\nabla\cdot\mathbf{u}^{\ast}.
+```
 
 Two implementations are available:
 
@@ -171,9 +171,9 @@ Two implementations are available:
 
 Both implementations remove RHS mean and pressure-correction mean (gauge handling):
 
-$$
+```math
 \mathrm{mean}(\mathrm{RHS})\to 0,\qquad \mathrm{mean}(p')\to 0.
-$$
+```
 
 For the sparse branch, one row is pinned to avoid singularity (gauge fixation).
 
@@ -181,23 +181,23 @@ For the sparse branch, one row is pinned to avoid singularity (gauge fixation).
 
 The free surface is updated from depth-integrated provisional transport $\hat U$:
 
-$$
+```math
 \eta_t + \partial_x U = 0,
 \qquad
 U=\int u\,dz.
-$$
+```
 
 The implemented tridiagonal Helmholtz-like update uses
 
-$$
+```math
 \alpha = \frac{gH\Delta t^2}{\Delta x^2},
-$$
+```
 
 with interior coefficients equivalent to
 
-$$
+```math
 -\alpha\eta_{i-1}^{n+1} + (1+2\alpha)\eta_i^{n+1} - \alpha\eta_{i+1}^{n+1} = \eta_i^n - \Delta t\,\partial_x\hat U_i,
-$$
+```
 
 and one-sided edge coefficients at boundaries.
 
@@ -210,73 +210,73 @@ Implemented boundary behavior includes:
 3. Bottom vertical velocity reconstruction anchored at $w_{bottom}=0$.
 4. Top kinematic enforcement by replacement:
 
-$$
+```math
 w_{top} \leftarrow \frac{\eta^{n+1}-\eta^n}{\Delta t}.
-$$
+```
 
 ### 10) Stabilization and control methods
 
 Rayleigh damping on provisional velocity:
 
-$$
-u^* \leftarrow (1-r\Delta t)u^*.
-$$
+```math
+u^{\ast} \leftarrow (1-r\Delta t)u^{\ast}.
+```
 
 Froude limiter (if enabled):
 
-$$
-\mathbf{u}^* \leftarrow \mathbf{u}^*\cdot \frac{Fr_{max}}{Fr^*},\quad \text{if } Fr^*>Fr_{max}.
-$$
+```math
+\mathbf{u}^{\ast} \leftarrow \mathbf{u}^{\ast}\cdot \frac{Fr_{max}}{Fr^{\ast}},\quad \text{if } Fr^{\ast}>Fr_{max}.
+```
 
 with
 
-$$
+```math
 Fr = \frac{\max|u|}{\sqrt{g'H}},\qquad g'=g\,\frac{\rho_{max}-\rho_{min}}{\rho_0}.
-$$
+```
 
 Wind stress forcing at the top $u$ row:
 
-$$
+```math
 \Delta u_{wind}=\Delta t\,\frac{\tau_x}{\rho_0\Delta z}.
-$$
+```
 
 Wind-driven near-surface density exchange (conservative two-layer mixing):
 
-$$
+```math
 \gamma = \min\!\left(\max\!\left(\frac{K_z\Delta t}{\Delta z^2},0\right),0.5\right),
-$$
+```
 
-$$
+```math
 \rho_{top}\leftarrow \rho_{top}-\gamma(\rho_{top}-\rho_{below}),
 \qquad
 \rho_{below}\leftarrow \rho_{below}+\gamma(\rho_{top}-\rho_{below}).
-$$
+```
 
 ### 11) Conservative density-mass correction within bounds
 
 After advection/mixing, constituent mass is nudged to initial mass target while preserving density bounds via slack-weight redistribution:
 
-$$
+```math
 \Delta M = M_{target}-M_{current},
 \qquad
 \Delta\rho_{cell}=\frac{\Delta M}{\Delta x\Delta z}.
-$$
+```
 
 Using slack
 
-$$
+```math
 s =
 \begin{cases}
 \rho_{max}^{init}-\rho, & \Delta M>0 \\
 \rho-\rho_{min}^{init}, & \Delta M<0
 \end{cases}
-$$
+```
 
 the update is
 
-$$
+```math
 \rho \leftarrow \rho + \Delta\rho_{cell}\,\frac{s}{\sum s},
-$$
+```
 
 then clamped to $[\rho_{min}^{init},\rho_{max}^{init}]$.
 
@@ -314,32 +314,32 @@ the top layer has $h=\Delta z+\eta$, and the free surface is a material boundary
 1. Face thickness (old level): $h^{n}_{i+1/2}=\Delta z+\tfrac12(\eta^n_i+\eta^n_{i+1})$ (`top_layer_face_thickness!`).
 2. Semi-implicit free surface (`solve_variable_thickness!`), same thicknesses in the right-hand side and the matrix:
 
-$$
+```math
 \eta_i^{n+1}-a_{i+1}\left(\eta_{i+1}^{n+1}-\eta_i^{n+1}\right)+a_i\left(\eta_i^{n+1}-\eta_{i-1}^{n+1}\right)=\eta_i^n-\Delta t\,\frac{\hat U_{i+1}-\hat U_i}{\Delta x},
-$$
+```
 
-$$
+```math
 \hat U_i=\Delta z\sum_{k<n_z}\hat u_{k,i}+h^n_i\,\hat u_{n_z,i},\qquad
 a_i=\frac{g\Delta t^2}{\Delta x^2}\left((n_z-1)\Delta z+h^n_i\right),
-$$
+```
 
 with $a=0$ at the boundary faces; the boundary-face values of $\hat u$ are set to the boundary condition first, so the solve sees the
 transport the final velocities have. Then $u^{n+1}=\hat u-g\Delta t\,\partial_x\eta^{n+1}$ in every layer, which gives
 $\eta^{n+1}-\eta^n=-\Delta t\sum_k\partial_x(h_k u_k^{n+1})$ exactly.
 3. Continuity: layers below the top layer as before, $w_{k+1}=w_k-\Delta z\,(\partial_x u)_k$; the top layer closes its own budget
 
-$$
+```math
 \frac{\partial\eta}{\partial t}+\frac{\partial}{\partial x}\left(h\,u_{n_z}\right)=w_{n_z},
-$$
+```
 
 so $w_{n_z}=\eta_t+\partial_x(h u_{n_z})$. `last_kinematic_mismatch` now measures the residual of this identity (round-off level). The
 stored surface value $w_{top}=\eta_t$ is unchanged.
 4. Density (`advect_density_upwind_top_layer!`): first-order upwind for the layers below the top layer; the top layer uses the
 thickness-integrated budget
 
-$$
+```math
 \rho^{n+1}_{top}=\frac{h^n\rho^n_{top}-\Delta t\left(\partial_x(h^n u\rho)-w_{n_z}\rho_{bot}\right)}{h^{n+1}},\qquad h^{n+1}=\Delta z+\eta^{n+1},
-$$
+```
 
 which preserves a uniform density exactly and conserves $\sum\rho h\,\Delta x$ to round-off. The constituent mass, the mass
 correction (section 11) and the diagnostics use the actual cell volumes.
@@ -491,12 +491,12 @@ Purpose: verify staggered-array storage layout for $u$, $w$, $p$, $\rho$, and $\
 
 Numerical basis: C-grid style staggering requires:
 
-$$
+```math
 u \in \mathbb{R}^{n_z \times (n_x+1)},\quad
 w \in \mathbb{R}^{(n_z+1) \times n_x},\quad
 p,\rho \in \mathbb{R}^{n_z \times n_x},\quad
 \eta \in \mathbb{R}^{n_x}.
-$$
+```
 
 Validation section: shape consistency ensures discrete divergence/gradient operators are conformable.
 
@@ -506,11 +506,11 @@ Purpose: verify centered gradient operators and combined divergence structure.
 
 Reference equations:
 
-$$
+```math
 \nabla_h p = \left(\frac{\partial p}{\partial x}, \frac{\partial p}{\partial z}\right),
 \qquad
 \nabla \cdot \mathbf{u} = \frac{\partial u}{\partial x} + \frac{\partial w}{\partial z}.
-$$
+```
 
 Validation section: for a linear $p(x)$, discrete $\partial p/\partial x$ is constant and $\partial p/\partial z=0$.
 
@@ -520,9 +520,9 @@ Purpose: confirm density advection operator vanishes for spatially uniform trace
 
 Reference equation:
 
-$$
+```math
 \nabla\cdot(\rho\mathbf{u}) = \rho\,\nabla\cdot\mathbf{u} + \mathbf{u}\cdot\nabla\rho.
-$$
+```
 
 For constant $\rho$ and divergence-free velocity, RHS is zero.
 
@@ -534,9 +534,9 @@ Purpose: verify closed-box conservative transport of constituent mass.
 
 Reference invariant:
 
-$$
+```math
 M_\rho = \int_\Omega \rho\, d\Omega
-$$
+```
 
 must remain constant with impermeable boundaries.
 
@@ -548,9 +548,9 @@ Purpose: validate hydrostatic pressure solver monotonicity and free-surface refe
 
 Reference equation:
 
-$$
+```math
 \frac{\partial p_h}{\partial z} = -\rho g,
-$$
+```
 
 with pressure fixed at the top cell in the implemented convention.
 
@@ -562,10 +562,10 @@ Purpose: ensure barotropic free-surface solve preserves constant elevation when 
 
 Reference equation:
 
-$$
+```math
 \frac{\partial \eta}{\partial t} + \frac{\partial U}{\partial x}=0,
 \quad U=\int u\,dz.
-$$
+```
 
 Validation section: if $U=0$, then $\eta$ remains unchanged.
 
@@ -575,9 +575,9 @@ Purpose: short-run system conservation and boundedness checks.
 
 Checked invariants:
 
-$$
+```math
 \Delta V \approx 0, \quad \Delta M_\rho \approx 0, \quad \Phi_{\partial\Omega} \approx 0.
-$$
+```
 
 Validation section: includes lower/upper bounds against initial density extrema.
 
@@ -587,9 +587,9 @@ Purpose: verify finite positive internal Froude diagnostic.
 
 Reference scaling:
 
-$$
+```math
 Fr = \frac{U}{c_i}, \quad c_i \sim \sqrt{g' H}.
-$$
+```
 
 Validation section: positivity and finiteness in stratified flow state.
 
@@ -599,11 +599,11 @@ Purpose: check zero net normal flux for streamfunction-generated closed flow.
 
 Reference identity:
 
-$$
+```math
 \mathbf{u} = \left(\frac{\partial \psi}{\partial z}, -\frac{\partial \psi}{\partial x}\right)
 \Rightarrow
 \nabla\cdot\mathbf{u}=0.
-$$
+```
 
 Validation section: integrated boundary-normal flux is near zero.
 
@@ -613,9 +613,9 @@ Purpose: verify Poisson operator structure and zero-RHS pressure-correction beha
 
 Reference equation:
 
-$$
-\nabla^2 p' = \frac{\rho_0}{\Delta t}\nabla\cdot\mathbf{u}^*.
-$$
+```math
+\nabla^2 p' = \frac{\rho_0}{\Delta t}\nabla\cdot\mathbf{u}^{\ast}.
+```
 
 Validation section: matrix diagonals for boundary/topology and zero solution for divergence-free predictor field.
 
@@ -633,9 +633,9 @@ Purpose: ensure vectorized hydrostatic integration matches loop baseline exactly
 
 Reference equation:
 
-$$
+```math
 p_k = p_{k+1} + \frac{1}{2}(\rho_{k+1}+\rho_k)g\Delta z.
-$$
+```
 
 Validation section: elementwise equality at tight absolute/relative tolerances.
 
@@ -645,9 +645,9 @@ Purpose: confirm buoyancy sign convention.
 
 Reference equation:
 
-$$
+```math
 b = -g\frac{\rho-\rho_{ref}}{\rho_{ref}}.
-$$
+```
 
 Validation section: heavy parcels produce negative buoyancy, light positive.
 
@@ -657,9 +657,9 @@ Purpose: ensure pressure decomposition consistency.
 
 Reference relation:
 
-$$
+```math
 p = p_h + p'.
-$$
+```
 
 Validation section: reconstructed total pressure equals model stored pressure.
 
@@ -669,9 +669,9 @@ Purpose: verify limiter constrains Froude to configured maximum.
 
 Reference policy:
 
-$$
+```math
 Fr_{new} \le Fr_{max}.
-$$
+```
 
 Validation section: tracks maximum diagnostic Froude through run.
 
@@ -681,9 +681,9 @@ Purpose: enforce requested geometric discretization.
 
 Validation section:
 
-$$
+```math
 \Delta x = L/n_x,\quad \Delta z = H/n_z.
-$$
+```
 
 ### test_requested_salinity_based_initial_densities
 
@@ -711,9 +711,9 @@ Purpose: enforce kinematic free-surface closure.
 
 Reference condition:
 
-$$
+```math
 w_{top} = \frac{\partial \eta}{\partial t}.
-$$
+```
 
 Validation section: compares reconstructed top vertical velocity to finite-difference $\eta_t$ each step.
 
@@ -725,11 +725,11 @@ top-closure residuals at machine-precision scale.
 
 Reference conditions:
 
-$$
+```math
 \frac{\partial u}{\partial x} + \frac{\partial w}{\partial z} = 0,
 \qquad
 w_{top} = \frac{\partial \eta}{\partial t}.
-$$
+```
 
 Validation section: tracks maximum domain divergence, top-row divergence, and kinematic mismatch over multiple steps, with strict residual thresholds. The analogous identity for the variable top layer (a different closure in the top row; see section 13) is `test_verify_variable_top_layer_closes_kinematic_and_volume_budgets`.
 
@@ -745,9 +745,9 @@ Purpose: verify zero self-advection tendency for uniform velocity fields.
 
 Reference equation:
 
-$$
+```math
 \mathcal{A}(\mathbf{u}) = (\mathbf{u}\cdot\nabla)\mathbf{u} = 0
-$$
+```
 
 for spatially uniform $\mathbf{u}$.
 
@@ -771,9 +771,9 @@ Purpose: ensure pressure-gradient sign from baroclinic density contrast is physi
 
 Reference relation:
 
-$$
+```math
 a_x = -\frac{1}{\rho_0}\frac{\partial p}{\partial x}.
-$$
+```
 
 Validation section: gradient sign and acceleration sign in expected direction.
 
@@ -791,11 +791,11 @@ Purpose: verify wind-stress forcing produces surface transport and mixing.
 
 Reference scalings:
 
-$$
+```math
 \frac{\partial u}{\partial t} \approx \frac{\tau_x}{\rho_0\Delta z},
 \qquad
 \text{wind-driven mixing} \Rightarrow \downarrow\,\mathrm{Var}_z(\rho).
-$$
+```
 
 Validation section: windy run must increase top velocity and reduce interface sharpness/vertical variance while conserving constituent mass. Duration (6 s) and wind stress were picked so the genuine, advection-driven interior mixing signal clears the margins with headroom under the (default) variable top layer; with the legacy fixed top face a moving surface's zero top-face flux acted as an additional, non-physical density source that used to dominate this test's signal by roughly an order of magnitude at a much shorter duration (see section 13) — this test result is itself evidence for the section 13 defect, not just a regression guard.
 
@@ -895,9 +895,9 @@ Purpose: verify the derivation of the variable-thickness free-surface system.
 
 Identity: with the final velocities $u^{n+1}=\hat u-g\Delta t\,\partial_x\eta^{n+1}$,
 
-$$
+```math
 \eta^{n+1}_i-\eta^n_i+\Delta t\,\frac{U^{n+1}_{i+1}-U^{n+1}_i}{\Delta x}=0,\qquad U_i=\Delta z\sum_{k<n_z}u_{k,i}+h^n_iu_{n_z,i},
-$$
+```
 
 for random $\hat u$ and a surface within $\pm30\%$ of the top layer; residual at round-off level.
 
