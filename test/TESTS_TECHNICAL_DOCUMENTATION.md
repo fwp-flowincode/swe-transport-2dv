@@ -225,7 +225,7 @@ u^{\ast} \leftarrow (1-r\Delta t)u^{\ast}.
 Froude limiter (if enabled):
 
 ```math
-\mathbf{u}^{\ast} \leftarrow \mathbf{u}^{\ast}\cdot \frac{Fr_{max}}{Fr^{\ast}},\quad \text{if } Fr^{\ast}>Fr_{max}.
+\mathbf{u}^{\ast} \leftarrow \mathbf{u}^{\ast}\cdot \frac{Fr_{max}}{Fr^{\ast}},\quad \text{if } Fr^{\ast}\gt Fr_{max}.
 ```
 
 with
@@ -267,8 +267,8 @@ Using slack
 ```math
 s =
 \begin{cases}
-\rho_{max}^{init}-\rho, & \Delta M>0 \\
-\rho-\rho_{min}^{init}, & \Delta M<0
+\rho_{max}^{init}-\rho, & \Delta M\gt 0 \\
+\rho-\rho_{min}^{init}, & \Delta M\lt 0
 \end{cases}
 ```
 
@@ -308,7 +308,7 @@ surface (the hydrostatic mode) a zero top flux is instead a source of $\rho\,\et
 $\rho\approx 10^3\,\mathrm{kg/m^3}$ makes it large; this was the original motivation for section 13 (see
 `test_verify_variable_top_layer_uniform_density_stays_uniform` and the wind-shear test note below).
 
-`variable_top_layer=true` (hydrostatic mode; the default) lets the top layer follow the surface: layers $k<n_z$ keep $\Delta z$,
+`variable_top_layer=true` (hydrostatic mode; the default) lets the top layer follow the surface: layers $k\lt n_z$ keep $\Delta z$,
 the top layer has $h=\Delta z+\eta$, and the free surface is a material boundary (zero flux through it). Per step:
 
 1. Face thickness (old level): $h^{n}_{i+1/2}=\Delta z+\tfrac12(\eta^n_i+\eta^n_{i+1})$ (`top_layer_face_thickness!`).
@@ -319,7 +319,7 @@ the top layer has $h=\Delta z+\eta$, and the free surface is a material boundary
 ```
 
 ```math
-\hat U_i=\Delta z\sum_{k<n_z}\hat u_{k,i}+h^n_i\,\hat u_{n_z,i},\qquad
+\hat U_i=\Delta z\sum_{k\lt n_z}\hat u_{k,i}+h^n_i\,\hat u_{n_z,i},\qquad
 a_i=\frac{g\Delta t^2}{\Delta x^2}\left((n_z-1)\Delta z+h^n_i\right),
 ```
 
@@ -896,7 +896,7 @@ Purpose: verify the derivation of the variable-thickness free-surface system.
 Identity: with the final velocities $u^{n+1}=\hat u-g\Delta t\,\partial_x\eta^{n+1}$,
 
 ```math
-\eta^{n+1}_i-\eta^n_i+\Delta t\,\frac{U^{n+1}_{i+1}-U^{n+1}_i}{\Delta x}=0,\qquad U_i=\Delta z\sum_{k<n_z}u_{k,i}+h^n_iu_{n_z,i},
+\eta^{n+1}_i-\eta^n_i+\Delta t\,\frac{U^{n+1}_{i+1}-U^{n+1}_i}{\Delta x}=0,\qquad U_i=\Delta z\sum_{k\lt n_z}u_{k,i}+h^n_iu_{n_z,i},
 ```
 
 for random $\hat u$ and a surface within $\pm30\%$ of the top layer; residual at round-off level.
