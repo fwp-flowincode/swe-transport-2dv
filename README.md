@@ -1,44 +1,70 @@
 SweTransport2DV
-=================
+===============
 
-2DV (vertical plane) shallow-water and transport model with hydrostatic and
-non-hydrostatic modes, in Julia. It computes reference solutions for cases
-without an analytical solution, e.g. the lock exchange (gravity current
-after removal of a gate between two fluids of different density).
+A 2DV (vertical x-z plane) model for density-driven and free-surface flows, written in Julia.
+It is meant for problems involving transport, mixing, stratification and waves:
+- gravity currents and exchange flows, e.g. the lock exchange;
+- stratified shear and its instabilities (Kelvin-Helmholtz, Rayleigh-Taylor);
+- buoyant plumes and jets;
+- internal and surface waves (internal seiches, dam breaks);
+- wind-driven transport and mixing;
+- flow through flexible vegetation.
 
-Example: lock exchange
-----------------------
+It provides reference solutions for cases without an analytical solution, and it is a
+test bed for numerical choices such as advection schemes, time steps, the hydrostatic
+approximation and free-surface treatment.
 
-Density 100 s after the removal of the gate between heavy (yellow) and light
-(purple) water, 30 m x 4 m channel, dx = dz = 0.02 m, inviscid (nu = 0), Rayleigh
-damping r = 0.002 1/s, dt = 0.01 s (non-hydrostatic) and 0.002 s (hydrostatic)
-(`experiments/lock_exchange/plot_density_hydro_vs_nonhydro_100s.jl`).
+Model
+-----
 
-Non-hydrostatic: Kelvin-Helmholtz billows on the interface behind the front.
+- Free-surface shallow-water equations in the vertical plane with a transported density field
+  (Boussinesq, reference density rho0).
+- Hydrostatic or non-hydrostatic pressure. The non-hydrostatic correction uses a pressure
+  projection, with a spectral (DCT) or sparse solver.
+- Semi-implicit free surface (Casulli & Cheng 1992 type).
+- Momentum advection: second-order TVD (MUSCL/MC limiter) or first-order upwind.
+- Density advection: conservative upwind.
+- Optional extras:
+  - molecular viscosity;
+  - mixing-length turbulence;
+  - wind stress and wind-induced mixing;
+  - Rayleigh damping and a Froude limiter for numerical stabilisation;
+  - a flexible-vegetation (stem) model.
+- Diagnostics: water volume, constituent mass, boundary fluxes, CFL numbers, reduced gravity and
+  internal wave speed. Plots and animations are written to `output_barotropic/`.
 
-![Lock exchange, non-hydrostatic, animation](docs/images/lock_exchange_nonhydro.gif)
+Experiments
+-----------
 
-![Lock exchange, non-hydrostatic, t = 100 s](docs/images/lock_exchange_nonhydro_t100s.png)
+Each experiment has its own folder under `experiments/`. Where available, the folder holds a
+README with a description, settings and figures in its `figures/` subfolder.
 
-Hydrostatic: no billows; steep, near-vertical fronts and a sloping, diffuse
-interface between them.
+| Experiment | Folder | Topic |
+|---|---|---|
+| [Lock exchange](experiments/lock_exchange/README.md) | `lock_exchange/` | gravity current, front speed, Kelvin-Helmholtz billows, hydrostatic vs. non-hydrostatic |
+| Rayleigh-Taylor instability | `rayleigh_taylor/` | heavy over light fluid, overturning and mixing |
+| Kelvin-Helmholtz instability | `kelvin_helmholtz/` | stratified shear layer |
+| Buoyant plumes | `plumes/` | rising and sinking plumes |
+| Jet | `jet/` | impulse jet, shear |
+| Internal seiche | `internal_seiche/` | two-layer standing internal wave, period |
+| Surface dam break | `surface_dam_break/` | barotropic bore and rarefaction, front speed |
+| Wind shear | `wind_shear/` | wind-driven surface transport and mixing |
+| Vegetation | `vegetation/` | uniform, oscillating and density-driven flow through flexible stems |
+| Validation | `validation/` | comparisons with analytical or semi-analytical references |
 
-![Lock exchange, hydrostatic, t = 100 s](docs/images/lock_exchange_hydro_t100s.png)
+<a href="experiments/lock_exchange/README.md"><img src="experiments/lock_exchange/figures/lock_exchange_nonhydro.gif" alt="Lock exchange, non-hydrostatic" width="560"></a>
 
-Julia 1:1 port of the current Python package in 2dv_swe_transport, including:
-- State, diagnostics, physics, pressure, visualization, and model driver.
-- Matching regression tests (ported from test_model.py).
-- Structured experiment suites (lock exchange, RTI, plumes, jet, seiche, dam-break, KH).
-- Backward-compatible legacy top-level experiment wrappers.
+*Lock exchange, non-hydrostatic, 1500 x 200 cells: Kelvin-Helmholtz billows behind the gravity-current
+fronts (see the [lock-exchange README](experiments/lock_exchange/README.md)).*
 
-Folder Layout
+Folder layout
 -------------
-- src/: Julia package source.
-- test/runtests.jl: full translated test suite.
-- experiments/: translated benchmark/profile/run scripts.
-- docs/images/: illustrations in this README.
-- analysis/lock_exchange/: Python tools: bulk reference values of the lock exchange and
-  evaluation of model runs (see its README).
+- `src/`: Julia package source.
+- `test/`: test suite (`runtests.jl`) and technical documentation (`TESTS_TECHNICAL_DOCUMENTATION.md`).
+- `experiments/`: one folder per experiment (scripts, README, `figures/`), plus `validation/`,
+  `benchmarks/`, `common/` and `maintenance/`.
+- `analysis/`: Python evaluation tools, e.g. `analysis/lock_exchange/` (bulk reference values and
+  evaluation of model runs, see its README).
 
 Install
 -------
@@ -58,12 +84,13 @@ julia --project=. -e "using Pkg; Pkg.test()"
 Technical test documentation:
 - `test/TESTS_TECHNICAL_DOCUMENTATION.md`
 
-Run translated experiments
---------------------------
+Run experiments
+---------------
 
 ```pwsh
 julia --project=. experiments/benchmarks/bench_speedup_dx001_vs_dx002.jl
 julia --project=. experiments/benchmarks/profile_step_dx002.jl
+julia --project=. experiments/lock_exchange/plot_density_hydro_vs_nonhydro_100s.jl
 julia --project=. experiments/lock_exchange/run_dx001_dt005_anim.jl
 julia --project=. experiments/lock_exchange/run_dx002_dt001_100s.jl
 julia --project=. experiments/lock_exchange/run_dx002_dt001_100s_anim.jl
@@ -78,7 +105,7 @@ julia --project=. experiments/kelvin_helmholtz/run_kelvin_helmholtz_dt001_30s_an
 julia --project=. experiments/wind_shear/run_wind_shear_dt001_30s_anim.jl
 julia --project=. experiments/vegetation/run_uniform_flow_with_flexible_vegetation.jl
 julia --project=. experiments/vegetation/run_oscillating_flow_with_flexible_vegetation.jl
-julia --project=. experiments/vegetation/run_wave_damping_with_flexible_vegetation.jl
+julia --project=. experiments/vegetation/run_uniform_flow_with_stiff_short_vegetation.jl
 julia --project=. experiments/vegetation/run_lock_exchange_with_flexible_vegetation.jl
 julia --project=. experiments/validation/validate_surface_dam_break_front_speed.jl
 julia --project=. experiments/validation/validate_internal_seiche_period.jl
