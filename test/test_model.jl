@@ -235,7 +235,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
             nt=1,
             use_hydrostatic=false,
             periodic_x=true,
-            pressure_solver_method="spectral",
+            pressure_solver_method="sparse",
             rayleigh_damping=0.0,
             apply_froude_limiter=false,
             write_plots=false,
