@@ -15,12 +15,13 @@ Density 100 s after the removal of the gate between heavy (yellow) and light
 - 30 m x 4 m channel, gate at 15 m, rho1 = 1000.722 kg/m3, rho2 = 999.972 kg/m3;
 - `tvd2` momentum and density advection;
 - inviscid (nu = 0), Rayleigh damping r = 0.002 1/s;
-- Froude limiter at 0.9: it rescales the velocity field when max|u| > 0.9 sqrt(g' H) = 0.154 m/s. In the
-  non-hydrostatic runs it is active from about 37 s on, in 16 of 100 one-second samples, and caps the
-  velocity in the billows;
+- no Froude limiter. With the limiter at 0.9 (it rescales the whole velocity field when
+  max|u| > 0.9 sqrt(g' H) = 0.154 m/s) the non-hydrostatic run was limited in 16 of 100 one-second samples,
+  the billow velocities were capped and both fronts were slower (0.933 U instead of 0.963 U). Without it the
+  run is stable (max CFL 0.15); max|u| reaches 0.183 m/s in the billows;
 - non-hydrostatic: 1500 x 200 grid (dx = dz = 0.02 m), dt = 0.01 s;
 - hydrostatic: 600 x 80 grid (dx = dz = 0.05 m), dt = 0.01 s. No billows develop that would need the
-  finer grid. The front speed is 2 % above the 1500 x 200 result (0.959 vs. 0.939 U).
+  finer grid. The front speed is 2 % above an earlier hydrostatic run on 1500 x 200 (0.959 vs. 0.939 U).
 
 Script: `plot_density_hydro_vs_nonhydro_100s.jl`.
 
@@ -37,15 +38,15 @@ diffuse interface between them.
 
 **Density transport scheme.** The same non-hydrostatic run with first-order upwind (`upwind1`)
 density transport. The interfaces are smeared and the fine structure inside the billows is lost:
-the area of mixed water (heavy-water fraction between 0.05 and 0.95) is 13.1 m² against 6.6 m²
-with `tvd2`. The fronts move by less than 0.1 m.
+the area of mixed water (heavy-water fraction between 0.05 and 0.95) is 14.0 m² against 7.4 m²
+with `tvd2`. The fronts move by about 0.1 m.
 
 ![Lock exchange, non-hydrostatic, upwind1 density transport, t = 100 s](figures/lock_exchange_nonhydro_upwind1_transport_t100s.png)
 
 | t = 100 s | heavy front (bottom) | light front (top) | mean front speed |
 |---|---|---|---|
-| non-hydrostatic, `tvd2` transport | 22.95 m | 6.95 m | 0.933 U |
-| non-hydrostatic, `upwind1` transport | 22.89 m | 6.99 m | 0.927 U |
+| non-hydrostatic, `tvd2` transport | 23.21 m | 6.69 m | 0.963 U |
+| non-hydrostatic, `upwind1` transport | 23.09 m | 6.79 m | 0.950 U |
 | hydrostatic, `tvd2` transport | 23.23 m | 6.78 m | 0.959 U |
 
 U = 0.5 sqrt(g' H) = 0.0858 m/s; the mean speed is the average front displacement from the gate divided by 100 s

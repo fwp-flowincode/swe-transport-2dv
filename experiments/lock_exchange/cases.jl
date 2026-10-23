@@ -20,10 +20,11 @@ Model configuration of the lock exchange in the default 30 m x 4 m channel (gate
 time step `dt` (s) and simulated time `t_end` (s). Keyword arguments override or add `ModelConfig` fields.
 
 Settings (case description): inviscid (nu = 0), reference density rho0 = mean of the two densities, Rayleigh damping
-LE_RAYLEIGH_DAMPING_PER_S, `tvd2` momentum and density advection, Froude limiter at 0.9, spectral pressure solver.
-The limiter rescales the whole velocity field when max|u| > 0.9 sqrt(g' H) = 0.154 m/s. In the non-hydrostatic runs
-(1500 x 200 and 3000 x 400, `tvd2` transport) it is active from about 37 s on, in 16 of 100 one-second samples, where
-it caps the velocity in the billows (measured from the production-run logs). The hydrostatic mode uses the variable-thickness top layer (library
+LE_RAYLEIGH_DAMPING_PER_S, `tvd2` momentum and density advection, no Froude limiter, spectral pressure solver.
+WHY no Froude limiter: the limiter rescales the whole velocity field when max|u| > 0.9 sqrt(g' H) = 0.154 m/s. In the
+non-hydrostatic 1500 x 200 run it was active in 16 of 100 one-second samples (from ~37 s on), capped the billow
+velocities and slowed both fronts: mean front speed 0.933 U with the limiter, 0.963 U without. Without it the run is
+stable (max CFL 0.15, density within the initial range; max|u| = 0.183 m/s, Fr up to 1.07 in the billows). The hydrostatic mode uses the variable-thickness top layer (library
 default, set explicitly for clarity); the non-hydrostatic mode uses the fixed grid.
 Time step: U dt/min(dx, dz) <= 0.05 and, hydrostatic, |w| dt/dz <= 0.5 (time_step_bounds in
 ../../analysis/lock_exchange/lock_exchange.py), e.g. dt = 0.01 s non-hydrostatic on 1500 x 200, 0.005 s on 3000 x 400,
@@ -44,8 +45,7 @@ function lock_exchange_config(; use_hydrostatic::Bool, nx::Int, nz::Int, dt::Rea
         rho_left=LE_RHO_HEAVY,
         rho_right=LE_RHO_LIGHT,
         rho0=0.5 * (LE_RHO_HEAVY + LE_RHO_LIGHT),       # kg/m^3
-        apply_froude_limiter=true,
-        max_froude=0.9,
+        apply_froude_limiter=false,
         pressure_solver_method="spectral",
         kwargs...,
     )

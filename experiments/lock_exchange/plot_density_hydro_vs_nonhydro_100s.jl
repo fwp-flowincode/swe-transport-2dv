@@ -1,8 +1,8 @@
 # Lock-exchange density field in the xz-plane at t = 100 s: hydrostatic vs. non-hydrostatic,
 # tvd2 vs. first-order upwind (upwind1) momentum advection, and upwind1 vs. tvd2 density transport.
 #
-# All runs use an identical configuration (grid, damping, Froude limiter, pressure-solver
-# setting); only `use_hydrostatic`, `momentum_advection_scheme`, `transport_advection_scheme` and the
+# All runs use the shared settings of cases.jl (damping, no Froude limiter, pressure-solver setting);
+# only `use_hydrostatic`, `momentum_advection_scheme`, `transport_advection_scheme`, the grid and the
 # time step differ, as listed in CASES. Each run writes one stand-alone density heatmap (PNG) at
 # t = T_END_S with identical colour limits, so the figures are directly comparable.
 #
