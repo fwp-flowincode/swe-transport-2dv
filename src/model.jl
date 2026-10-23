@@ -24,6 +24,7 @@ Base.@kwdef mutable struct ModelConfig
     # WHY "upwind1" default: keeps the results of the validated cases unchanged.
     transport_advection_scheme::String = "upwind1"
     use_hydrostatic::Bool = true
+    # Periodic lateral domain; requires the sparse pressure solver and fixed-thickness layers.
     periodic_x::Bool = false
     pressure_solver_method::String = "spectral"
     write_plots::Bool = true
@@ -689,9 +690,6 @@ function clear_x_inflow_outflow!(model::Model)
 end
 
 function _check_model_config(cfg::ModelConfig)
-    if cfg.periodic_x && cfg.pressure_solver_method != "sparse"
-        throw(ArgumentError("periodic_x=true requires pressure_solver_method=\"sparse\""))
-    end
     if cfg.periodic_x && use_variable_top_layer(cfg)
         throw(ArgumentError("periodic_x=true is not supported with the variable top layer"))
     end
@@ -930,6 +928,9 @@ function step_forward!(model::Model)
     ws = model.ws
 
     _check_model_config(cfg)   # the flags are mutable after construction
+    if cfg.periodic_x != model.pressure_correction_solver.periodic_x
+        throw(ArgumentError("periodic_x cannot be changed after Model construction"))
+    end
     variable_top = use_variable_top_layer(cfg)
 
     copyto!(ws.eta_old, st.eta)
@@ -1452,6 +1453,9 @@ function solve_variable_thickness!(
     eta_old::AbstractVector{<:Real},
     h_top_face::AbstractVector{<:Real},
 )
+    if solver.periodic_factorization !== nothing
+        throw(ArgumentError("solve_variable_thickness! does not support periodic_x=true"))
+    end
     nx = solver.nx
     nz = size(u_hat, 1)
     dx = solver.dx

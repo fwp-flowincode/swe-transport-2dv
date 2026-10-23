@@ -19,13 +19,14 @@ cfg = ModelConfig(
     periodic_x=true,
     momentum_advection_scheme="tvd2",
     rayleigh_damping=0.001,
-    apply_froude_limiter=true,
+    # The shear's initial internal Froude number exceeds 0.9; limiting it would suppress the KH instability.
+    apply_froude_limiter=false,
     max_froude=0.9,
     write_plots=true,
     write_animation=true,
     write_pressure_buoyancy_diagnostics=true,
     save_interval_seconds=0.2,
-    pressure_solver_method="sparse",
+    pressure_solver_method="spectral",
     output_dir=joinpath("output_barotropic", "kelvin_helmholtz"),
 )
 
