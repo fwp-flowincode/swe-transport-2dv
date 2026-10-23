@@ -1,33 +1,29 @@
+# Lock exchange, non-hydrostatic, 3000 x 400 cells (dx = dz = 0.01 m), dt = 0.005 s, 100 s production run with the
+# built-in run! outputs (final-state plot, animation every 1 s, pressure/buoyancy diagnostics in
+# output_barotropic/lock_exchange/). Settings and references: cases.jl; documented figures: README.md.
+#
+# WHY dt = 0.005 s (formerly 0.05 s): the time-step rule U dt/min(dx, dz) <= 0.05 gives dt <= 0.0058 s on dx = 0.01 m.
+
 using SweTransport2DV
 using Printf
 
 include(joinpath(@__DIR__, "..", "common", "helpers.jl"))
+include(joinpath(@__DIR__, "cases.jl"))
 
-# Lock-exchange gravity-current references:
-# - Benjamin (1968), J. Fluid Mech., doi:10.1017/S0022112068002708
-# - Shin et al. (2004), J. Fluid Mech., doi:10.1017/S0022112004009172
-# - Jankowski dissertation notes in ../../literature/lock_exchange_jaceks_diss.md
-
-cfg = ModelConfig(
+cfg = lock_exchange_config(;
+    use_hydrostatic=false,
     nx=3000,
     nz=400,
-    dt=0.05,
-    nt=400,
-    use_hydrostatic=false,
-    momentum_advection_scheme="tvd2",
-    rayleigh_damping=0.01,
-    apply_froude_limiter=true,
-    max_froude=0.9,
+    dt=0.005,
+    t_end=100.0,
     write_plots=true,
     write_animation=true,
     write_pressure_buoyancy_diagnostics=true,
-    pressure_solver_method="spectral",
+    save_interval_seconds=1.0,   # s, history and animation frame interval (101 frames; about 4 GB of history in memory)
     output_dir=joinpath("output_barotropic", "lock_exchange"),
 )
 
-gprime = cfg.g * (cfg.rho_left - cfg.rho_right) / cfg.rho0
-u_ref = 0.5 * sqrt(gprime * cfg.depth)
-@printf("Lock-exchange reference speed | g'=%.4e m/s^2 | U_ref=%.4f m/s\n", gprime, u_ref)
+@printf("Lock-exchange reference speed | U_ref=%.4f m/s\n", lock_exchange_reference_speed(cfg))
 
 t0 = time()
 model = Model(cfg)
@@ -36,5 +32,5 @@ t1 = time()
 
 tag = case_tag(cfg)
 outputs = copy_case_outputs!("lock_exchange", tag; output_dir=cfg.output_dir)
-@printf("CASE=lock_exchange_nonhydro_tvd2_dx0p01_dt0p05 FULL_WALL_SECONDS=%.2f\n", t1 - t0)
+@printf("CASE=lock_exchange_%s FULL_WALL_SECONDS=%.2f\n", tag, t1 - t0)
 print_case_outputs(outputs; title="Lock-exchange outputs")

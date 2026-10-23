@@ -93,7 +93,7 @@ Run experiments
 julia --project=. experiments/benchmarks/bench_speedup_dx001_vs_dx002.jl
 julia --project=. experiments/benchmarks/profile_step_dx002.jl
 julia --project=. experiments/lock_exchange/plot_density_hydro_vs_nonhydro_100s.jl
-julia --project=. experiments/lock_exchange/run_dx001_dt005_anim.jl
+julia --project=. experiments/lock_exchange/run_dx001_dt0005_100s_anim.jl
 julia --project=. experiments/lock_exchange/run_dx002_dt001_100s.jl
 julia --project=. experiments/lock_exchange/run_dx002_dt001_100s_anim.jl
 julia --project=. experiments/rayleigh_taylor/plot_rayleigh_taylor.jl
