@@ -1,22 +1,7 @@
 using Printf
 
-function case_tag(cfg)
-    mode_tag = cfg.use_hydrostatic ? "hydro" : "nonhydro"
-    scheme_tag = cfg.momentum_advection_scheme
-    return replace(
-        @sprintf(
-            "%s_%s_dt%.4f_L%.1f_H%.1f_dx%.3f_dz%.3f",
-            mode_tag,
-            scheme_tag,
-            cfg.dt,
-            cfg.length,
-            cfg.depth,
-            cfg.length / cfg.nx,
-            cfg.depth / cfg.nz,
-        ),
-        "." => "p",
-    )
-end
+# WHY: delegate to the package so that the tag always matches the file names written by run!.
+case_tag(cfg) = output_case_tag(cfg)
 
 function copy_case_outputs!(prefix::AbstractString, tag::AbstractString; output_dir::AbstractString="output_barotropic")
     final_src = joinpath(output_dir, "final_state_$(tag).png")

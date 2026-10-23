@@ -80,7 +80,7 @@ earlier ordering that had the free-surface solve AFTER the non-hydrostatic proje
    section 14).
 6. Enforce wall boundary values on $u$.
 7. Reconstruct $w$ from continuity and enforce top kinematic condition $w_{top}=\eta_t$.
-8. Advect density with conservative upwind fluxes.
+8. Advect density with conservative fluxes (`transport_advection_scheme`: `upwind1` or `tvd2`, section 4).
 9. Apply wind-driven surface mixing parameterization (if configured).
 10. Apply global conservative density-mass correction within bounds.
 11. Recompute final pressure fields ($p_h$ and optionally $p'=p-p_h$).
@@ -118,13 +118,37 @@ s_i = \mathrm{MC}(\Delta^-\phi_i,\Delta^+\phi_i),
 
 The face flux is then upwinded between $(\phi^L,\phi^R)$ using the face velocity sign.
 
-### 4) Density transport method
+### 4) Density transport method (`upwind1`, `tvd2`)
 
-Density is advanced by conservative first-order upwind fluxes:
+Density is advanced by one forward-Euler step of conservative face fluxes $F_f=v_f\,\rho_f$ on the C-grid velocities,
+with zero flux through all outer faces:
 
 ```math
 \rho^{n+1}=\rho^n-\Delta t\,\nabla\cdot(\rho\mathbf{u}).
 ```
+
+The face value $\rho_f$ is selected by `ModelConfig.transport_advection_scheme` (default `upwind1`, which reproduces the
+earlier results bit for bit):
+
+- `upwind1`: donor cell, $\rho_f=\rho_{upwind}$. Monotone for $C_x+C_z\le1$, with $C_x=|u|\Delta t/\Delta x$ and
+  $C_z=|w|\Delta t/\Delta z$.
+- `tvd2`: flux-limited Lax-Wendroff with the MC slope of the momentum `tvd2` scheme (section 3). For $v_f>0$ at face $i-1/2$,
+
+```math
+\rho_f=\rho_{i-1}+\tfrac12\,(1-C_f)\,s_{i-1},\qquad C_f=\frac{|v_f|\,\Delta t}{\Delta x},\qquad s_i=\mathrm{MC}(\Delta^-\rho_i,\Delta^+\rho_i),
+```
+
+  mirrored for $v_f<0$, with $s=0$ in the boundary cells. Unlike the momentum `tvd2` scheme it contains the time-correction
+  factor $(1-C_f)$. The reason is that the update is a single forward-Euler step: without that factor, MUSCL with forward
+  Euler is first order in time and TVD only for $C\le1/2$ in 1D; with it the scheme is second order in time and TVD up to
+  $C=1$ in 1D (MC lies in Sweby's TVD region $0\le\psi(r)\le\min(2r,2)$). The unsplit 2D update satisfies a local maximum
+  principle for $C_x+C_z\le1/2$ (each face coefficient is at most $C(2-C)\le2C$). It has no corner-transport
+  (cross-derivative) term, so for flow oblique to the grid the time error is $O(\Delta t\,|uw|\,\partial_{xz}\rho)$: first
+  order in time but second order in space. Measured L1 orders for a Gaussian at $C=0.4$: about 2.2 for grid-aligned flow,
+  1.0 for diagonal flow (error still about 4 times below `upwind1`), and 1.8 for diagonal flow at $C=0.02$.
+
+References: van Leer (1977) for the MC limiter; Sweby (1984), SIAM J. Numer. Anal. 21, 995-1011, for flux-limited
+Lax-Wendroff and its TVD region; LeVeque (2002), ch. 6.
 
 Optional bound-preserving clamping is applied during update:
 
@@ -334,7 +358,7 @@ $\eta^{n+1}-\eta^n=-\Delta t\sum_k\partial_x(h_k u_k^{n+1})$ exactly.
 
 so $w_{n_z}=\eta_t+\partial_x(h u_{n_z})$. `last_kinematic_mismatch` now measures the residual of this identity (round-off level). The
 stored surface value $w_{top}=\eta_t$ is unchanged.
-4. Density (`advect_density_upwind_top_layer!`): first-order upwind for the layers below the top layer; the top layer uses the
+4. Density (`advect_density_top_layer!`, face values from `transport_advection_scheme`, section 4): plain flux form for the layers below the top layer; the top layer uses the
 thickness-integrated budget
 
 ```math
@@ -480,6 +504,7 @@ not checked.
 - LeVeque (2002), *Finite Volume Methods for Hyperbolic Problems*.
 - Harten (1983), High resolution schemes for hyperbolic conservation laws.
 - van Leer (1977), Towards the ultimate conservative difference scheme (limiter framework).
+- Sweby (1984), High resolution schemes using flux limiters for hyperbolic conservation laws, SIAM J. Numer. Anal. 21, 995-1011.
 - Ferziger and Peric (2002), *Computational Methods for Fluid Dynamics*.
 - Press et al. (2007), *Numerical Recipes* (elliptic solves, transforms, tridiagonal systems).
 
@@ -940,6 +965,33 @@ $\omega=\pi\sqrt{gH}/L$, $T=2L/\sqrt{gH}$. The period is taken from the zero cro
 2.6e-4 for $n_x=10,20,40$; the test requires an observed order in $[1.6,2.4]$ on both grid pairs and an error below 2e-3 on the finest grid. The
 amplitude is tiny ($A=10^{-4}$ m): a finite-amplitude wave carries a crossing-time shift of about $0.15\,A/H$ that would mask the
 second-order error.
+
+### Density transport schemes (section 4)
+
+`test_verify_top_layer_density_transport_conserves_mass_and_constancy` (above) runs for both `upwind1` and `tvd2`.
+
+### test_verify_transport_tvd2_convergence_order_smooth_advection
+
+Analytical solution: with a uniform velocity $v$ the profile is translated, $\rho(x,T)=\rho_0(x-vT)$. A Gaussian ($\sigma=0.05$ m,
+1 m closed box, far from the walls) is advected along $x$ and, separately, along $z$ at a fixed Courant number of 0.4 on
+$n=100,200,400$ cells, so the L1 error measures the full space-time order. Required: `tvd2` order in $(1.8,2.6)$ on both grid
+pairs (measured 2.4, 2.2); `upwind1` order in $(0,1.1)$ (measured 0.64, 0.77, still pre-asymptotic); `upwind1` error more
+than 20 times the `tvd2` error on the finest grid (measured about 75).
+
+### test_verify_transport_tvd2_conservative_bounded_and_constancy
+
+A divergence-free cellular flow (from a streamfunction, zero normal velocity at the walls) at $C_x+C_z=0.45$ transports a
+lock-exchange step for 200 steps WITHOUT clamping. The constituent mass is conserved to round-off, no new extrema appear (local
+maximum principle), and the front is not smeared out (contrast check). A uniform density stays uniform, and the semi-discrete
+tendency (`dt = 0`) of a uniform density vanishes.
+
+### test_verify_model_runs_with_tvd2_transport_and_config_guards
+
+Full-model runs with `transport_advection_scheme="tvd2"`, with and without the variable top layer: constituent mass conserved
+and density within the initial bounds; the density differs from an `upwind1` run (contrast). An unknown scheme name raises
+`ArgumentError`, `copy_config` carries the option, and the default is `upwind1`. The output file tag (`output_case_tag`,
+used by `run!` and by `case_tag` in `experiments/common/helpers.jl`) names both schemes, e.g.
+`hydro_mom-tvd2_trans-upwind1_dt0p0025_L30p0_H4p0_dx0p300_dz0p200`.
 
 ## Additional validation scripts and literature basis
 

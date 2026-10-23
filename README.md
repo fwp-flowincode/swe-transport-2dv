@@ -23,7 +23,8 @@ Model
   projection, with a spectral (DCT) or sparse solver.
 - Semi-implicit free surface (Casulli & Cheng 1992 type).
 - Momentum advection: second-order TVD (MUSCL/MC limiter) or first-order upwind.
-- Density advection: conservative upwind.
+- Density advection (`transport_advection_scheme`): conservative first-order upwind (default) or
+  second-order TVD (flux-limited Lax-Wendroff, MC limiter).
 - Optional extras:
   - molecular viscosity;
   - mixing-length turbulence;

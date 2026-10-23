@@ -6,8 +6,8 @@
 # listed in CASES. Each run writes one stand-alone density heatmap (PNG) at t = T_END_S with
 # identical colour limits, so the figures are directly comparable.
 #
-# WHY: `momentum_advection_scheme` only switches the momentum advection; the density is always
-# transported by advect_density_upwind! (src/model.jl), independent of that setting.
+# WHY: `momentum_advection_scheme` only switches the momentum advection; the density is transported
+# with `transport_advection_scheme` (default "upwind1", left unchanged here), independent of that setting.
 #
 # The settings are those of the lock-exchange case description: inviscid (nu = 0), rho0 = (rho1 + rho2)/2,
 # a minimal Rayleigh damping, and time steps from the rule of analysis/lock_exchange/lock_exchange.py

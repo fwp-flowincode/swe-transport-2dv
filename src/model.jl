@@ -19,6 +19,10 @@ Base.@kwdef mutable struct ModelConfig
     max_froude::Float64 = 0.9
     apply_froude_limiter::Bool = true
     momentum_advection_scheme::String = "tvd2"
+    # Density advection: "upwind1" (first-order donor cell, monotone for CFL_x + CFL_z <= 1) or "tvd2" (flux-limited
+    # Lax-Wendroff with the MC limiter of the momentum tvd2 scheme, monotone for CFL_x + CFL_z <= 1/2).
+    # WHY "upwind1" default: keeps the results of the validated cases unchanged.
+    transport_advection_scheme::String = "upwind1"
     use_hydrostatic::Bool = true
     pressure_solver_method::String = "spectral"
     write_plots::Bool = true
@@ -60,6 +64,31 @@ creation (as `copy_config` workflows do) keeps the default consistent.
 """
 use_variable_top_layer(cfg::ModelConfig) = cfg.variable_top_layer === nothing ? cfg.use_hydrostatic : cfg.variable_top_layer
 
+"""
+    output_case_tag(cfg) -> String
+
+Case tag used in the names of the tagged output files written by `run!`, e.g.
+`hydro_mom-tvd2_trans-upwind1_dt0p0025_L30p0_H4p0_dx0p300_dz0p200`: pressure mode, momentum and transport advection
+schemes, dt (s), length and depth (m), dx and dz (m); every '.' is replaced by 'p'.
+"""
+function output_case_tag(cfg::ModelConfig)
+    mode_tag = cfg.use_hydrostatic ? "hydro" : "nonhydro"
+    return replace(
+        @sprintf(
+            "%s_mom-%s_trans-%s_dt%.4f_L%.1f_H%.1f_dx%.3f_dz%.3f",
+            mode_tag,
+            cfg.momentum_advection_scheme,
+            cfg.transport_advection_scheme,
+            cfg.dt,
+            cfg.length,
+            cfg.depth,
+            cfg.length / cfg.nx,
+            cfg.depth / cfg.nz,
+        ),
+        "." => "p",
+    )
+end
+
 function copy_config(cfg::ModelConfig)
     return ModelConfig(
         nz=cfg.nz,
@@ -82,6 +111,7 @@ function copy_config(cfg::ModelConfig)
         max_froude=cfg.max_froude,
         apply_froude_limiter=cfg.apply_froude_limiter,
         momentum_advection_scheme=cfg.momentum_advection_scheme,
+        transport_advection_scheme=cfg.transport_advection_scheme,
         use_hydrostatic=cfg.use_hydrostatic,
         pressure_solver_method=cfg.pressure_solver_method,
         write_plots=cfg.write_plots,
@@ -657,6 +687,9 @@ function _check_model_config(cfg::ModelConfig)
     if !(0.0 < cfg.top_layer_min_fraction < 1.0)
         throw(ArgumentError("top_layer_min_fraction must be in (0, 1)"))
     end
+    if !(cfg.transport_advection_scheme in ("upwind1", "tvd2"))
+        throw(ArgumentError("transport_advection_scheme must be \"upwind1\" or \"tvd2\", got \"$(cfg.transport_advection_scheme)\""))
+    end
     if cfg.nonhydro_surface_dirichlet
         if cfg.use_hydrostatic
             throw(ArgumentError("nonhydro_surface_dirichlet=true is implemented for the non-hydrostatic mode only (use_hydrostatic=false): the hydrostatic branch has no non-hydrostatic pressure correction"))
@@ -1078,9 +1111,9 @@ function step_forward!(model::Model)
 
     @timeit model.timers "step/density_transport" begin
         if variable_top
-            advect_density_upwind_top_layer!(ws.rho_new, st.rho, st.u, st.w, cfg.dt, model.dx, model.dz, ws.density_ws, ws.h_top_face, ws.eta_old, st.eta; rho_min=model.rho_min_init, rho_max=model.rho_max_init)
+            advect_density_top_layer!(ws.rho_new, st.rho, st.u, st.w, cfg.dt, model.dx, model.dz, ws.density_ws, ws.h_top_face, ws.eta_old, st.eta; scheme=cfg.transport_advection_scheme, rho_min=model.rho_min_init, rho_max=model.rho_max_init)
         else
-            advect_density_upwind!(ws.rho_new, st.rho, st.u, st.w, cfg.dt, model.dx, model.dz, ws.density_ws; rho_min=model.rho_min_init, rho_max=model.rho_max_init)
+            advect_density!(ws.rho_new, st.rho, st.u, st.w, cfg.dt, model.dx, model.dz, ws.density_ws; scheme=cfg.transport_advection_scheme, rho_min=model.rho_min_init, rho_max=model.rho_max_init)
         end
         _apply_wind_surface_density_mixing!(ws.rho_new, cfg, model.dz)
         copyto!(st.rho, ws.rho_new)
@@ -1237,21 +1270,7 @@ function run!(model::Model)
         end
     end
 
-    mode_tag = model.config.use_hydrostatic ? "hydro" : "nonhydro"
-    scheme_tag = model.config.momentum_advection_scheme
-    tag = replace(
-        @sprintf(
-            "%s_%s_dt%.4f_L%.1f_H%.1f_dx%.3f_dz%.3f",
-            mode_tag,
-            scheme_tag,
-            model.config.dt,
-            model.config.length,
-            model.config.depth,
-            model.dx,
-            model.dz,
-        ),
-        "." => "p",
-    )
+    tag = output_case_tag(model.config)
 
     if model.config.write_plots
         @timeit model.timers "run/tag_final_plot" begin
