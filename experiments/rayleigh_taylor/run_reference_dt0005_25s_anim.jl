@@ -1,53 +1,33 @@
+# Rayleigh-Taylor instability, reference case (Atwood 3.5e-4, m = 2), 25 s production run with the built-in run!
+# outputs (final-state plot, animation, pressure/buoyancy diagnostics in output_barotropic/rayleigh_taylor/).
+# Case definition, settings and references: cases.jl. Documented figures: plot_rayleigh_taylor.jl and README.md.
+
 using SweTransport2DV
 using Printf
 
 include(joinpath(@__DIR__, "..", "common", "helpers.jl"))
+include(joinpath(@__DIR__, "cases.jl"))
 
-# Canonical RTI setup references:
-# - Rayleigh (1883), Proc. London Math. Soc., doi:10.1112/plms/s1-14.1.170
-# - Taylor (1950), Proc. Royal Soc. A, doi:10.1098/rspa.1950.0052
-# - Sharp (1984), Physica D, doi:10.1016/0167-2789(84)90510-4
+const CASE_NAME = "reference"
+const T_END_S = 25.0   # s
 
-const RHO_TOP = 1000.60
-const RHO_BOTTOM = 999.90
-const INTERFACE_HEIGHT_FRACTION = 0.85
-const PERTURBATION_AMPLITUDE_FRACTION = 0.01
-const PERTURBATION_WAVENUMBER = 2
-
-cfg = ModelConfig(
-    length=8.0,
-    depth=4.0,
-    nx=400,
-    nz=160,
-    dt=0.005,
-    nt=5000,
-    use_hydrostatic=false,
-    momentum_advection_scheme="tvd2",
-    rayleigh_damping=0.0,
-    apply_froude_limiter=true,
-    max_froude=0.9,
+cfg = rayleigh_taylor_config(
+    CASE_NAME;
+    nt=round(Int, T_END_S / RT_CASES[CASE_NAME].dt),
     write_plots=true,
     write_animation=true,
     write_pressure_buoyancy_diagnostics=true,
-    save_interval_seconds=0.1,
-    pressure_solver_method="spectral",
+    save_interval_seconds=1.0,   # s, history and animation frame interval (26 frames; 0.1 s gave 251 frames, ~20 min rendering)
     output_dir=joinpath("output_barotropic", "rayleigh_taylor"),
 )
 
-atwood = (RHO_TOP - RHO_BOTTOM) / (RHO_TOP + RHO_BOTTOM)
-top_thickness = (1.0 - INTERFACE_HEIGHT_FRACTION) * cfg.depth
-bottom_thickness = INTERFACE_HEIGHT_FRACTION * cfg.depth
-@printf("RTI setup | Atwood=%.6e | top_thickness=%.3f m | bottom_thickness=%.3f m | top/bottom=%.3f\n", atwood, top_thickness, bottom_thickness, top_thickness / bottom_thickness)
+case = RT_CASES[CASE_NAME]
+atwood = (case.rho_top - case.rho_bottom) / (case.rho_top + case.rho_bottom)
+@printf("RTI setup | Atwood=%.6e | top_thickness=%.3f m | bottom_thickness=%.3f m | linear growth rate=%.4f 1/s\n",
+    atwood, (1.0 - case.interface_height_fraction) * cfg.depth, case.interface_height_fraction * cfg.depth, linear_growth_rate(CASE_NAME; g=cfg.g))
 
 model = Model(cfg)
-initialize_rayleigh_taylor!(
-    model;
-    rho_top=RHO_TOP,
-    rho_bottom=RHO_BOTTOM,
-    interface_height_fraction=INTERFACE_HEIGHT_FRACTION,
-    perturbation_amplitude_fraction=PERTURBATION_AMPLITUDE_FRACTION,
-    perturbation_wavenumber=PERTURBATION_WAVENUMBER,
-)
+initialize_rayleigh_taylor_case!(model, CASE_NAME)
 
 t0 = time()
 run!(model)
@@ -55,5 +35,5 @@ t1 = time()
 
 tag = case_tag(cfg)
 outputs = copy_case_outputs!("rayleigh_taylor", tag; output_dir=cfg.output_dir)
-@printf("CASE=rayleigh_taylor_nonhydro_tvd2_dx0p02_dz0p025_dt0p005_25s FULL_WALL_SECONDS=%.2f\n", t1 - t0)
+@printf("CASE=rayleigh_taylor_%s FULL_WALL_SECONDS=%.2f\n", tag, t1 - t0)
 print_case_outputs(outputs; title="Rayleigh-Taylor outputs")

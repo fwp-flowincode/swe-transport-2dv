@@ -43,7 +43,7 @@ README with a description, settings and figures in its `figures/` subfolder.
 | Experiment | Folder | Topic |
 |---|---|---|
 | [Lock exchange](experiments/lock_exchange/README.md) | `lock_exchange/` | gravity current, front speed, Kelvin-Helmholtz billows, hydrostatic vs. non-hydrostatic |
-| Rayleigh-Taylor instability | `rayleigh_taylor/` | heavy over light fluid, overturning and mixing |
+| [Rayleigh-Taylor instability](experiments/rayleigh_taylor/README.md) | `rayleigh_taylor/` | heavy over light fluid, linear growth vs. theory, overturning and mixing |
 | Kelvin-Helmholtz instability | `kelvin_helmholtz/` | stratified shear layer |
 | Buoyant plumes | `plumes/` | rising and sinking plumes |
 | Jet | `jet/` | impulse jet, shear |
@@ -96,6 +96,7 @@ julia --project=. experiments/lock_exchange/plot_density_hydro_vs_nonhydro_100s.
 julia --project=. experiments/lock_exchange/run_dx001_dt005_anim.jl
 julia --project=. experiments/lock_exchange/run_dx002_dt001_100s.jl
 julia --project=. experiments/lock_exchange/run_dx002_dt001_100s_anim.jl
+julia --project=. experiments/rayleigh_taylor/plot_rayleigh_taylor.jl
 julia --project=. experiments/rayleigh_taylor/run_reference_dt0005_25s_anim.jl
 julia --project=. experiments/rayleigh_taylor/run_fast_dt0004_25s_anim.jl
 julia --project=. experiments/plumes/run_rising_plume_dt001_40s_anim.jl
