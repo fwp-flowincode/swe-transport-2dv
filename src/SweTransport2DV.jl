@@ -28,7 +28,7 @@ export buoyancy, diffusion_term
 export solve_hydrostatic_pressure, solve_hydrostatic_pressure!
 export build_poisson_matrix, solve_nonhydrostatic_pressure, PressureCorrectionSolver
 export solve!
-export QUIVER_STRIDE, QUIVER_TARGET_LENGTH_FACTOR
+export QUIVER_STRIDE, QUIVER_TARGET_COUNT_X, QUIVER_TARGET_COUNT_Z, QUIVER_TARGET_LENGTH_FACTOR
 export plot_state, create_animation, plot_pressure_buoyancy_diagnostics
 export ModelConfig, Model, BarotropicSolver, solve_variable_thickness!
 export top_layer_face_thickness!, advect_density_upwind_top_layer!, advect_density_top_layer!, use_variable_top_layer

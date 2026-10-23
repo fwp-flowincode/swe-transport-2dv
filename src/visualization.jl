@@ -1,4 +1,6 @@
-const QUIVER_STRIDE = 6
+const QUIVER_STRIDE = 6               # -, minimum stride (cells) between velocity arrows
+const QUIVER_TARGET_COUNT_X = 60      # -, at most about this many arrows across the domain
+const QUIVER_TARGET_COUNT_Z = 12      # -, at most about this many arrows over the depth
 const QUIVER_TARGET_LENGTH_FACTOR = 0.09
 const VECTOR_LINE_COLOR = :white
 const VECTOR_LINE_WIDTH = 1.4
@@ -96,9 +98,12 @@ function _cell_center_velocity(u::AbstractMatrix{<:Real}, w::AbstractMatrix{<:Re
     return _cell_center_velocity!(u_c, w_c, u, w)
 end
 
+# WHY: a fixed stride gives arrow counts that grow with the grid (1500 x 200: ~8500 arrows, 3000 x 400: ~33500) and
+# arrow fields too dense to read; the stride grows so that at most about QUIVER_TARGET_COUNT_X x QUIVER_TARGET_COUNT_Z
+# arrows are drawn, with QUIVER_STRIDE as the minimum (small grids are unchanged).
 function _quiver_sampling(config)
-    sx = QUIVER_STRIDE
-    sz = QUIVER_STRIDE
+    sx = max(QUIVER_STRIDE, cld(config.nx, QUIVER_TARGET_COUNT_X))
+    sz = max(QUIVER_STRIDE, cld(config.nz, QUIVER_TARGET_COUNT_Z))
     i_idx = collect(1:sz:config.nz)
     j_idx = collect(1:sx:config.nx)
     return i_idx, j_idx
@@ -204,6 +209,14 @@ function _plot_velocity_vectors!(
         return p
     end
 
+    # WHY: all shafts and heads go into ONE line series, separated by NaN (Plots breaks a line at NaN). The former
+    # three plot! calls per arrow created ~25000 series per frame on 1500 x 200 and made the built-in animation take
+    # hours; the drawn segments are the same.
+    # PERF: 9 points per arrow (3 segments x (2 points + NaN break)), preallocated once per call.
+    xs = fill(NaN, 9 * kept)
+    zs = fill(NaN, 9 * kept)
+    c = cos(VECTOR_HEAD_ANGLE_RAD)
+    s = sin(VECTOR_HEAD_ANGLE_RAD)
     @inbounds for idx in 1:kept
         x0 = xk[idx]
         z0 = zk[idx]
@@ -211,28 +224,30 @@ function _plot_velocity_vectors!(
         w0 = wk[idx]
         x1 = x0 + u0
         z1 = z0 + w0
+        o = 9 * (idx - 1)
 
-        plot!(p, [x0, x1], [z0, z1]; color=color, linewidth=linewidth, legend=false)
+        xs[o + 1], zs[o + 1] = x0, z0       # shaft
+        xs[o + 2], zs[o + 2] = x1, z1
 
         mag = hypot(u0, w0)
         if mag <= eps(Float64)
-            continue
+            continue                         # no head; its points stay NaN (not drawn)
         end
 
         head_len = VECTOR_HEAD_LENGTH_FACTOR * mag
         ux = u0 / mag
         wz = w0 / mag
-        c = cos(VECTOR_HEAD_ANGLE_RAD)
-        s = sin(VECTOR_HEAD_ANGLE_RAD)
-
         hx1 = -c * ux + s * wz
         hz1 = -s * ux - c * wz
         hx2 = -c * ux - s * wz
         hz2 = s * ux - c * wz
 
-        plot!(p, [x1, x1 + head_len * hx1], [z1, z1 + head_len * hz1]; color=color, linewidth=linewidth, legend=false)
-        plot!(p, [x1, x1 + head_len * hx2], [z1, z1 + head_len * hz2]; color=color, linewidth=linewidth, legend=false)
+        xs[o + 4], zs[o + 4] = x1, z1       # first head line
+        xs[o + 5], zs[o + 5] = x1 + head_len * hx1, z1 + head_len * hz1
+        xs[o + 7], zs[o + 7] = x1, z1       # second head line
+        xs[o + 8], zs[o + 8] = x1 + head_len * hx2, z1 + head_len * hz2
     end
+    plot!(p, xs, zs; color=color, linewidth=linewidth, legend=false)
     return p
 end
 
