@@ -6,11 +6,12 @@ Run the full-resolution case from the repository root with:
 julia --project=. experiments/kelvin_helmholtz/run_kelvin_helmholtz_dt001_30s_anim.jl
 ```
 
-The configured run uses an 800×400 grid over an 8 m × 4 m domain (dx=dz=0.01 m) for 120 s. The lateral domain is
-periodic, so the imposed shear and perturbed interface continue smoothly across the x seam. Both momentum advection and
-density transport use `tvd2`. The Froude limiter is disabled because the prescribed shear starts above its usual 0.9
-threshold; applying it would scale down the instability-driving velocity jump. The spectral pressure solver uses
-periodic Fourier modes in x and the existing cosine transform in z.
+The configured run uses an 800×400 grid over an 8 m × 4 m domain (dx=dz=0.01 m), with `dt=0.0025 s` for 48,000 steps
+(120 s total). The smaller timestep keeps the TVD2 transport scheme within its documented CFL limit as the shear
+develops. The lateral domain is periodic, so the imposed shear and perturbed interface continue smoothly across the x
+seam. Both momentum advection and density transport use `tvd2`. The Froude limiter is disabled because the prescribed
+shear starts above its usual 0.9 threshold; applying it would scale down the instability-driving velocity jump. The
+spectral pressure solver uses periodic Fourier modes in x and the existing cosine transform in z.
 
 The following lower-resolution 30-second preview is included for review; it is not the full configured run:
 

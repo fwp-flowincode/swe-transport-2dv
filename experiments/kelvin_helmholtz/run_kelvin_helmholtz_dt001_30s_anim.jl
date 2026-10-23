@@ -13,8 +13,8 @@ cfg = ModelConfig(
     depth=4.0,
     nx=800,
     nz=400,
-    dt=0.01,
-    nt=12000,
+    dt=0.0025,
+    nt=48000,
     use_hydrostatic=false,
     periodic_x=true,
     momentum_advection_scheme="tvd2",
@@ -56,5 +56,5 @@ t1 = time()
 
 tag = case_tag(cfg)
 outputs = copy_case_outputs!("kelvin_helmholtz", tag; output_dir=cfg.output_dir)
-@printf("CASE=kelvin_helmholtz_nonhydro_tvd2_dx0p01_dz0p01_dt0p01_120s FULL_WALL_SECONDS=%.2f\n", t1 - t0)
+@printf("CASE=kelvin_helmholtz_nonhydro_tvd2_dx0p01_dz0p01_dt0p0025_120s FULL_WALL_SECONDS=%.2f\n", t1 - t0)
 print_case_outputs(outputs; title="Kelvin-Helmholtz outputs")
