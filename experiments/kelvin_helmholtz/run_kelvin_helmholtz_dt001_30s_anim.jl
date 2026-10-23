@@ -18,6 +18,7 @@ cfg = ModelConfig(
     use_hydrostatic=false,
     periodic_x=true,
     momentum_advection_scheme="tvd2",
+    transport_advection_scheme="tvd2",
     rayleigh_damping=0.001,
     # The shear's initial internal Froude number exceeds 0.9; limiting it would suppress the KH instability.
     apply_froude_limiter=false,
