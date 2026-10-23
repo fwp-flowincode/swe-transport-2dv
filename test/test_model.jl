@@ -224,4 +224,46 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test isapprox(mass1_calm, mass0_calm, atol=MASS_TOL_ATOL, rtol=MASS_TOL_RTOL)
         @test isapprox(mass1_wind, mass0_wind, atol=MASS_TOL_ATOL, rtol=MASS_TOL_RTOL)
     end
+
+    @testset "test_periodic_kelvin_helmholtz_boundaries_and_conservation" begin
+        cfg = ModelConfig(
+            length=8.0,
+            depth=4.0,
+            nx=32,
+            nz=16,
+            dt=1e-4,
+            nt=1,
+            use_hydrostatic=false,
+            periodic_x=true,
+            pressure_solver_method="sparse",
+            rayleigh_damping=0.0,
+            apply_froude_limiter=false,
+            write_plots=false,
+            write_animation=false,
+            write_pressure_buoyancy_diagnostics=false,
+        )
+        model = Model(cfg)
+        initialize_kelvin_helmholtz!(
+            model;
+            rho_top=999.95,
+            rho_bottom=1000.05,
+            interface_perturbation_amplitude_fraction=0.02,
+            interface_perturbation_wavenumber=2,
+            u_top=0.2,
+            u_bottom=-0.2,
+        )
+
+        @test model.state.u[:, 1] ≈ model.state.u[:, end]
+        @test model.state.rho[:, 1] ≈ model.state.rho[:, end]
+        mass0 = constituent_mass(model.state.rho, model.dx, model.dz)
+        for _ in 1:3
+            step_forward!(model)
+            @test model.state.u[:, 1] ≈ model.state.u[:, end]
+        end
+        @test isapprox(constituent_mass(model.state.rho, model.dx, model.dz), mass0; atol=1e-8, rtol=1e-10)
+
+        A = model.pressure_correction_solver.poisson_matrix
+        idx(k, i) = (k - 1) * cfg.nx + i
+        @test A[idx(2, 1), idx(2, cfg.nx)] ≈ 1.0 / model.dx^2
+    end
 end

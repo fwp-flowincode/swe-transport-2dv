@@ -16,6 +16,7 @@ cfg = ModelConfig(
     dt=0.01,
     nt=3000,
     use_hydrostatic=false,
+    periodic_x=true,
     momentum_advection_scheme="tvd2",
     rayleigh_damping=0.001,
     apply_froude_limiter=true,
@@ -24,7 +25,7 @@ cfg = ModelConfig(
     write_animation=true,
     write_pressure_buoyancy_diagnostics=true,
     save_interval_seconds=0.2,
-    pressure_solver_method="spectral",
+    pressure_solver_method="sparse",
     output_dir=joinpath("output_barotropic", "kelvin_helmholtz"),
 )
 
@@ -33,6 +34,7 @@ lambda = cfg.length / 2.0
 k = 2.0 * pi / lambda
 sigma_est = 0.5 * k * du
 @printf("KH setup estimate | k=%.3f 1/m | sigma~%.3f 1/s\n", k, sigma_est)
+println("KH lateral boundary condition | periodic x")
 
 model = Model(cfg)
 initialize_kelvin_helmholtz!(

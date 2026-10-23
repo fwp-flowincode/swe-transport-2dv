@@ -41,6 +41,22 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test isapprox(m0, m1, atol=1e-10, rtol=1e-10)
     end
 
+    @testset "test_periodic_density_advection_conservative" begin
+        nz, nx = 6, 12
+        dx, dz, dt = 0.1, 0.2, 0.01
+        xc = [(i - 0.5) * dx for i in 1:nx]
+        rho = repeat(reshape(1000.0 .+ sin.(2.0 * pi .* xc ./ (nx * dx)), 1, nx), nz, 1)
+        u = fill(0.15, nz, nx + 1)
+        w = zeros(nz + 1, nx)
+
+        for scheme in ("upwind1", "tvd2")
+            tendency = advection_term_rho(u, w, rho, dx, dz; scheme=scheme, dt=dt, periodic_x=true)
+            @test abs(sum(tendency) * dx * dz) < 1e-10
+            rho_new = advect_density(rho, u, w, dt, dx, dz; scheme=scheme, periodic_x=true)
+            @test isapprox(constituent_mass(rho_new, dx, dz), constituent_mass(rho, dx, dz); atol=1e-10, rtol=1e-12)
+        end
+    end
+
     @testset "test_momentum_advection_zero_for_uniform_velocity_fields" begin
         nz, nx = 12, 14
         u = fill(0.1, nz, nx + 1)

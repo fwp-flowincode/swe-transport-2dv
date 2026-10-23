@@ -4,6 +4,7 @@ mutable struct PressureCorrectionSolver{T<:Real}
     dz::T
     method::String
     top_dirichlet::Bool
+    periodic_x::Bool
     inv_lambda::Union{Matrix{T}, Nothing}
     poisson_matrix::Union{SparseMatrixCSC{T, Int}, Nothing}
     poisson_fact::Any
@@ -76,7 +77,7 @@ Verification (`test_verify_poisson_matrix_top_dirichlet_matches_manufactured_sol
 `p(z) = C/2*(z^2 - H^2)` solves `p'' = C` on `z in (0,H)` with `p'(0)=0` (Neumann bottom) and `p(H)=0` (Dirichlet top,
 at the domain edge, matching the ghost closure above).
 """
-function build_poisson_matrix(shape::Tuple{Int, Int}, dx::Real, dz::Real; top_dirichlet::Bool=false)
+function build_poisson_matrix(shape::Tuple{Int, Int}, dx::Real, dz::Real; top_dirichlet::Bool=false, periodic_x::Bool=false)
     nz, nx = shape
     n = nz * nx
 
@@ -97,13 +98,19 @@ function build_poisson_matrix(shape::Tuple{Int, Int}, dx::Real, dz::Real; top_di
             r = idx(k, i)
             diag = 0.0
 
-            if i > 1
-                push!(row, r); push!(col, idx(k, i - 1)); push!(val, inv_dx2)
-                diag -= inv_dx2
-            end
-            if i < nx
-                push!(row, r); push!(col, idx(k, i + 1)); push!(val, inv_dx2)
-                diag -= inv_dx2
+            if periodic_x
+                push!(row, r); push!(col, idx(k, mod1(i - 1, nx))); push!(val, inv_dx2)
+                push!(row, r); push!(col, idx(k, mod1(i + 1, nx))); push!(val, inv_dx2)
+                diag -= 2.0 * inv_dx2
+            else
+                if i > 1
+                    push!(row, r); push!(col, idx(k, i - 1)); push!(val, inv_dx2)
+                    diag -= inv_dx2
+                end
+                if i < nx
+                    push!(row, r); push!(col, idx(k, i + 1)); push!(val, inv_dx2)
+                    diag -= inv_dx2
+                end
             end
             if k > 1
                 push!(row, r); push!(col, idx(k - 1, i)); push!(val, inv_dz2)
@@ -137,7 +144,7 @@ Neumann-Neumann eigenbasis in z and cannot express a Dirichlet top condition (a 
 would be needed; not implemented). See `build_poisson_matrix` for the boundary condition and docs section 15 for why a
 Dirichlet top condition is needed for dispersive non-hydrostatic surface waves.
 """
-function PressureCorrectionSolver(shape::Tuple{Int, Int}, dx::Real, dz::Real; method::String="spectral", top_dirichlet::Bool=false, T::Type{<:Real}=Float64)
+function PressureCorrectionSolver(shape::Tuple{Int, Int}, dx::Real, dz::Real; method::String="spectral", top_dirichlet::Bool=false, periodic_x::Bool=false, T::Type{<:Real}=Float64)
     nz, nx = shape
 
     rhs = zeros(T, nz, nx)
@@ -149,6 +156,9 @@ function PressureCorrectionSolver(shape::Tuple{Int, Int}, dx::Real, dz::Real; me
     p_corr_flat = zeros(T, nz * nx)
 
     if method == "spectral"
+        if periodic_x
+            throw(ArgumentError("periodic_x=true requires method=\"sparse\" for the pressure-correction solver"))
+        end
         if top_dirichlet
             throw(ArgumentError("top_dirichlet=true requires method=\"sparse\" (the spectral solver cannot represent a Dirichlet top condition)"))
         end
@@ -173,11 +183,11 @@ function PressureCorrectionSolver(shape::Tuple{Int, Int}, dx::Real, dz::Real; me
         dct_plan = FFTW.plan_dct(rhs, (1, 2); flags=FFTW.MEASURE)
         idct_plan = FFTW.plan_idct(rhs_hat, (1, 2); flags=FFTW.MEASURE)
 
-        return PressureCorrectionSolver(shape, T(dx), T(dz), method, top_dirichlet, inv_lambda, nothing, nothing, rhs, rhs_hat, p_corr, div_tmp, div_z_tmp, rhs_flat, p_corr_flat, dct_plan, idct_plan, TimerOutput(), fftw_threads)
+        return PressureCorrectionSolver(shape, T(dx), T(dz), method, top_dirichlet, periodic_x, inv_lambda, nothing, nothing, rhs, rhs_hat, p_corr, div_tmp, div_z_tmp, rhs_flat, p_corr_flat, dct_plan, idct_plan, TimerOutput(), fftw_threads)
     elseif method == "sparse"
-        A = build_poisson_matrix(shape, dx, dz; top_dirichlet=top_dirichlet)
+        A = build_poisson_matrix(shape, dx, dz; top_dirichlet=top_dirichlet, periodic_x=periodic_x)
         F = lu(A)
-        return PressureCorrectionSolver(shape, T(dx), T(dz), method, top_dirichlet, nothing, A, F, rhs, rhs_hat, p_corr, div_tmp, div_z_tmp, rhs_flat, p_corr_flat, nothing, nothing, TimerOutput(), 1)
+        return PressureCorrectionSolver(shape, T(dx), T(dz), method, top_dirichlet, periodic_x, nothing, A, F, rhs, rhs_hat, p_corr, div_tmp, div_z_tmp, rhs_flat, p_corr_flat, nothing, nothing, TimerOutput(), 1)
     else
         throw(ArgumentError("Unsupported pressure solver method '$(method)'"))
     end
