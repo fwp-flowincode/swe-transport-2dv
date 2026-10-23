@@ -1,6 +1,19 @@
 # 2DV SWE Test Technical Documentation
 
-This document provides technical background, governing equations, and literature context for all test blocks in `test/runtests.jl`.
+This document provides technical background, governing equations, and literature context for all test blocks of the test suite.
+`test/runtests.jl` includes one file per functional area. Shared packages and tolerances live in `test/test_common.jl`, which
+every file includes, so each file also runs on its own (`julia --project=. test/test_advection.jl`):
+
+| File | Area |
+|---|---|
+| `test_operators_and_diagnostics.jl` | state layout, grad/div operators, buoyancy, diagnostics |
+| `test_advection.jl` | density (transport) and momentum advection, `upwind1` and `tvd2` (sections 3, 4) |
+| `test_pressure.jl` | hydrostatic integration, Poisson matrix, non-hydrostatic pressure solvers (sections 6, 7) |
+| `test_free_surface.jl` | barotropic solve, kinematic surface condition, continuity closure (sections 8, 9) |
+| `test_model.jl` | full-model runs: conservation, stabilisation, configuration, initial conditions, dense front, wind shear |
+| `test_vegetation.jl` | flexible-vegetation stem model |
+| `test_nonhydrostatic.jl` | non-hydrostatic branch and free surface (sections 14, 15) |
+| `test_variable_top_layer.jl` | variable-thickness top layer (section 13) |
 
 ## Governing model
 

@@ -61,7 +61,8 @@ fronts (see the [lock-exchange README](experiments/lock_exchange/README.md)).*
 Folder layout
 -------------
 - `src/`: Julia package source.
-- `test/`: test suite (`runtests.jl`) and technical documentation (`TESTS_TECHNICAL_DOCUMENTATION.md`).
+- `test/`: test suite (`runtests.jl`, which includes one `test_*.jl` file per functional area) and technical
+  documentation (`TESTS_TECHNICAL_DOCUMENTATION.md`).
 - `experiments/`: one folder per experiment (scripts, README, `figures/`), plus `validation/`,
   `benchmarks/`, `common/` and `maintenance/`.
 - `analysis/`: Python evaluation tools, e.g. `analysis/lock_exchange/` (bulk reference values and

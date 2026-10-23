@@ -23,7 +23,7 @@ function main()
         # WHY: this audit checks the LEGACY fixed-grid closure identity (div=0 on every row including the top one).
         # The (now-default) variable top layer closes a different identity in the top row instead (see
         # test/TESTS_TECHNICAL_DOCUMENTATION.md section 13 and test_verify_variable_top_layer_closes_kinematic_and_volume_budgets
-        # in test/runtests.jl), so it is pinned off here explicitly.
+        # in test/test_variable_top_layer.jl), so it is pinned off here explicitly.
         variable_top_layer=false,
         momentum_advection_scheme="upwind1",
         rayleigh_damping=0.0,
