@@ -583,12 +583,60 @@ function advection_term_rho(
 end
 
 """
-    advect_density!(rho_new, rho, u, w, dt, dx, dz, ws; scheme="upwind1", rho_min=nothing, rho_max=nothing)
+    _density_top_row_advective_form!(adv, rho, u, w, dx, dz)
+
+Fixed-grid free-surface correction of the density tendency `adv` (kg/m^3/s) in the top row: subtracts `rho * div(v)`,
+built from the same face velocities and the same zero-flux conventions as the face fluxes (closed outer x-faces, no flux
+through the top face), so that the top row is advanced in advective form
+
+    adv_top = div(v*rho) - rho*div(v) = v . grad(rho).
+
+`rho` in kg/m^3, `u`, `w` in m/s, `dx`, `dz` in m. Rows below the top row are unchanged (there div(v) vanishes to
+round-off because `w` is reconstructed from continuity).
+
+WHY: on the fixed grid the top face carries no density flux, although the discrete velocity there is d(eta)/dt, so the
+top-row control volume has div(v) = -(d eta/dt)/dz. In flux form that acts as a spurious source rho*eta_t*dt/dz per step
+in the top row, with the full density rho ~ 1000 kg/m^3 (not the anomaly): e.g. up to 1 kg/m^3 per step in the
+Rayleigh-Taylor experiment, more than the density contrast allows. The advective form keeps a uniform density uniform.
+It is the h -> dz limit of the variable-top-layer budget (see `advect_density_top_layer!`), which writes
+d(h rho)/dt with dh/dt = w_bot - div(h u). The fixed-grid mass sum(rho)*dx*dz changes only by
+dt*sum_i (rho_top - mean) * div(v)*dx*dz, because sum_i eta_t = 0 in a closed basin; the model's global mass correction
+removes this small residual.
+Source: v.grad(phi) = div(v*phi) - phi*div(v), as `_top_row_advective_form!` for momentum; z-layer free surface as in
+Casulli & Walters (2000), Int. J. Numer. Methods Fluids 32, 331-348 (equation numbers not checked).
+"""
+function _density_top_row_advective_form!(
+    adv::AbstractMatrix{<:Real},
+    rho::AbstractMatrix{<:Real},
+    u::AbstractMatrix{<:Real},
+    w::AbstractMatrix{<:Real},
+    dx::Real,
+    dz::Real,
+)
+    nz, nx = size(rho)
+    if nz < 2
+        return adv
+    end
+
+    @inbounds for i in 1:nx
+        volume_flux_in = i >= 2 ? u[nz, i] : 0.0             # x-face volume flux, zero at the outer boundary
+        volume_flux_out = i + 1 <= nx ? u[nz, i + 1] : 0.0
+        div_v = (volume_flux_out - volume_flux_in) / dx - w[nz, i] / dz   # zero volume flux through the top face
+        adv[nz, i] -= rho[nz, i] * div_v
+    end
+
+    return adv
+end
+
+"""
+    advect_density!(rho_new, rho, u, w, dt, dx, dz, ws; scheme="upwind1", top_row_advective_form=false, rho_min=nothing, rho_max=nothing)
 
 One forward-Euler transport step `rho_new = rho - dt * div(v*rho)` of `rho` (kg/m^3) on fixed layers of thickness `dz`
 (m) with closed outer faces, followed by optional clamping to `[rho_min, rho_max]`. `dt` in s, `dx`, `dz` in m, `u`, `w`
 in m/s. `scheme`: `"upwind1"` (first-order donor cell, monotone for `dt*(|u|/dx + |w|/dz) <= 1`) or `"tvd2"`
 (flux-limited Lax-Wendroff with MC limiter, monotone for `dt*(|u|/dx + |w|/dz) <= 1/2`); see `_density_face_fluxes!`.
+`top_row_advective_form=true` applies the fixed-grid free-surface correction of `_density_top_row_advective_form!`
+(used by the model whenever the variable top layer is off).
 """
 function advect_density!(
     rho_new::AbstractMatrix{<:Real},
@@ -600,10 +648,14 @@ function advect_density!(
     dz::Real,
     ws::DensityWorkspace;
     scheme::AbstractString="upwind1",
+    top_row_advective_form::Bool=false,
     rho_min=nothing,
     rho_max=nothing,
 )
     advection_term_rho!(ws.adv, u, w, rho, dx, dz, ws; scheme=scheme, dt=dt)
+    if top_row_advective_form
+        _density_top_row_advective_form!(ws.adv, rho, u, w, dx, dz)
+    end
     nz, nx = size(rho)
 
     @inbounds for i in 1:nx
@@ -633,12 +685,13 @@ function advect_density(
     dx::Real,
     dz::Real;
     scheme::AbstractString="upwind1",
+    top_row_advective_form::Bool=false,
     rho_min=nothing,
     rho_max=nothing,
 )
     rho_new = similar(rho)
     ws = DensityWorkspace(size(rho, 1), size(rho, 2); T=eltype(rho))
-    advect_density!(rho_new, rho, u, w, dt, dx, dz, ws; scheme=scheme, rho_min=rho_min, rho_max=rho_max)
+    advect_density!(rho_new, rho, u, w, dt, dx, dz, ws; scheme=scheme, top_row_advective_form=top_row_advective_form, rho_min=rho_min, rho_max=rho_max)
     return rho_new
 end
 

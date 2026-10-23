@@ -115,7 +115,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
     end
 
     @testset "test_verify_variable_top_layer_uniform_density_stays_uniform" begin
-        function max_density_deviation(variable_top::Bool)
+        function run_uniform_density(variable_top::Bool)
             cfg = ModelConfig(nx=40, nz=8, length=20.0, depth=4.0, dt=0.005, use_hydrostatic=true, variable_top_layer=variable_top, rayleigh_damping=0.0, apply_froude_limiter=false, momentum_advection_scheme="upwind1")
             model = Model(cfg)
             x = [(i - 0.5) * model.dx for i in 1:cfg.nx]
@@ -128,12 +128,21 @@ include(joinpath(@__DIR__, "test_common.jl"))
             for _ in 1:100
                 step_forward!(model)
             end
-            return maximum(abs, model.state.rho .- 1000.0)
+            return model
         end
 
-        @test max_density_deviation(true) < TOL_MODEL_IDENTITY
-        # legacy fixed-grid treatment: zero flux through a top face that moves with d(eta)/dt is a spurious source
-        @test max_density_deviation(false) > TOL_LEGACY_VIOLATION
+        # Both treatments keep a uniform density uniform: the variable top layer through its thickness-integrated budget,
+        # the fixed grid through the top-row advective form (_density_top_row_advective_form!, docs section 4).
+        model_variable = run_uniform_density(true)
+        model_fixed = run_uniform_density(false)
+        @test maximum(abs, model_variable.state.rho .- 1000.0) < TOL_MODEL_IDENTITY
+        @test maximum(abs, model_fixed.state.rho .- 1000.0) < TOL_MODEL_IDENTITY
+
+        # contrast: the plain flux form with zero flux through a top face that moves with d(eta)/dt is a spurious source
+        st = model_fixed.state
+        rho_uniform = fill(1000.0, size(st.rho))
+        flux_form = advect_density(rho_uniform, st.u, st.w, model_fixed.config.dt, model_fixed.dx, model_fixed.dz; top_row_advective_form=false)
+        @test maximum(abs, flux_form .- 1000.0) > TOL_LEGACY_VIOLATION
     end
 
     @testset "test_verify_variable_top_layer_closes_kinematic_and_volume_budgets" begin

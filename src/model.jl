@@ -37,7 +37,8 @@ Base.@kwdef mutable struct ModelConfig
     # (zero flux through it). nothing (default) = automatic: on for the hydrostatic mode, off for the non-hydrostatic
     # mode; true / false force it (true is rejected with use_hydrostatic=false). false keeps the legacy fixed-grid
     # treatment, which is needed when the surface leaves the top layer (|eta| >~ dz, e.g. large waves or the surface
-    # dam break). Evaluate with use_variable_top_layer(cfg). See docs section 13.
+    # dam break); its density transport uses the top-row advective form (docs section 4). Evaluate with
+    # use_variable_top_layer(cfg). See docs section 13.
     variable_top_layer::Union{Nothing,Bool} = nothing
     # Smallest allowed top-layer thickness as a fraction of dz (-). The variable top layer cannot follow a surface
     # that leaves the top layer (no layer removal / wetting-drying), so the run stops if dz + eta < fraction * dz.
@@ -1113,7 +1114,9 @@ function step_forward!(model::Model)
         if variable_top
             advect_density_top_layer!(ws.rho_new, st.rho, st.u, st.w, cfg.dt, model.dx, model.dz, ws.density_ws, ws.h_top_face, ws.eta_old, st.eta; scheme=cfg.transport_advection_scheme, rho_min=model.rho_min_init, rho_max=model.rho_max_init)
         else
-            advect_density!(ws.rho_new, st.rho, st.u, st.w, cfg.dt, model.dx, model.dz, ws.density_ws; scheme=cfg.transport_advection_scheme, rho_min=model.rho_min_init, rho_max=model.rho_max_init)
+            # WHY: fixed grid (variable top layer off, incl. every non-hydrostatic run): advective form in the top row removes
+            # the spurious source of the moving top face, see _density_top_row_advective_form! (docs section 4).
+            advect_density!(ws.rho_new, st.rho, st.u, st.w, cfg.dt, model.dx, model.dz, ws.density_ws; scheme=cfg.transport_advection_scheme, top_row_advective_form=true, rho_min=model.rho_min_init, rho_max=model.rho_max_init)
         end
         _apply_wind_surface_density_mixing!(ws.rho_new, cfg, model.dz)
         copyto!(st.rho, ws.rho_new)

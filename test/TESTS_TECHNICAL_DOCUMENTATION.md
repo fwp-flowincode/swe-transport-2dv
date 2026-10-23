@@ -93,7 +93,7 @@ earlier ordering that had the free-surface solve AFTER the non-hydrostatic proje
    section 14).
 6. Enforce wall boundary values on $u$.
 7. Reconstruct $w$ from continuity and enforce top kinematic condition $w_{top}=\eta_t$.
-8. Advect density with conservative fluxes (`transport_advection_scheme`: `upwind1` or `tvd2`, section 4).
+8. Advect density with conservative fluxes (`transport_advection_scheme`: `upwind1` or `tvd2`; fixed grid: top row in advective form; section 4).
 9. Apply wind-driven surface mixing parameterization (if configured).
 10. Apply global conservative density-mass correction within bounds.
 11. Recompute final pressure fields ($p_h$ and optionally $p'=p-p_h$).
@@ -162,6 +162,19 @@ earlier results bit for bit):
 
 References: van Leer (1977) for the MC limiter; Sweby (1984), SIAM J. Numer. Anal. 21, 995-1011, for flux-limited
 Lax-Wendroff and its TVD region; LeVeque (2002), ch. 6.
+
+Fixed-grid top row (variable top layer off, i.e. every non-hydrostatic run and hydrostatic runs with `variable_top_layer=false`):
+the top face carries no flux although its velocity is $\eta_t$, so the top-row control volume has
+$\nabla\cdot\mathbf{u}=-\eta_t/\Delta z\neq0$. The top row is therefore advanced in advective form,
+
+```math
+\mathcal{A}_{top}(\rho)=\nabla\cdot(\rho\mathbf{u})-\rho\,\nabla\cdot\mathbf{u}=\mathbf{u}\cdot\nabla\rho,
+```
+
+with $\nabla\cdot\mathbf{u}$ built from the same face velocities and zero-flux conventions as the fluxes
+(`_density_top_row_advective_form!`, option `top_row_advective_form` of `advect_density!`). A uniform density stays uniform.
+The fixed-grid mass $\sum\rho\,\Delta x\Delta z$ changes only by terms proportional to the top-row density anomaly (the uniform
+part cancels because $\sum_i\eta_t=0$ in a closed basin); the global mass correction (section 11) removes that residual.
 
 Optional bound-preserving clamping is applied during update:
 
@@ -339,11 +352,15 @@ the explicit value. `variable_top_layer=true` with `use_hydrostatic=false` raise
 explicit override for the hydrostatic mode too — see limitations below): all layers have the fixed thickness $\Delta z$, the free
 surface $\eta$ is a separate field that enters only through the barotropic solve (section 8), the surface-slope force
 $-g\,\partial_x\eta$ and the top-face velocity $w_{top}=\eta_t$ (section 9). Density and momentum advection set the flux through
-the top face to zero. That is consistent only if $w_{top}=0$ (rigid lid) — which is what the non-hydrostatic projection produces
-(its Neumann top/bottom conditions and right-hand-side mean removal keep $\eta$ at round-off in practice). With a genuinely moving
-surface (the hydrostatic mode) a zero top flux is instead a source of $\rho\,\eta_t\,\Delta t/\Delta z$ per step in the top row, and
-$\rho\approx 10^3\,\mathrm{kg/m^3}$ makes it large; this was the original motivation for section 13 (see
-`test_verify_variable_top_layer_uniform_density_stays_uniform` and the wind-shear test note below).
+the top face to zero. In flux form that is consistent only if $w_{top}=0$ (rigid lid). With a moving surface a zero top flux is
+a source of $\rho\,\eta_t\,\Delta t/\Delta z$ per step in the top row, and $\rho\approx 10^3\,\mathrm{kg/m^3}$ makes it large; this
+was the original motivation for section 13 (see the wind-shear test note below). The surface moves in both modes: since the
+reordering of section 14 the non-hydrostatic $\eta$ is driven by the momentum predictor, so the earlier assumption that the
+non-hydrostatic projection keeps $\eta$ at round-off no longer holds. In the Rayleigh-Taylor experiment the source reached
+1 kg/m³ per step (26 % of the density contrast) and lowered the linear growth rate to about 60 % of theory.
+The fixed-grid density transport therefore advances the top row in advective form (`_density_top_row_advective_form!`, section 4),
+which keeps a uniform density uniform; it is the $h\to\Delta z$ limit of the variable-top-layer budget below. The fixed-grid
+momentum advection is unchanged.
 
 `variable_top_layer=true` (hydrostatic mode; the default) lets the top layer follow the surface: layers $k\lt n_z$ keep $\Delta z$,
 the top layer has $h=\Delta z+\eta$, and the free surface is a material boundary (zero flux through it). Per step:
@@ -906,6 +923,28 @@ relation shrinks under refinement (not just small at one lucky grid); the finer 
 the finer grid's period sits closer to the exact relation than to the shallow-water one -- a decisive dispersion check, not merely
 "less wrong than shallow water by some margin".
 
+### test_verify_nonhydro_fixed_grid_uniform_density_stays_uniform
+
+Purpose: the non-hydrostatic mode always uses the fixed grid. With a moving free surface (cosine perturbation, clamp bounds
+widened) a uniform density stays uniform for `upwind1` and `tvd2` (top-row advective form, section 4). Contrast: the plain flux
+form on the same velocities violates constancy by more than $10^{-6}\,\mathrm{kg/m^3}$.
+
+### test_validate_rayleigh_taylor_linear_growth_rate
+
+Analytical solution: a small interface displacement $a_0\cos kx$ between a heavy top layer (thickness $h_1$) and a light bottom
+layer ($h_2$), released from rest, grows as $a(t)=a_0\cosh\sigma t$ with the inviscid growth rate
+
+```math
+\sigma^2=\frac{g\,k\,(\rho_{top}-\rho_{bottom})}{\rho_{top}\coth(kh_1)+\rho_{bottom}\coth(kh_2)}
+```
+
+(two layers between rigid horizontal boundaries; Chandrasekhar 1961, ch. X; the free surface acts as a rigid lid for this mode).
+Setup: 8 m × 4 m, 200 × 80 cells, $\rho_{top}=1002.5$, $\rho_{bottom}=998.5\,\mathrm{kg/m^3}$, interface at $0.82H$,
+$a_0=0.02$ m, $m=3$ ($k=2.36$ m⁻¹), `tvd2` momentum and transport. The interface height is taken from the heavy-fluid thickness
+of each column and projected onto $\cos kx$; the numerical rate is $\mathrm{acosh}(a/a_0)/t$ at $\sigma t=2$ ($ka\approx0.2$,
+still linear). Required: $0.8\lt\sigma_{num}/\sigma\lt1.05$. Measured: 0.84 (0.87 on 400 × 160 cells; the smeared numerical
+interface lowers the rate and converges slowly); without the top-row advective form 0.61, so the test detects that defect.
+
 ### Variable-thickness top layer (section 13)
 
 All tests below use `test_verify_*` (code verification against analytical identities or solutions); tolerances are named at the top
@@ -950,8 +989,9 @@ $\Delta z$); mass conservation alone cannot detect it, because any scaling of a 
 ### test_verify_variable_top_layer_uniform_density_stays_uniform
 
 Purpose: full-model version of the constancy property with a moving free surface (clamp bounds widened so that they cannot hide a
-deviation). The variable top layer keeps a uniform density uniform; the legacy zero-flux treatment violates it by more than
-$10^{-6}\,\mathrm{kg/m^3}$ in the same run (documents the defect that motivated section 13).
+deviation). Both the variable top layer and the fixed grid (top-row advective form, section 4) keep a uniform density uniform.
+Contrast: the plain flux form applied to the fixed-grid velocities of the same run violates it by more than
+$10^{-6}\,\mathrm{kg/m^3}$ (the defect that motivated section 13).
 
 ### test_verify_variable_top_layer_closes_kinematic_and_volume_budgets
 

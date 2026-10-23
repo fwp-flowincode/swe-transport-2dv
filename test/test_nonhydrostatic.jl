@@ -209,4 +209,66 @@ include(joinpath(@__DIR__, "test_common.jl"))
         # decisively dispersive, not merely "a bit off shallow water": closer to the exact relation than to shallow water
         @test abs(period_fine - period_exact) < abs(period_fine - period_shallow)
     end
+
+    # ---- Fixed-grid density transport at the free surface (docs section 4) ------------------------------------
+    FIXED_GRID_FLUX_FORM_VIOLATION_MIN = 1e-6   # kg/m^3: the plain flux form must violate constancy by at least this much
+    RT_GROWTH_RATIO_MIN = 0.8                   # -, sigma_num/sigma on 200 x 80 cells (measured 0.84 with the fix, 0.61 without)
+    RT_GROWTH_RATIO_MAX = 1.05                  # -
+
+    @testset "test_verify_nonhydro_fixed_grid_uniform_density_stays_uniform" begin
+        # The non-hydrostatic mode always uses the fixed grid. With a moving free surface the top-row advective form must
+        # keep a uniform density uniform for both transport schemes; the plain flux form does not (contrast).
+        for scheme in ("upwind1", "tvd2")
+            cfg = ModelConfig(nx=40, nz=8, length=20.0, depth=4.0, dt=0.005, use_hydrostatic=false, transport_advection_scheme=scheme, rayleigh_damping=0.0, apply_froude_limiter=false)
+            model = Model(cfg)
+            x = [(i - 0.5) * model.dx for i in 1:cfg.nx]
+            model.state.eta .= 0.05 .* cos.(pi .* x ./ cfg.length)
+            fill!(model.state.rho, 1000.0)
+            refresh_density_metadata!(model)
+            # WHY: with a uniform initial density the clamp bounds collapse to [1000, 1000] and would hide any deviation
+            model.rho_min_init = 900.0
+            model.rho_max_init = 1100.0
+            for _ in 1:100
+                step_forward!(model)
+            end
+            st = model.state
+            @test maximum(abs, st.rho .- 1000.0) < TOL_MODEL_IDENTITY
+
+            flux_form = advect_density(fill(1000.0, size(st.rho)), st.u, st.w, cfg.dt, model.dx, model.dz; scheme=scheme, top_row_advective_form=false)
+            @test maximum(abs, flux_form .- 1000.0) > FIXED_GRID_FLUX_FORM_VIOLATION_MIN
+        end
+    end
+
+    @testset "test_validate_rayleigh_taylor_linear_growth_rate" begin
+        # Analytical solution: a small interface displacement a0*cos(k x) between a heavy top layer (thickness h1) and a
+        # light bottom layer (h2), released from rest, grows as a(t) = a0*cosh(sigma t) with the inviscid growth rate
+        #   sigma^2 = g k (rho_top - rho_bottom) / (rho_top coth(k h1) + rho_bottom coth(k h2))
+        # (Chandrasekhar 1961, Hydrodynamic and Hydromagnetic Stability, ch. X; rigid lid, equation numbers not checked).
+        # The numerical rate follows from acosh(a/a0)/t at sigma*t = 2 (a/a0 ~ 3.8, still linear: k*a ~ 0.2).
+        # WHY the wide range: the smeared numerical interface (a few cells) lowers the rate; it converges slowly
+        # (measured 0.84 on 200 x 80, 0.87 on 400 x 160). The lower bound detects the fixed-grid top-face source that
+        # _density_top_row_advective_form! removes (0.61 without it).
+        rho_top, rho_bottom = 1002.5, 998.5        # kg/m^3
+        L, H = 8.0, 4.0                            # m
+        interface_fraction, amplitude_fraction, m = 0.82, 0.005, 3
+        cfg = ModelConfig(length=L, depth=H, nx=200, nz=80, dt=0.004, use_hydrostatic=false, momentum_advection_scheme="tvd2", transport_advection_scheme="tvd2", rayleigh_damping=0.0, apply_froude_limiter=false)
+        model = Model(cfg)
+        initialize_rayleigh_taylor!(model; rho_top=rho_top, rho_bottom=rho_bottom, interface_height_fraction=interface_fraction, perturbation_amplitude_fraction=amplitude_fraction, perturbation_wavenumber=m)
+
+        k = 2.0 * pi * m / L                       # 1/m
+        h1, h2 = (1.0 - interface_fraction) * H, interface_fraction * H
+        sigma = sqrt(cfg.g * k * (rho_top - rho_bottom) / (rho_top * coth(k * h1) + rho_bottom * coth(k * h2)))   # 1/s
+        x = [(i - 0.5) * model.dx for i in 1:cfg.nx]
+        # interface height from the heavy-fluid thickness of each column, projected onto cos(k x)
+        mode_amplitude(rho) = 2.0 / cfg.nx * sum((H .- vec(sum((rho .- rho_bottom) ./ (rho_top - rho_bottom); dims=1)) .* model.dz) .* cos.(k .* x))
+
+        a0 = mode_amplitude(model.state.rho)
+        nt = round(Int, 2.0 / (sigma * cfg.dt))
+        for _ in 1:nt
+            step_forward!(model)
+        end
+        t_end = nt * cfg.dt
+        sigma_num = acosh(mode_amplitude(model.state.rho) / a0) / t_end
+        @test RT_GROWTH_RATIO_MIN < sigma_num / sigma < RT_GROWTH_RATIO_MAX
+    end
 end
