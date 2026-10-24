@@ -17,7 +17,7 @@ Structure
 - jet/: impulse jet shear test.
 - internal_seiche/: two-layer standing-wave test.
 - surface_dam_break/: barotropic dam-break test.
-- kelvin_helmholtz/: stratified shear-layer instability test.
+- kelvin_helmholtz/: stratified shear-layer instability, periodic in x ([README](kelvin_helmholtz/README.md)).
 - wind_shear/: wind-driven free-surface transport and mixing case.
 - vegetation/: flow through flexible (and stiff short) vegetation stems.
 - validation/: scripts that compare selected cases to analytic/semianalytic references.

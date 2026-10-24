@@ -44,7 +44,7 @@ README with a description, settings and figures in its `figures/` subfolder.
 |---|---|---|
 | [Lock exchange](experiments/lock_exchange/README.md) | `lock_exchange/` | gravity current, front speed, Kelvin-Helmholtz billows, hydrostatic vs. non-hydrostatic |
 | [Rayleigh-Taylor instability](experiments/rayleigh_taylor/README.md) | `rayleigh_taylor/` | heavy over light fluid, linear growth vs. theory, overturning and mixing |
-| Kelvin-Helmholtz instability | `kelvin_helmholtz/` | stratified shear layer |
+| [Kelvin-Helmholtz instability](experiments/kelvin_helmholtz/README.md) | `kelvin_helmholtz/` | stratified shear layer, periodic domain, billow merging and mixing |
 | Buoyant plumes | `plumes/` | rising and sinking plumes |
 | Jet | `jet/` | impulse jet, shear |
 | Internal seiche | `internal_seiche/` | two-layer standing internal wave, period |
@@ -109,7 +109,8 @@ julia --project=. experiments/plumes/run_sinking_plume_dt001_40s_anim.jl
 julia --project=. experiments/jet/run_jet_impulse_dt0005_20s_anim.jl
 julia --project=. experiments/internal_seiche/run_internal_seiche_dt005_400s_anim.jl
 julia --project=. experiments/surface_dam_break/run_surface_dam_break_dt001_60s_anim.jl
-julia --project=. experiments/kelvin_helmholtz/run_kelvin_helmholtz_dt001_30s_anim.jl
+julia --project=. experiments/kelvin_helmholtz/plot_kelvin_helmholtz.jl
+julia --project=. experiments/kelvin_helmholtz/run_kelvin_helmholtz_dt00025_120s_anim.jl
 julia --project=. experiments/wind_shear/run_wind_shear_dt001_30s_anim.jl
 julia --project=. experiments/vegetation/run_uniform_flow_with_flexible_vegetation.jl
 julia --project=. experiments/vegetation/run_oscillating_flow_with_flexible_vegetation.jl
