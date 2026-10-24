@@ -87,8 +87,8 @@ kinetic energy grows without potential energy being released and the run eventua
 density differences and grid sizes, and also without the obstacle. The runs therefore stop at t* = 7.
 
 Investigating this problem led to the Lax-Wendroff time correction of the `tvd2` momentum advection, which removed an
-earlier and stronger energy source (technical documentation, section 3). The remaining surface problem is left for a
-separate issue; the most likely remedy is to extend the variable-thickness top layer to the non-hydrostatic mode.
+earlier and stronger energy source (technical documentation, section 3). The remaining surface problem is tracked in
+issue #5; the most likely remedy is to extend the variable-thickness top layer to the non-hydrostatic mode.
 Energy diagnostic used: kinetic energy 0.5 rho0 sum(u_c² + w_c²) dx dz against the released potential energy
 g sum((rho - rho0) z) dx dz (initial minus current), both over the wet cells.
 

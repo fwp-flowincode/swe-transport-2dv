@@ -19,7 +19,7 @@ using Printf
 include(joinpath(@__DIR__, "cases.jl"))
 
 # WHY 7: from t* ~ 7.5 the splash at the right wall drives a spurious thin jet along the free surface (top cell of the
-# fixed grid in the non-hydrostatic mode; see README, Limitations). All runs are clean up to t* = 7.
+# fixed grid in the non-hydrostatic mode; see README, Limitations, and issue #5). All runs are clean up to t* = 7.
 const T_END_STAR = 7.0                      # -, simulated time in units of sqrt(a/g')
 const SAMPLE_INTERVAL_STAR = 0.05           # -, sampling interval of front position and force
 const ANIMATION_INTERVAL_STAR = 0.1         # -, time between animation frames
