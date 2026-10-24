@@ -1046,6 +1046,22 @@ and density within the initial bounds; the density differs from an `upwind1` run
 used by `run!` and by `case_tag` in `experiments/common/helpers.jl`) names both schemes, e.g.
 `hydro_mom-tvd2_trans-upwind1_dt0p0025_L30p0_H4p0_dx0p300_dz0p200`.
 
+### Variable bed (issue #3)
+
+`ModelConfig.bed_level` (m above the grid bottom, one value per column) defines a staircase bed on the z-level grid
+(`BedGeometry`, `src/geometry.jl`). Each value must be a whole number of cells and leave at least two wet cells, so the
+bed stays below the top layer; dry columns and `periodic_x` are not supported. The masks: wet cells; open u-faces
+(both neighbouring cells wet, u may be non-zero) and active u-faces (at least one wet neighbour, walls with u = 0 that
+take part in the stencils like the outer domain faces); open w-faces (above the bed) and active w-faces (plus the bed
+face, w = 0). An explicit `bed_level`, also all zeros, uses the masked code paths; `nothing` keeps the legacy paths.
+
+### test_verify_bed_geometry_masks_and_checks
+
+Purpose: masks of an obstacle three cells high in two columns (lowest wet cell, wet-cell count, face bed levels, wall and
+interior faces of the obstacle, bed face of w); a zero bed has no solid cells and all faces open; invalid input (not a
+whole number of cells, fewer than two wet cells, negative, wrong length, periodic) raises `ArgumentError`;
+`copy_config` copies the bed level.
+
 ## Additional validation scripts and literature basis
 
 The repository includes standalone validation scripts under `experiments/validation`:

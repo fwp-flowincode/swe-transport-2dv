@@ -56,6 +56,11 @@ Base.@kwdef mutable struct ModelConfig
     # produce the depth-varying (dispersive) correction. Requires pressure_solver_method="sparse": the spectral (DCT)
     # method's fast transform represents only a Neumann-Neumann eigenbasis and cannot express this condition.
     nonhydro_surface_dirichlet::Bool = false
+    # Bed level per column (m above the grid bottom, length nx; issue #3), a staircase on the z-level grid: each entry
+    # must be a whole number of cells and leave at least two wet cells (the bed stays below the top layer; no dry
+    # columns). nothing (default) = flat bed, legacy code paths. An explicit vector (also all zeros) uses the masked
+    # code paths; see BedGeometry in src/geometry.jl.
+    bed_level::Union{Nothing,Vector{Float64}} = nothing
 end
 
 """
@@ -129,6 +134,7 @@ function copy_config(cfg::ModelConfig)
         variable_top_layer=cfg.variable_top_layer,
         top_layer_min_fraction=cfg.top_layer_min_fraction,
         nonhydro_surface_dirichlet=cfg.nonhydro_surface_dirichlet,
+        bed_level=cfg.bed_level === nothing ? nothing : copy(cfg.bed_level),
     )
 end
 
@@ -234,6 +240,7 @@ mutable struct Model{T<:Real}
     x_boundary_u_left_profile::Any
     x_boundary_u_right_open::Bool
     x_boundary_u_right_profile::Any
+    geometry::BedGeometry   # staircase bed masks (all cells wet for the flat bed)
 end
 
 function _linspace(start::Real, stop::Real, n::Int)
@@ -644,6 +651,7 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
     grad_p_z_reference = zeros(T, cfg.nz + 1, cfg.nx)   # filled by _refresh_density_metadata! below
 
     ws = ModelWorkspace(cfg; T=T)
+    geometry = BedGeometry(cfg.bed_level, cfg.nz, cfg.nx, dz; periodic_x=cfg.periodic_x)
 
     model = Model(
         cfg,
@@ -669,6 +677,7 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
         nothing,
         false,
         nothing,
+        geometry,
     )
 
     initialize_lock_exchange!(model; rho_left=cfg.rho_left, rho_right=cfg.rho_right)
@@ -937,6 +946,11 @@ function step_forward!(model::Model)
     _check_model_config(cfg)   # the flags are mutable after construction
     if cfg.periodic_x != model.pressure_correction_solver.periodic_x
         throw(ArgumentError("periodic_x cannot be changed after Model construction"))
+    end
+    if model.geometry.has_bed
+        # WHY: guard until the masked momentum, barotropic, projection and transport paths exist (issue #3 plan,
+        # phases 2-4); a bed would otherwise be silently ignored by the solvers.
+        throw(ArgumentError("bed_level is not yet supported by step_forward! (issue #3, in progress)"))
     end
     variable_top = use_variable_top_layer(cfg)
 

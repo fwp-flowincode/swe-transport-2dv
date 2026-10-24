@@ -10,4 +10,5 @@ include("test_common.jl")
     include("test_vegetation.jl")
     include("test_nonhydrostatic.jl")
     include("test_variable_top_layer.jl")
+    include("test_bed_geometry.jl")
 end
