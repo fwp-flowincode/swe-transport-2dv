@@ -58,6 +58,11 @@ README with a description, settings and figures in its `figures/` subfolder.
 *Lock exchange, non-hydrostatic, 1500 x 200 cells: Kelvin-Helmholtz billows behind the gravity-current
 fronts (see the [lock-exchange README](experiments/lock_exchange/README.md)).*
 
+<a href="experiments/rayleigh_taylor/README.md"><img src="experiments/rayleigh_taylor/figures/rayleigh_taylor_fast.gif" alt="Rayleigh-Taylor instability, fast case" width="560"></a>
+
+*Rayleigh-Taylor instability, non-hydrostatic, 400 x 160 cells: a heavy layer on top of light water overturns
+into sinking plumes (see the [Rayleigh-Taylor README](experiments/rayleigh_taylor/README.md)).*
+
 Folder layout
 -------------
 - `src/`: Julia package source.
