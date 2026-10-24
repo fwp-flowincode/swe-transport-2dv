@@ -4,11 +4,14 @@ mutable struct PressureCorrectionSolver{T<:Real}
     dz::T
     method::String
     top_dirichlet::Bool
+    periodic_x::Bool
     inv_lambda::Union{Matrix{T}, Nothing}
     poisson_matrix::Union{SparseMatrixCSC{T, Int}, Nothing}
     poisson_fact::Any
     rhs::Matrix{T}
     rhs_hat::Matrix{T}
+    rhs_complex::Matrix{Complex{T}}
+    rhs_hat_complex::Matrix{Complex{T}}
     p_corr::Matrix{T}
     div_tmp::Matrix{T}
     div_z_tmp::Matrix{T}
@@ -16,6 +19,8 @@ mutable struct PressureCorrectionSolver{T<:Real}
     p_corr_flat::Vector{T}
     dct_plan::Any
     idct_plan::Any
+    fft_x_plan::Any
+    ifft_x_plan::Any
     timers::TimerOutput
     fftw_threads::Int
 end
@@ -54,8 +59,8 @@ end
     build_poisson_matrix(shape, dx, dz; top_dirichlet=false)
 
 Sparse 5-point discrete Laplacian for the non-hydrostatic pressure correction `p'` on an `nz x nx` cell-centred grid
-(`shape = (nz, nx)`, k=1 bottom, k=nz top; `dx`, `dz` in m), Neumann (zero-flux) at the bottom and side walls in every
-case.
+(`shape = (nz, nx)`, k=1 bottom, k=nz top; `dx`, `dz` in m), Neumann (zero-flux) at the bottom and side walls by
+default. `periodic_x=true` wraps the x-neighbours between the first and last columns.
 
 `top_dirichlet=false` (legacy): Neumann at the top too, matching the spectral (DCT) solver's eigenbasis exactly (see
 `test_pressure_solver_spectral_matches_sparse_reference`). This operator has a 1D null space (the constant mode); row 1
@@ -76,7 +81,7 @@ Verification (`test_verify_poisson_matrix_top_dirichlet_matches_manufactured_sol
 `p(z) = C/2*(z^2 - H^2)` solves `p'' = C` on `z in (0,H)` with `p'(0)=0` (Neumann bottom) and `p(H)=0` (Dirichlet top,
 at the domain edge, matching the ghost closure above).
 """
-function build_poisson_matrix(shape::Tuple{Int, Int}, dx::Real, dz::Real; top_dirichlet::Bool=false)
+function build_poisson_matrix(shape::Tuple{Int, Int}, dx::Real, dz::Real; top_dirichlet::Bool=false, periodic_x::Bool=false)
     nz, nx = shape
     n = nz * nx
 
@@ -97,13 +102,19 @@ function build_poisson_matrix(shape::Tuple{Int, Int}, dx::Real, dz::Real; top_di
             r = idx(k, i)
             diag = 0.0
 
-            if i > 1
-                push!(row, r); push!(col, idx(k, i - 1)); push!(val, inv_dx2)
-                diag -= inv_dx2
-            end
-            if i < nx
-                push!(row, r); push!(col, idx(k, i + 1)); push!(val, inv_dx2)
-                diag -= inv_dx2
+            if periodic_x
+                push!(row, r); push!(col, idx(k, mod1(i - 1, nx))); push!(val, inv_dx2)
+                push!(row, r); push!(col, idx(k, mod1(i + 1, nx))); push!(val, inv_dx2)
+                diag -= 2.0 * inv_dx2
+            else
+                if i > 1
+                    push!(row, r); push!(col, idx(k, i - 1)); push!(val, inv_dx2)
+                    diag -= inv_dx2
+                end
+                if i < nx
+                    push!(row, r); push!(col, idx(k, i + 1)); push!(val, inv_dx2)
+                    diag -= inv_dx2
+                end
             end
             if k > 1
                 push!(row, r); push!(col, idx(k - 1, i)); push!(val, inv_dz2)
@@ -132,16 +143,18 @@ end
 """
     PressureCorrectionSolver(shape, dx, dz; method="spectral", top_dirichlet=false, T=Float64)
 
-`top_dirichlet=true` requires `method="sparse"`: the spectral method's DCT-based fast transform represents only a pure
-Neumann-Neumann eigenbasis in z and cannot express a Dirichlet top condition (a different, mixed-condition transform
-would be needed; not implemented). See `build_poisson_matrix` for the boundary condition and docs section 15 for why a
-Dirichlet top condition is needed for dispersive non-hydrostatic surface waves.
+`top_dirichlet=true` requires `method="sparse"`: the spectral method's DCT-based fast transform cannot express this
+condition. `periodic_x=true` is supported by both methods; the spectral method uses an FFT in x and a DCT in z. See
+`build_poisson_matrix` for the boundary condition and docs section 15 for why a Dirichlet top condition is needed for
+dispersive non-hydrostatic surface waves.
 """
-function PressureCorrectionSolver(shape::Tuple{Int, Int}, dx::Real, dz::Real; method::String="spectral", top_dirichlet::Bool=false, T::Type{<:Real}=Float64)
+function PressureCorrectionSolver(shape::Tuple{Int, Int}, dx::Real, dz::Real; method::String="spectral", top_dirichlet::Bool=false, periodic_x::Bool=false, T::Type{<:Real}=Float64)
     nz, nx = shape
 
     rhs = zeros(T, nz, nx)
     rhs_hat = zeros(T, nz, nx)
+    rhs_complex = zeros(Complex{T}, nz, nx)
+    rhs_hat_complex = zeros(Complex{T}, nz, nx)
     p_corr = zeros(T, nz, nx)
     div_tmp = zeros(T, nz, nx)
     div_z_tmp = zeros(T, nz, nx)
@@ -154,7 +167,9 @@ function PressureCorrectionSolver(shape::Tuple{Int, Int}, dx::Real, dz::Real; me
         end
         kx = collect(0:(nx - 1))
         kz = collect(0:(nz - 1))
-        lam_x = [2.0 * (cos(pi * x / nx) - 1.0) / (dx * dx) for x in kx]
+        lam_x = periodic_x ?
+            [2.0 * (cos(2.0 * pi * x / nx) - 1.0) / (dx * dx) for x in kx] :
+            [2.0 * (cos(pi * x / nx) - 1.0) / (dx * dx) for x in kx]
         lam_z = [2.0 * (cos(pi * z / nz) - 1.0) / (dz * dz) for z in kz]
         inv_lambda = zeros(T, nz, nx)
         @inbounds for i in 1:nx
@@ -170,14 +185,23 @@ function PressureCorrectionSolver(shape::Tuple{Int, Int}, dx::Real, dz::Real; me
         fftw_threads = max(1, Base.Threads.nthreads())
         FFTW.set_num_threads(fftw_threads)
 
-        dct_plan = FFTW.plan_dct(rhs, (1, 2); flags=FFTW.MEASURE)
-        idct_plan = FFTW.plan_idct(rhs_hat, (1, 2); flags=FFTW.MEASURE)
+        if periodic_x
+            dct_plan = FFTW.plan_dct(rhs, (1,); flags=FFTW.MEASURE)
+            idct_plan = FFTW.plan_idct(rhs_hat, (1,); flags=FFTW.MEASURE)
+            fft_x_plan = FFTW.plan_fft(rhs_complex, (2,); flags=FFTW.MEASURE)
+            ifft_x_plan = FFTW.plan_ifft(rhs_hat_complex, (2,); flags=FFTW.MEASURE)
+        else
+            dct_plan = FFTW.plan_dct(rhs, (1, 2); flags=FFTW.MEASURE)
+            idct_plan = FFTW.plan_idct(rhs_hat, (1, 2); flags=FFTW.MEASURE)
+            fft_x_plan = nothing
+            ifft_x_plan = nothing
+        end
 
-        return PressureCorrectionSolver(shape, T(dx), T(dz), method, top_dirichlet, inv_lambda, nothing, nothing, rhs, rhs_hat, p_corr, div_tmp, div_z_tmp, rhs_flat, p_corr_flat, dct_plan, idct_plan, TimerOutput(), fftw_threads)
+        return PressureCorrectionSolver(shape, T(dx), T(dz), method, top_dirichlet, periodic_x, inv_lambda, nothing, nothing, rhs, rhs_hat, rhs_complex, rhs_hat_complex, p_corr, div_tmp, div_z_tmp, rhs_flat, p_corr_flat, dct_plan, idct_plan, fft_x_plan, ifft_x_plan, TimerOutput(), fftw_threads)
     elseif method == "sparse"
-        A = build_poisson_matrix(shape, dx, dz; top_dirichlet=top_dirichlet)
+        A = build_poisson_matrix(shape, dx, dz; top_dirichlet=top_dirichlet, periodic_x=periodic_x)
         F = lu(A)
-        return PressureCorrectionSolver(shape, T(dx), T(dz), method, top_dirichlet, nothing, A, F, rhs, rhs_hat, p_corr, div_tmp, div_z_tmp, rhs_flat, p_corr_flat, nothing, nothing, TimerOutput(), 1)
+        return PressureCorrectionSolver(shape, T(dx), T(dz), method, top_dirichlet, periodic_x, nothing, A, F, rhs, rhs_hat, rhs_complex, rhs_hat_complex, p_corr, div_tmp, div_z_tmp, rhs_flat, p_corr_flat, nothing, nothing, nothing, nothing, TimerOutput(), 1)
     else
         throw(ArgumentError("Unsupported pressure solver method '$(method)'"))
     end
@@ -250,18 +274,39 @@ function solve!(solver::PressureCorrectionSolver{T}, u::AbstractMatrix{<:Real}, 
     end
 
     if solver.method == "spectral"
-        @timeit solver.timers "pressure/dct_forward" mul!(solver.rhs_hat, solver.dct_plan, solver.rhs)
-
-        @timeit solver.timers "pressure/diagonal_solve" begin
-            @inbounds for i in 1:nx
-                for k in 1:nz
-                    solver.rhs_hat[k, i] *= solver.inv_lambda[k, i]
-                end
+        if solver.periodic_x
+            @timeit solver.timers "pressure/dct_forward" mul!(solver.rhs_hat, solver.dct_plan, solver.rhs)
+            @inbounds for i in 1:nx, k in 1:nz
+                solver.rhs_complex[k, i] = complex(solver.rhs_hat[k, i], 0.0)
             end
-            solver.rhs_hat[1, 1] = 0.0
-        end
+            @timeit solver.timers "pressure/fft_x_forward" mul!(solver.rhs_hat_complex, solver.fft_x_plan, solver.rhs_complex)
 
-        @timeit solver.timers "pressure/idct_inverse" mul!(solver.p_corr, solver.idct_plan, solver.rhs_hat)
+            @timeit solver.timers "pressure/diagonal_solve" begin
+                @inbounds for i in 1:nx, k in 1:nz
+                    solver.rhs_hat_complex[k, i] *= solver.inv_lambda[k, i]
+                end
+                solver.rhs_hat_complex[1, 1] = 0.0 + 0.0im
+            end
+
+            @timeit solver.timers "pressure/fft_x_inverse" mul!(solver.rhs_complex, solver.ifft_x_plan, solver.rhs_hat_complex)
+            @inbounds for i in 1:nx, k in 1:nz
+                solver.rhs_hat[k, i] = real(solver.rhs_complex[k, i])
+            end
+            @timeit solver.timers "pressure/idct_inverse" mul!(solver.p_corr, solver.idct_plan, solver.rhs_hat)
+        else
+            @timeit solver.timers "pressure/dct_forward" mul!(solver.rhs_hat, solver.dct_plan, solver.rhs)
+
+            @timeit solver.timers "pressure/diagonal_solve" begin
+                @inbounds for i in 1:nx
+                    for k in 1:nz
+                        solver.rhs_hat[k, i] *= solver.inv_lambda[k, i]
+                    end
+                end
+                solver.rhs_hat[1, 1] = 0.0
+            end
+
+            @timeit solver.timers "pressure/idct_inverse" mul!(solver.p_corr, solver.idct_plan, solver.rhs_hat)
+        end
 
         @timeit solver.timers "pressure/remove_pcorr_mean" begin
             p_mean = mean(solver.p_corr)

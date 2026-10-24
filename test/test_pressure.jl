@@ -108,6 +108,28 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test all(isapprox.(gz_spec, gz_sparse, atol=1e-6, rtol=1e-6))
     end
 
+    @testset "test_periodic_pressure_spectral_matches_sparse_reference" begin
+        nz, nx = 7, 10
+        dx, dz, dt, rho0 = 0.2, 0.3, 0.05, 1000.0
+        Random.seed!(21)
+        u = randn(nz, nx + 1) .* 0.03
+        u[:, end] .= u[:, 1]
+        w = randn(nz + 1, nx) .* 0.03
+        w[1, :] .= 0.0
+        w[end, :] .= 0.0
+
+        spec = PressureCorrectionSolver((nz, nx), dx, dz; method="spectral", periodic_x=true)
+        sparse_solver = PressureCorrectionSolver((nz, nx), dx, dz; method="sparse", periodic_x=true)
+        p_spec = solve!(spec, u, w, rho0, dt, dx, dz)
+        p_sparse = solve!(sparse_solver, u, w, rho0, dt, dx, dz)
+
+        @test all(isapprox.(grad_x_c(p_spec, dx; periodic_x=true), grad_x_c(p_sparse, dx; periodic_x=true), atol=1e-7, rtol=1e-7))
+        @test all(isapprox.(grad_z_c(p_spec, dz), grad_z_c(p_sparse, dz), atol=1e-7, rtol=1e-7))
+        A = sparse_solver.poisson_matrix
+        idx(k, i) = (k - 1) * nx + i
+        @test A[idx(3, 1), idx(3, nx)] ≈ 1.0 / dx^2
+    end
+
     @testset "test_hydrostatic_pressure_vectorized_matches_reference_loop" begin
         Random.seed!(7)
         nz, nx = 9, 11

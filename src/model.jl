@@ -24,6 +24,8 @@ Base.@kwdef mutable struct ModelConfig
     # WHY "upwind1" default: keeps the results of the validated cases unchanged.
     transport_advection_scheme::String = "upwind1"
     use_hydrostatic::Bool = true
+    # Periodic lateral domain; requires the sparse pressure solver and fixed-thickness layers.
+    periodic_x::Bool = false
     pressure_solver_method::String = "spectral"
     write_plots::Bool = true
     write_animation::Bool = true
@@ -74,7 +76,7 @@ schemes, dt (s), length and depth (m), dx and dz (m); every '.' is replaced by '
 """
 function output_case_tag(cfg::ModelConfig)
     mode_tag = cfg.use_hydrostatic ? "hydro" : "nonhydro"
-    return replace(
+    tag = replace(
         @sprintf(
             "%s_mom-%s_trans-%s_dt%.4f_L%.1f_H%.1f_dx%.3f_dz%.3f",
             mode_tag,
@@ -88,6 +90,7 @@ function output_case_tag(cfg::ModelConfig)
         ),
         "." => "p",
     )
+    return cfg.periodic_x ? "$(tag)_xperiodic" : tag
 end
 
 function copy_config(cfg::ModelConfig)
@@ -114,6 +117,7 @@ function copy_config(cfg::ModelConfig)
         momentum_advection_scheme=cfg.momentum_advection_scheme,
         transport_advection_scheme=cfg.transport_advection_scheme,
         use_hydrostatic=cfg.use_hydrostatic,
+        periodic_x=cfg.periodic_x,
         pressure_solver_method=cfg.pressure_solver_method,
         write_plots=cfg.write_plots,
         write_animation=cfg.write_animation,
@@ -179,7 +183,7 @@ function ModelWorkspace(cfg::ModelConfig; T::Type{<:Real}=Float64)
         zeros(T, nz - 1, nx),
         zeros(T, nz, nx),
         zeros(T, nx),
-        zeros(T, nx - 1),
+        zeros(T, nx + 1),
         zeros(T, nx),
         zeros(T, nz, nx),
         zeros(T, nz, nx),
@@ -473,8 +477,12 @@ function initialize_jet_impulse!(
         end
     end
 
-    @views st.u[:, 1] .= 0.0
-    @views st.u[:, end] .= 0.0
+    if cfg.periodic_x
+        @views st.u[:, end] .= st.u[:, 1]
+    else
+        @views st.u[:, 1] .= 0.0
+        @views st.u[:, end] .= 0.0
+    end
 
     _refresh_density_metadata!(model)
 
@@ -620,7 +628,7 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
     last_buoy_w = zeros(T, cfg.nz - 1, cfg.nx)
 
     barotropic_solver = BarotropicSolver(cfg, dx, dz; T=T)
-    pressure_solver = PressureCorrectionSolver((cfg.nz, cfg.nx), dx, dz; method=cfg.pressure_solver_method, top_dirichlet=cfg.nonhydro_surface_dirichlet, T=T)
+    pressure_solver = PressureCorrectionSolver((cfg.nz, cfg.nx), dx, dz; method=cfg.pressure_solver_method, top_dirichlet=cfg.nonhydro_surface_dirichlet, periodic_x=cfg.periodic_x, T=T)
 
     z_w = _linspace(0.0, cfg.depth, cfg.nz + 1)
     z_c = _linspace(dz / 2.0, cfg.depth - dz / 2.0, cfg.nz)
@@ -682,6 +690,9 @@ function clear_x_inflow_outflow!(model::Model)
 end
 
 function _check_model_config(cfg::ModelConfig)
+    if cfg.periodic_x && use_variable_top_layer(cfg)
+        throw(ArgumentError("periodic_x=true is not supported with the variable top layer"))
+    end
     if cfg.variable_top_layer === true && !cfg.use_hydrostatic
         throw(ArgumentError("variable_top_layer=true is implemented for the hydrostatic mode only (use_hydrostatic=true): the non-hydrostatic pressure projection assumes a fixed geometry"))
     end
@@ -720,6 +731,11 @@ end
 
 # Applies the lateral velocity boundary conditions to `u` (state.u or a provisional u_hat, m/s, size nz x (nx+1)).
 function _apply_x_boundary_conditions!(model::Model, u::AbstractMatrix{<:Real})
+    if model.config.periodic_x
+        @views u[:, end] .= u[:, 1]
+        return nothing
+    end
+
     if model.x_boundary_u_left_profile === nothing
         @views u[:, 1] .= 0.0
     else
@@ -912,6 +928,9 @@ function step_forward!(model::Model)
     ws = model.ws
 
     _check_model_config(cfg)   # the flags are mutable after construction
+    if cfg.periodic_x != model.pressure_correction_solver.periodic_x
+        throw(ArgumentError("periodic_x cannot be changed after Model construction"))
+    end
     variable_top = use_variable_top_layer(cfg)
 
     copyto!(ws.eta_old, st.eta)
@@ -920,8 +939,8 @@ function step_forward!(model::Model)
         top_layer_face_thickness!(ws.h_top_face, ws.eta_old, model.dz)
     end
 
-    @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=variable_top)
-    @timeit model.timers "step/advection_w" advection_term_w!(ws.adv_w, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_w_ws, ws.interpolation_ws)
+    @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=variable_top, periodic_x=cfg.periodic_x)
+    @timeit model.timers "step/advection_w" advection_term_w!(ws.adv_w, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_w_ws, ws.interpolation_ws, cfg.periodic_x)
 
     @timeit model.timers "step/hydrostatic_predictor" begin
         solve_hydrostatic_pressure!(ws.p_internal, st.rho, cfg.g, model.dz; top_half_layer=variable_top)
@@ -929,9 +948,9 @@ function step_forward!(model::Model)
     end
 
     @timeit model.timers "step/u_hat_predictor" begin
-        grad_x_c!(ws.grad_p_x, ws.p_internal, model.dx)
+        grad_x_c!(ws.grad_p_x, ws.p_internal, model.dx; periodic_x=cfg.periodic_x)
         _compute_effective_viscosity_u!(ws.nu_eff_u, model)
-        diffusion_term!(ws.diff_u, st.u, ws.nu_eff_u, model.dx, model.dz)
+        diffusion_term!(ws.diff_u, st.u, ws.nu_eff_u, model.dx, model.dz; periodic_x=cfg.periodic_x)
 
         nz, nxp1 = size(st.u)
         @inbounds for i in 1:nxp1
@@ -1005,15 +1024,25 @@ function step_forward!(model::Model)
     end
 
     @timeit model.timers "step/free_surface_slope" begin
-        @inbounds for i in 1:(nx - 1)
-            ws.eta_grad_x[i] = (st.eta[i + 1] - st.eta[i]) / model.dx
+        if cfg.periodic_x
+            ws.eta_grad_x[1] = (st.eta[1] - st.eta[end]) / model.dx
+            @inbounds for i in 2:nx
+                ws.eta_grad_x[i] = (st.eta[i] - st.eta[i - 1]) / model.dx
+            end
+            ws.eta_grad_x[nx + 1] = ws.eta_grad_x[1]
+        else
+            @inbounds for i in 1:(nx - 1)
+                ws.eta_grad_x[i] = (st.eta[i + 1] - st.eta[i]) / model.dx
+            end
         end
 
         # WHY: corrects ws.u_hat in place (not yet written to st.u) so a following non-hydrostatic projection acts on
         # this surface-corrected predictor, exactly as it already acted on the (pressure-predictor-only) u_hat before.
-        @inbounds for i in 2:nx
+        ilo, ihi = cfg.periodic_x ? (1, nx + 1) : (2, nx)
+        @inbounds for i in ilo:ihi
             for k in 1:cfg.nz
-                ws.u_hat[k, i] -= cfg.g * cfg.dt * ws.eta_grad_x[i - 1]
+                grad_index = cfg.periodic_x ? i : i - 1
+                ws.u_hat[k, i] -= cfg.g * cfg.dt * ws.eta_grad_x[grad_index]
             end
         end
 
@@ -1038,7 +1067,7 @@ function step_forward!(model::Model)
             solve!(model.pressure_correction_solver, ws.u_hat, ws.w_hat, cfg.rho0, cfg.dt, model.dx, model.dz)
             copyto!(ws.p_corr, model.pressure_correction_solver.p_corr)
 
-            grad_x_c!(ws.grad_pc_x, ws.p_corr, model.dx)
+            grad_x_c!(ws.grad_pc_x, ws.p_corr, model.dx; periodic_x=cfg.periodic_x)
             grad_z_c!(ws.grad_pc_z, ws.p_corr, model.dz)
 
             @. ws.u_hat = ws.u_hat - cfg.dt * (1.0 / cfg.rho0) * ws.grad_pc_x
@@ -1061,7 +1090,8 @@ function step_forward!(model::Model)
     end
 
     @timeit model.timers "step/free_surface_u_update" begin
-        @inbounds for i in 2:nx
+        ilo, ihi = cfg.periodic_x ? (1, nx + 1) : (2, nx)
+        @inbounds for i in ilo:ihi
             for k in 1:cfg.nz
                 st.u[k, i] = ws.u_hat[k, i]
             end
@@ -1069,7 +1099,7 @@ function step_forward!(model::Model)
 
         if cfg.wind_stress_x != 0.0
             du_wind = cfg.dt * cfg.wind_stress_x / (cfg.rho0 * model.dz)
-            @inbounds for i in 2:nx
+            @inbounds for i in ilo:ihi
                 st.u[cfg.nz, i] += du_wind
             end
         end
@@ -1116,7 +1146,7 @@ function step_forward!(model::Model)
         else
             # WHY: fixed grid (variable top layer off, incl. every non-hydrostatic run): advective form in the top row removes
             # the spurious source of the moving top face, see _density_top_row_advective_form! (docs section 4).
-            advect_density!(ws.rho_new, st.rho, st.u, st.w, cfg.dt, model.dx, model.dz, ws.density_ws; scheme=cfg.transport_advection_scheme, top_row_advective_form=true, rho_min=model.rho_min_init, rho_max=model.rho_max_init)
+            advect_density!(ws.rho_new, st.rho, st.u, st.w, cfg.dt, model.dx, model.dz, ws.density_ws; scheme=cfg.transport_advection_scheme, top_row_advective_form=true, periodic_x=cfg.periodic_x, rho_min=model.rho_min_init, rho_max=model.rho_max_init)
         end
         _apply_wind_surface_density_mixing!(ws.rho_new, cfg, model.dz)
         copyto!(st.rho, ws.rho_new)
@@ -1322,6 +1352,7 @@ mutable struct BarotropicSolver{T<:Real}
     dx::T
     dz::T
     nx::Int
+    periodic_factorization::Any
     H::T
     g::T
     dt::T
@@ -1350,6 +1381,21 @@ function BarotropicSolver(cfg::ModelConfig, dx::Real, dz::Real; T::Type{<:Real}=
     dt = T(cfg.dt)
 
     alpha = dt * dt * g * H / (dx * dx)
+    periodic_factorization = nothing
+    if cfg.periodic_x
+        rows = Int[]
+        cols = Int[]
+        vals = T[]
+        sizehint!(rows, 3 * nx)
+        sizehint!(cols, 3 * nx)
+        sizehint!(vals, 3 * nx)
+        for i in 1:nx
+            push!(rows, i); push!(cols, i); push!(vals, one(T) + 2 * alpha)
+            push!(rows, i); push!(cols, mod1(i - 1, nx)); push!(vals, -alpha)
+            push!(rows, i); push!(cols, mod1(i + 1, nx)); push!(vals, -alpha)
+        end
+        periodic_factorization = lu(sparse(rows, cols, vals, nx, nx))
+    end
     lower = fill(T(-alpha), nx - 1)
     main = fill(T(1.0 + 2.0 * alpha), nx)
     upper = fill(T(-alpha), nx - 1)
@@ -1379,7 +1425,7 @@ function BarotropicSolver(cfg::ModelConfig, dx::Real, dz::Real; T::Type{<:Real}=
     x = zeros(T, nx)
 
     return BarotropicSolver(
-        cfg, T(dx), T(dz), nx, H, g, dt, lower, main, upper, cp, inv_denom, U_hat, rhs, dp, x,
+        cfg, T(dx), T(dz), nx, periodic_factorization, H, g, dt, lower, main, upper, cp, inv_denom, U_hat, rhs, dp, x,
         zeros(T, nx - 1), zeros(T, nx), zeros(T, nx - 1), zeros(T, nx - 1), zeros(T, nx),
     )
 end
@@ -1407,6 +1453,9 @@ function solve_variable_thickness!(
     eta_old::AbstractVector{<:Real},
     h_top_face::AbstractVector{<:Real},
 )
+    if solver.periodic_factorization !== nothing
+        throw(ArgumentError("solve_variable_thickness! does not support periodic_x=true"))
+    end
     nx = solver.nx
     nz = size(u_hat, 1)
     dx = solver.dx
@@ -1489,7 +1538,11 @@ function solve!(solver::BarotropicSolver, eta::AbstractVector{<:Real}, u_hat::Ab
         solver.rhs[i] = eta_old[i] - solver.dt * div_U_hat
     end
 
-    _solve_tridiagonal!(solver, solver.rhs, solver.dp, solver.x)
+    if solver.periodic_factorization === nothing
+        _solve_tridiagonal!(solver, solver.rhs, solver.dp, solver.x)
+    else
+        copyto!(solver.x, solver.periodic_factorization \ solver.rhs)
+    end
     copyto!(eta, solver.x)
 
     return eta
