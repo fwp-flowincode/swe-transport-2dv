@@ -1060,7 +1060,7 @@ face, w = 0). An explicit `bed_level`, also all zeros, uses the masked code path
 Purpose: masks of an obstacle three cells high in two columns (lowest wet cell, wet-cell count, face bed levels, wall and
 interior faces of the obstacle, bed face of w); a zero bed has no solid cells and all faces open; invalid input (not a
 whole number of cells, fewer than two wet cells, negative, wrong length, periodic) raises `ArgumentError`;
-`copy_config` copies the bed level.
+`copy_config` copies the bed level; the plotting helper leaves solid cells blank (NaN) and passes flat-bed fields through.
 
 ### test_verify_flat_bed_reproduces_legacy_results_hydrostatic
 

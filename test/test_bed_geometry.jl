@@ -45,6 +45,12 @@ include(joinpath(@__DIR__, "test_common.jl"))
         cfg2 = copy_config(cfg)
         @test cfg2.bed_level == bed && cfg2.bed_level !== cfg.bed_level
         @test copy_config(ModelConfig()).bed_level === nothing
+
+        # plots leave the bed blank (NaN), flat beds are passed through unchanged
+        field = fill(1000.0, nz, nx)
+        blanked = SweTransport2DV._blank_solid_cells(field, cfg)
+        @test all(isnan, blanked[.!geo.wet_cell]) && all(==(1000.0), blanked[geo.wet_cell])
+        @test SweTransport2DV._blank_solid_cells(field, ModelConfig(nx=nx, nz=nz)) === field
     end
 
     BED_EQUIVALENCE_TOL_U = 1e-10        # m/s, raised bed vs shallower domain (round-off from summation order)
