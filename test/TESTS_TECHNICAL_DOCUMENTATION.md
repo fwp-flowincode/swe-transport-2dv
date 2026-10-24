@@ -1062,6 +1062,36 @@ interior faces of the obstacle, bed face of w); a zero bed has no solid cells an
 whole number of cells, fewer than two wet cells, negative, wrong length, periodic) raises `ArgumentError`;
 `copy_config` copies the bed level.
 
+### test_verify_flat_bed_reproduces_legacy_results_hydrostatic
+
+Purpose: an explicit zero bed runs through every masked code path (advection, diffusion and transport masks, velocity
+masking, per-face barotropic depth, w reconstruction from the bed, mass-correction mask). After 200 lock-exchange steps
+u, w, rho and eta must equal the legacy flat-bed run bit for bit, with and without the variable top layer.
+
+### test_verify_raised_flat_bed_equals_shallower_domain_hydrostatic
+
+Purpose: a uniform bed of 1 m (5 cells) under a 4 m domain must give the same lock exchange as a 3 m domain with 15
+layers: velocities within 1e-10 m/s, densities within 1e-9 kg/m³, eta within 1e-11 m after 200 steps (round-off from
+the summation order of the mass correction); u and w are exactly zero in and on the bed.
+
+### test_verify_rest_state_over_obstacle_hydrostatic
+
+Purpose: horizontally stratified water at rest over an obstacle (6 cells high) stays exactly at rest for 400 steps,
+both top-layer modes. On the z-level grid the hydrostatic pressure at a level depends only on the water above, so the
+obstacle walls produce no pressure-gradient error.
+
+### test_verify_lock_exchange_over_obstacle_conserves_hydrostatic
+
+Purpose: lock exchange over the obstacle for 2000 steps: water volume and constituent mass conserved, density within
+its initial bounds in the wet cells, u exactly zero on all closed faces, and the current is running (contrast).
+
+### test_validate_seiche_over_raised_bed
+
+Analytical solution: linear standing wave over a uniformly raised bed of height d, period $T=2L/\sqrt{g(H-d)}$
+($L=20$ m, $H=4$ m, $d=1$ m). Required: relative period error below 5e-4 on $n_x=40$ (measured 2.7e-4) and an
+observed order in $(1.6, 2.4)$ between $n_x=20$ and 40 (measured 1.96). Same errors as the flat-bed seiche test, so the
+per-face depth of the barotropic solve is consistent.
+
 ## Additional validation scripts and literature basis
 
 The repository includes standalone validation scripts under `experiments/validation`:

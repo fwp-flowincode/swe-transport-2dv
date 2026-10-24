@@ -46,4 +46,126 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test cfg2.bed_level == bed && cfg2.bed_level !== cfg.bed_level
         @test copy_config(ModelConfig()).bed_level === nothing
     end
+
+    BED_EQUIVALENCE_TOL_U = 1e-10        # m/s, raised bed vs shallower domain (round-off from summation order)
+    BED_EQUIVALENCE_TOL_RHO = 1e-9       # kg/m^3
+    BED_EQUIVALENCE_TOL_ETA = 1e-11      # m
+    BED_VOLUME_TOL = 1e-8                # m^2, water-volume drift over a run (same as the legacy tests)
+    SEICHE_BED_ORDER_MIN = 1.6           # -, observed order of the second-order free-surface scheme
+    SEICHE_BED_ORDER_MAX = 2.4
+    SEICHE_BED_REL_ERROR_MAX = 5e-4      # -, relative period error on the finer grid (measured 2.7e-4)
+
+    # lock-exchange settings shared by the model-level tests below
+    bed_test_config(; kwargs...) = ModelConfig(; nx=60, nz=20, dt=0.005, use_hydrostatic=true, transport_advection_scheme="tvd2",
+        rayleigh_damping=0.0, apply_froude_limiter=false, nu=1e-4, write_plots=false, write_animation=false,
+        write_pressure_buoyancy_diagnostics=false, kwargs...)
+
+    @testset "test_verify_flat_bed_reproduces_legacy_results_hydrostatic" begin
+        # An explicit zero bed runs through all masked code paths; it must reproduce the legacy flat-bed results bit
+        # for bit (with and without the variable top layer).
+        for variable_top in (true, false)
+            legacy = Model(bed_test_config(variable_top_layer=variable_top))
+            masked = Model(bed_test_config(variable_top_layer=variable_top, bed_level=zeros(60)))
+            for _ in 1:200
+                step_forward!(legacy)
+                step_forward!(masked)
+            end
+            @test masked.state.u == legacy.state.u
+            @test masked.state.w == legacy.state.w
+            @test masked.state.rho == legacy.state.rho
+            @test masked.state.eta == legacy.state.eta
+        end
+    end
+
+    @testset "test_verify_raised_flat_bed_equals_shallower_domain_hydrostatic" begin
+        # A uniform bed of d = 1 m (5 cells of 0.2 m) under a 4 m domain is the same problem as a 3 m domain with 15
+        # layers. Checks the masks, the per-face barotropic depth and the w reconstruction from the bed together.
+        H, d, nz = 4.0, 1.0, 20
+        nb = 5
+        for variable_top in (true, false)
+            raised = Model(bed_test_config(nz=nz, depth=H, variable_top_layer=variable_top, bed_level=fill(d, 60)))
+            shallow = Model(bed_test_config(nz=nz - nb, depth=H - d, variable_top_layer=variable_top))
+            for _ in 1:200
+                step_forward!(raised)
+                step_forward!(shallow)
+            end
+            @test maximum(abs, raised.state.u[(nb + 1):end, :] .- shallow.state.u) < BED_EQUIVALENCE_TOL_U
+            @test maximum(abs, raised.state.rho[(nb + 1):end, :] .- shallow.state.rho) < BED_EQUIVALENCE_TOL_RHO
+            @test maximum(abs, raised.state.eta .- shallow.state.eta) < BED_EQUIVALENCE_TOL_ETA
+            @test all(==(0.0), raised.state.u[1:nb, :])
+            @test all(==(0.0), raised.state.w[1:(nb + 1), :])
+        end
+    end
+
+    @testset "test_verify_rest_state_over_obstacle_hydrostatic" begin
+        # Horizontally stratified water at rest over an obstacle stays exactly at rest (no spurious currents at the
+        # obstacle walls): the hydrostatic pressure at a z-level does not depend on the bed below.
+        bed = zeros(60)
+        bed[28:33] .= 1.2                       # m, obstacle 6 cells high
+        for variable_top in (true, false)
+            model = Model(bed_test_config(variable_top_layer=variable_top, bed_level=bed, nu=0.0))
+            zc = [(k - 0.5) * model.dz for k in 1:model.config.nz]
+            for i in 1:60, k in 1:model.config.nz
+                model.state.rho[k, i] = 1000.0 + 0.5 * (1.0 - zc[k] / model.config.depth)
+            end
+            refresh_density_metadata!(model)
+            for _ in 1:400
+                step_forward!(model)
+            end
+            @test maximum(abs, model.state.u) == 0.0
+            @test maximum(abs, model.state.w) == 0.0
+            @test maximum(abs, model.state.eta) == 0.0
+        end
+    end
+
+    @testset "test_verify_lock_exchange_over_obstacle_conserves_hydrostatic" begin
+        bed = zeros(60)
+        bed[28:33] .= 1.2
+        for variable_top in (true, false)
+            model = Model(bed_test_config(variable_top_layer=variable_top, bed_level=bed))
+            d0 = compute_diagnostics(model)
+            for _ in 1:2000
+                step_forward!(model)
+            end
+            d1 = compute_diagnostics(model)
+            geo = model.geometry
+            @test abs(d1["water_volume"] - d0["water_volume"]) < BED_VOLUME_TOL
+            @test abs(d1["constituent_mass"] - d0["constituent_mass"]) < TOL_MODEL_IDENTITY * abs(d0["constituent_mass"])
+            @test minimum(model.state.rho[geo.wet_cell]) >= model.rho_min_init - TOL_IDENTITY
+            @test maximum(model.state.rho[geo.wet_cell]) <= model.rho_max_init + TOL_IDENTITY
+            @test all(==(0.0), model.state.u[.!geo.u_open])
+            @test maximum(abs, model.state.u) > 0.05    # contrast: the gravity current is running
+        end
+    end
+
+    @testset "test_validate_seiche_over_raised_bed" begin
+        # Analytical solution: linear standing wave over a uniformly raised bed of height d,
+        # eta = A cos(pi x/L) cos(omega t), period T = 2L / sqrt(g (H - d)). Zero crossing of eta in cell 1 at
+        # omega t = pi/2 (as in test_verify_variable_top_layer_seiche_period_and_convergence).
+        L, H, d, A, dt = 20.0, 4.0, 1.0, 1e-4, 0.005
+        g = 9.81
+        T_exact = 2.0 * L / sqrt(g * (H - d))
+        function seiche_period(nx::Int)
+            cfg = ModelConfig(nx=nx, nz=20, length=L, depth=H, dt=dt, use_hydrostatic=true, variable_top_layer=true,
+                rayleigh_damping=0.0, apply_froude_limiter=false, momentum_advection_scheme="upwind1", bed_level=fill(d, nx))
+            model = Model(cfg)
+            x = [(i - 0.5) * model.dx for i in 1:nx]
+            model.state.eta .= A .* cos.(pi .* x ./ L)
+            fill!(model.state.rho, 1000.0)
+            refresh_density_metadata!(model)
+            t_prev, e_prev = 0.0, model.state.eta[1]
+            for n in 1:round(Int, 0.5 * T_exact / dt)
+                step_forward!(model)
+                e = model.state.eta[1]
+                if e <= 0.0
+                    return 4.0 * (t_prev + e_prev / (e_prev - e) * (n * dt - t_prev))
+                end
+                t_prev, e_prev = n * dt, e
+            end
+            return NaN
+        end
+        errors = [abs(seiche_period(nx) - T_exact) / T_exact for nx in (20, 40)]
+        @test errors[2] < SEICHE_BED_REL_ERROR_MAX
+        @test SEICHE_BED_ORDER_MIN < log2(errors[1] / errors[2]) < SEICHE_BED_ORDER_MAX
+    end
 end

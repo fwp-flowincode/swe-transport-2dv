@@ -641,7 +641,8 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
     last_p_corr = zeros(T, cfg.nz, cfg.nx)
     last_buoy_w = zeros(T, cfg.nz - 1, cfg.nx)
 
-    barotropic_solver = BarotropicSolver(cfg, dx, dz; T=T)
+    geometry = BedGeometry(cfg.bed_level, cfg.nz, cfg.nx, dz; periodic_x=cfg.periodic_x)
+    barotropic_solver = BarotropicSolver(cfg, dx, dz; T=T, geometry=geometry)
     pressure_solver = PressureCorrectionSolver((cfg.nz, cfg.nx), dx, dz; method=cfg.pressure_solver_method, top_dirichlet=cfg.nonhydro_surface_dirichlet, periodic_x=cfg.periodic_x, T=T)
 
     z_w = _linspace(0.0, cfg.depth, cfg.nz + 1)
@@ -651,7 +652,6 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
     grad_p_z_reference = zeros(T, cfg.nz + 1, cfg.nx)   # filled by _refresh_density_metadata! below
 
     ws = ModelWorkspace(cfg; T=T)
-    geometry = BedGeometry(cfg.bed_level, cfg.nz, cfg.nx, dz; periodic_x=cfg.periodic_x)
 
     model = Model(
         cfg,
@@ -779,6 +779,26 @@ end
 
 _apply_x_boundary_conditions!(model::Model) = _apply_x_boundary_conditions!(model, model.state.u)
 
+# Zeroes u (m/s, nz x (nx+1)) on all faces that are not open: walls of the bed and faces inside it (variable bed).
+function _mask_u!(u::AbstractMatrix{<:Real}, geo::BedGeometry)
+    @inbounds for idx in eachindex(u)
+        if !geo.u_open[idx]
+            u[idx] = 0.0
+        end
+    end
+    return u
+end
+
+# Zeroes w (m/s, (nz+1) x nx) on the bed face of each column and below it (variable bed).
+function _mask_w!(w::AbstractMatrix{<:Real}, geo::BedGeometry)
+    @inbounds for idx in eachindex(w)
+        if !geo.w_open[idx]
+            w[idx] = 0.0
+        end
+    end
+    return w
+end
+
 function compute_diagnostics(model::Model)
     cfg = model.config
     st = model.state
@@ -791,7 +811,7 @@ function compute_diagnostics(model::Model)
         "cfl_z" => cfl_z,
         "cfl_total" => cfl_total,
         "froude" => froude_number(st.u, st.rho, cfg.rho0, cfg.g, cfg.depth),
-        "water_volume" => water_volume(cfg.depth, st.eta, model.dx),
+        "water_volume" => water_volume(cfg.depth, st.eta, model.dx) - sum(model.geometry.bed_level) * model.dx,
         "constituent_mass" => _constituent_mass(model),
         "boundary_flux" => boundary_normal_flux(st.u, st.w, model.dx, model.dz),
         "div_max" => maximum(abs, div),
@@ -821,6 +841,9 @@ function _correct_constituent_mass!(model::Model)
             @. ws.slack = model.rho_max_init - st.rho
         else
             @. ws.slack = st.rho - model.rho_min_init
+        end
+        if model.geometry.has_bed
+            ws.slack .*= model.geometry.wet_cell   # solid cells keep their (unused) density
         end
 
         total_slack = sum(ws.slack)
@@ -947,10 +970,14 @@ function step_forward!(model::Model)
     if cfg.periodic_x != model.pressure_correction_solver.periodic_x
         throw(ArgumentError("periodic_x cannot be changed after Model construction"))
     end
-    if model.geometry.has_bed
-        # WHY: guard until the masked momentum, barotropic, projection and transport paths exist (issue #3 plan,
-        # phases 2-4); a bed would otherwise be silently ignored by the solvers.
-        throw(ArgumentError("bed_level is not yet supported by step_forward! (issue #3, in progress)"))
+    geo = model.geometry
+    masked = geo.has_bed
+    if masked && !cfg.use_hydrostatic
+        # WHY: guard until the non-hydrostatic projection works on the masked domain (issue #3 plan, phase 3).
+        throw(ArgumentError("bed_level is not yet supported in the non-hydrostatic mode (issue #3, in progress)"))
+    end
+    if masked && model.vegetation !== nothing
+        throw(ArgumentError("bed_level is not supported together with vegetation"))
     end
     variable_top = use_variable_top_layer(cfg)
 
@@ -960,8 +987,8 @@ function step_forward!(model::Model)
         top_layer_face_thickness!(ws.h_top_face, ws.eta_old, model.dz)
     end
 
-    @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=variable_top, periodic_x=cfg.periodic_x)
-    @timeit model.timers "step/advection_w" advection_term_w!(ws.adv_w, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_w_ws, ws.interpolation_ws, cfg.periodic_x)
+    @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=variable_top, periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing)
+    @timeit model.timers "step/advection_w" advection_term_w!(ws.adv_w, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_w_ws, ws.interpolation_ws, cfg.periodic_x; active=masked ? geo.w_active : nothing)
 
     @timeit model.timers "step/hydrostatic_predictor" begin
         solve_hydrostatic_pressure!(ws.p_internal, st.rho, cfg.g, model.dz; top_half_layer=variable_top)
@@ -971,7 +998,7 @@ function step_forward!(model::Model)
     @timeit model.timers "step/u_hat_predictor" begin
         grad_x_c!(ws.grad_p_x, ws.p_internal, model.dx; periodic_x=cfg.periodic_x)
         _compute_effective_viscosity_u!(ws.nu_eff_u, model)
-        diffusion_term!(ws.diff_u, st.u, ws.nu_eff_u, model.dx, model.dz; periodic_x=cfg.periodic_x)
+        diffusion_term!(ws.diff_u, st.u, ws.nu_eff_u, model.dx, model.dz; periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing)
 
         nz, nxp1 = size(st.u)
         @inbounds for i in 1:nxp1
@@ -991,6 +1018,9 @@ function step_forward!(model::Model)
                 fac = cfg.max_froude / fr_hat
                 @. ws.u_hat = ws.u_hat * fac
             end
+        end
+        if masked
+            _mask_u!(ws.u_hat, geo)
         end
     end
 
@@ -1016,6 +1046,9 @@ function step_forward!(model::Model)
     @timeit model.timers "step/w_hat_predictor" begin
         copyto!(ws.w_hat, st.w)
         @views @. ws.w_hat[2:end-1, :] = st.w[2:end-1, :] + cfg.dt * (-ws.adv_w[2:end-1, :] - (1.0 / cfg.rho0) * ws.grad_p_z[2:end-1, :] + ws.buoy)
+        if masked
+            _mask_w!(ws.w_hat, geo)
+        end
     end
 
     nx = cfg.nx
@@ -1037,6 +1070,9 @@ function step_forward!(model::Model)
             # WHY: the solve uses the boundary-face transport that the final velocities will have, so that
             # eta^{n+1} - eta^n = -dt * sum_k div(h*u^{n+1}) holds exactly and the top-layer budgets close.
             _apply_x_boundary_conditions!(model, ws.u_hat)
+            if masked
+                _mask_u!(ws.u_hat, geo)
+            end
             solve_variable_thickness!(model.barotropic_solver, st.eta, ws.u_hat, ws.eta_old, ws.h_top_face)
             _check_top_layer_thickness(model, st.eta)
         else
@@ -1065,6 +1101,10 @@ function step_forward!(model::Model)
                 grad_index = cfg.periodic_x ? i : i - 1
                 ws.u_hat[k, i] -= cfg.g * cfg.dt * ws.eta_grad_x[grad_index]
             end
+        end
+
+        if masked
+            _mask_u!(ws.u_hat, geo)
         end
 
         @inbounds for i in 1:nx
@@ -1126,19 +1166,28 @@ function step_forward!(model::Model)
         end
 
         _apply_x_boundary_conditions!(model)
+        if masked
+            _mask_u!(st.u, geo)
+        end
 
         div_x_u!(ws.div_u, st.u, model.dx)
     end
 
     @timeit model.timers "step/w_reconstruction" begin
         @views st.w[1, :] .= 0.0
+        if masked
+            # w = 0 on the bed face of each column and below it; continuity is integrated upwards from the bed
+            @inbounds for i in 1:nx, k in 1:geo.k_bed[i]
+                st.w[k, i] = 0.0
+            end
+        end
         max_mismatch = 0.0
         if variable_top
             # Layers below the top layer have the fixed thickness dz; the top layer closes its own budget
             #   d(eta)/dt + d(h_face*u_top)/dx = w[nz],   i.e. w[nz] = eta_t + div(h_face*u_top),
             # which holds because eta^{n+1} solves the barotropic equation with the same thicknesses.
             @inbounds for i in 1:nx
-                for k in 1:(cfg.nz - 1)
+                for k in geo.k_bed[i]:(cfg.nz - 1)
                     st.w[k + 1, i] = st.w[k, i] - model.dz * ws.div_u[k, i]
                 end
                 div_hu_top = (ws.h_top_face[i + 1] * st.u[cfg.nz, i + 1] - ws.h_top_face[i] * st.u[cfg.nz, i]) / model.dx
@@ -1147,7 +1196,7 @@ function step_forward!(model::Model)
             end
         else
             @inbounds for i in 1:nx
-                for k in 1:cfg.nz
+                for k in geo.k_bed[i]:cfg.nz
                     st.w[k + 1, i] = st.w[k, i] - model.dz * ws.div_u[k, i]
                 end
             end
@@ -1163,11 +1212,11 @@ function step_forward!(model::Model)
 
     @timeit model.timers "step/density_transport" begin
         if variable_top
-            advect_density_top_layer!(ws.rho_new, st.rho, st.u, st.w, cfg.dt, model.dx, model.dz, ws.density_ws, ws.h_top_face, ws.eta_old, st.eta; scheme=cfg.transport_advection_scheme, rho_min=model.rho_min_init, rho_max=model.rho_max_init)
+            advect_density_top_layer!(ws.rho_new, st.rho, st.u, st.w, cfg.dt, model.dx, model.dz, ws.density_ws, ws.h_top_face, ws.eta_old, st.eta; scheme=cfg.transport_advection_scheme, active=masked ? geo.wet_cell : nothing, rho_min=model.rho_min_init, rho_max=model.rho_max_init)
         else
             # WHY: fixed grid (variable top layer off, incl. every non-hydrostatic run): advective form in the top row removes
             # the spurious source of the moving top face, see _density_top_row_advective_form! (docs section 4).
-            advect_density!(ws.rho_new, st.rho, st.u, st.w, cfg.dt, model.dx, model.dz, ws.density_ws; scheme=cfg.transport_advection_scheme, top_row_advective_form=true, periodic_x=cfg.periodic_x, rho_min=model.rho_min_init, rho_max=model.rho_max_init)
+            advect_density!(ws.rho_new, st.rho, st.u, st.w, cfg.dt, model.dx, model.dz, ws.density_ws; scheme=cfg.transport_advection_scheme, top_row_advective_form=true, periodic_x=cfg.periodic_x, active=masked ? geo.wet_cell : nothing, rho_min=model.rho_min_init, rho_max=model.rho_max_init)
         end
         _apply_wind_surface_density_mixing!(ws.rho_new, cfg, model.dz)
         copyto!(st.rho, ws.rho_new)
@@ -1393,13 +1442,15 @@ mutable struct BarotropicSolver{T<:Real}
     upper_var::Vector{T}
     cp_var::Vector{T}
     inv_denom_var::Vector{T}
+    k_bed_face::Vector{Int}   # lowest open layer per u-face (all ones for the flat bed)
 end
 
-function BarotropicSolver(cfg::ModelConfig, dx::Real, dz::Real; T::Type{<:Real}=Float64)
+function BarotropicSolver(cfg::ModelConfig, dx::Real, dz::Real; T::Type{<:Real}=Float64, geometry::Union{Nothing,BedGeometry}=nothing)
     nx = cfg.nx
     H = T(cfg.depth)
     g = T(cfg.g)
     dt = T(cfg.dt)
+    k_bed_face = geometry === nothing ? ones(Int, nx + 1) : copy(geometry.k_bed_face)
 
     alpha = dt * dt * g * H / (dx * dx)
     periodic_factorization = nothing
@@ -1422,6 +1473,22 @@ function BarotropicSolver(cfg::ModelConfig, dx::Real, dz::Real; T::Type{<:Real}=
     upper = fill(T(-alpha), nx - 1)
     main[1] = T(1.0 + alpha)
     main[end] = T(1.0 + alpha)
+    if geometry !== nothing && geometry.has_bed
+        # Water depth per u-face, H_f = H - bed_face_level (m); a_f = dt^2 g H_f / dx^2, closed outer faces a = 0.
+        # WHY the evaluation order: for a zero bed a_f + a_f == 2 * alpha and 1 + (0 + a_f) == 1 + alpha exactly, so the
+        # masked path reproduces the flat-bed coefficients bit for bit.
+        a_face = zeros(T, nx + 1)
+        for f in 2:nx
+            a_face[f] = dt * dt * g * (H - geometry.bed_face_level[f]) / (dx * dx)
+        end
+        for i in 1:nx
+            main[i] = T(1.0 + (a_face[i] + a_face[i + 1]))
+        end
+        for i in 1:(nx - 1)
+            lower[i] = -a_face[i + 1]
+            upper[i] = -a_face[i + 1]
+        end
+    end
 
     cp = zeros(T, nx - 1)
     inv_denom = zeros(T, nx)
@@ -1447,7 +1514,7 @@ function BarotropicSolver(cfg::ModelConfig, dx::Real, dz::Real; T::Type{<:Real}=
 
     return BarotropicSolver(
         cfg, T(dx), T(dz), nx, periodic_factorization, H, g, dt, lower, main, upper, cp, inv_denom, U_hat, rhs, dp, x,
-        zeros(T, nx - 1), zeros(T, nx), zeros(T, nx - 1), zeros(T, nx - 1), zeros(T, nx),
+        zeros(T, nx - 1), zeros(T, nx), zeros(T, nx - 1), zeros(T, nx - 1), zeros(T, nx), k_bed_face,
     )
 end
 
@@ -1494,8 +1561,9 @@ function solve_variable_thickness!(
     end
 
     @inbounds for i in 1:nx
-        a_left = i == 1 ? zero(coeff) : coeff * ((nz - 1) * dz + h_top_face[i])
-        a_right = i == nx ? zero(coeff) : coeff * ((nz - 1) * dz + h_top_face[i + 1])
+        # water depth per face: (nz - k_bed_face) layers of dz below the top layer plus the top-layer thickness
+        a_left = i == 1 ? zero(coeff) : coeff * ((nz - solver.k_bed_face[i]) * dz + h_top_face[i])
+        a_right = i == nx ? zero(coeff) : coeff * ((nz - solver.k_bed_face[i + 1]) * dz + h_top_face[i + 1])
         solver.main_var[i] = 1.0 + a_left + a_right
         if i >= 2
             solver.lower_var[i - 1] = -a_left
