@@ -12,6 +12,7 @@ Structure
 ---------
 - benchmarks/: profiling and speed benchmarks.
 - lock_exchange/: lock-exchange runs and density plots ([README](lock_exchange/README.md)).
+- lock_exchange_obstacle/: density-stratified dam break with obstacle over a variable bed ([README](lock_exchange_obstacle/README.md)).
 - rayleigh_taylor/: RTI reference and fast-growth runs, growth vs. linear theory ([README](rayleigh_taylor/README.md)).
 - plumes/: rising/sinking buoyant plume tests.
 - jet/: impulse jet shear test.

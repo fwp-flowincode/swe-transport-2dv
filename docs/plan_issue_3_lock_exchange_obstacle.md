@@ -140,6 +140,11 @@ small figures):
   dimensionless time for the three density differences;
 - optional: horizontal pressure force on the obstacle against time, the quantity the paper reports (Fx_max).
 
+Outcome (implemented): the runs stop at t* = 7. From t* ~ 7.5 a spurious jet forms along the free surface after the
+splash at the far wall (top cell of the fixed grid in the non-hydrostatic mode), also without the obstacle; it is left
+for a separate issue. The investigation added the Lax-Wendroff time correction to the `tvd2` momentum advection, which
+removed an earlier energy source. See `experiments/lock_exchange_obstacle/README.md`.
+
 ## 8. Phases and commits
 
 1. Geometry option, masks and checks; flat bed unchanged (test 1).
