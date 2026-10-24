@@ -605,8 +605,15 @@ function initialize_kelvin_helmholtz!(
     fill!(st.w, 0.0)
     fill!(st.eta, 0.0)
     fill!(st.p, 0.0)
-    @views st.u[:, 1] .= 0.0
-    @views st.u[:, end] .= 0.0
+    # WHY: with periodic x the first and last u-faces are the same seam face and carry the shear like every other face
+    # (x_u[1] = 0 and x_u[end] = L have the same perturbation phase); zeroing them would put a wall-like velocity
+    # defect across the whole depth at the seam. Closed walls keep zero normal velocity.
+    if cfg.periodic_x
+        @views st.u[:, end] .= st.u[:, 1]
+    else
+        @views st.u[:, 1] .= 0.0
+        @views st.u[:, end] .= 0.0
+    end
 
     _refresh_density_metadata!(model)
 

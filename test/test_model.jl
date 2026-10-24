@@ -255,6 +255,9 @@ include(joinpath(@__DIR__, "test_common.jl"))
 
         @test model.state.u[:, 1] ≈ model.state.u[:, end]
         @test model.state.rho[:, 1] ≈ model.state.rho[:, end]
+        # the seam face carries the same shear profile as the interior faces (not a wall with u = 0)
+        @test model.state.u[:, 1] ≈ model.state.u[:, cfg.nx ÷ 2 + 1]
+        @test maximum(model.state.u[:, 1]) > 0.5 * 0.2
         mass0 = constituent_mass(model.state.rho, model.dx, model.dz)
         for _ in 1:3
             step_forward!(model)
