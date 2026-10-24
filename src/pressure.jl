@@ -23,6 +23,9 @@ mutable struct PressureCorrectionSolver{T<:Real}
     ifft_x_plan::Any
     timers::TimerOutput
     fftw_threads::Int
+    # Wet cells (nz x nx) of a variable bed with solid cells, or nothing (rectangular domain). With a mask the Poisson
+    # problem is solved on the wet cells only (sparse method); solid cells get p' = 0.
+    wet::Union{Nothing,BitMatrix}
 end
 
 # `top_half_layer=false` (legacy): p = 0 at the centre of the top cell. `top_half_layer=true`: p at the top-cell centre is
@@ -77,12 +80,18 @@ decrement AND its own value, `+1/dz^2 * p_ghost = -1/dz^2 * p[nz,i]`, verified a
 A Dirichlet boundary removes the null space, so no row is pinned and callers must NOT remove any mean (`solve!` branches
 on `solver.top_dirichlet`).
 
+`wet` (nz x nx, optional): wet cells of a variable bed. A wet cell couples only to wet neighbours, i.e. the faces to
+solid cells are Neumann (zero-flux) walls like the outer walls; solid cells get an identity row (p' = 0) and no
+coupling. The gauge pin of the Neumann-Neumann case moves to the first wet cell. Without solid cells the matrix is the
+rectangular one.
+
 Verification (`test_verify_poisson_matrix_top_dirichlet_matches_manufactured_solution`): 1D-in-z manufactured solution
 `p(z) = C/2*(z^2 - H^2)` solves `p'' = C` on `z in (0,H)` with `p'(0)=0` (Neumann bottom) and `p(H)=0` (Dirichlet top,
 at the domain edge, matching the ghost closure above).
 """
-function build_poisson_matrix(shape::Tuple{Int, Int}, dx::Real, dz::Real; top_dirichlet::Bool=false, periodic_x::Bool=false)
+function build_poisson_matrix(shape::Tuple{Int, Int}, dx::Real, dz::Real; top_dirichlet::Bool=false, periodic_x::Bool=false, wet::Union{Nothing,AbstractMatrix{Bool}}=nothing)
     nz, nx = shape
+    is_wet(k, i) = wet === nothing || wet[k, i]
     n = nz * nx
 
     inv_dx2 = 1.0 / (dx * dx)
@@ -102,21 +111,26 @@ function build_poisson_matrix(shape::Tuple{Int, Int}, dx::Real, dz::Real; top_di
             r = idx(k, i)
             diag = 0.0
 
+            if !is_wet(k, i)
+                push!(row, r); push!(col, r); push!(val, 1.0)   # solid cell: p' = 0
+                continue
+            end
+
             if periodic_x
                 push!(row, r); push!(col, idx(k, mod1(i - 1, nx))); push!(val, inv_dx2)
                 push!(row, r); push!(col, idx(k, mod1(i + 1, nx))); push!(val, inv_dx2)
                 diag -= 2.0 * inv_dx2
             else
-                if i > 1
+                if i > 1 && is_wet(k, i - 1)
                     push!(row, r); push!(col, idx(k, i - 1)); push!(val, inv_dx2)
                     diag -= inv_dx2
                 end
-                if i < nx
+                if i < nx && is_wet(k, i + 1)
                     push!(row, r); push!(col, idx(k, i + 1)); push!(val, inv_dx2)
                     diag -= inv_dx2
                 end
             end
-            if k > 1
+            if k > 1 && is_wet(k - 1, i)
                 push!(row, r); push!(col, idx(k - 1, i)); push!(val, inv_dz2)
                 diag -= inv_dz2
             end
@@ -133,22 +147,39 @@ function build_poisson_matrix(shape::Tuple{Int, Int}, dx::Real, dz::Real; top_di
 
     A = sparse(row, col, val, n, n)
     if !top_dirichlet
-        A[1, :] .= 0.0
-        A[1, 1] = 1.0
+        pin = _poisson_pin_index(nz, nx, wet)
+        A[pin, :] .= 0.0
+        A[pin, pin] = 1.0
     end
     dropzeros!(A)
     return A
+end
+
+# Flattened index (row-major in k, as in build_poisson_matrix) of the cell that fixes the gauge of the Neumann-Neumann
+# problem: cell (1, 1) of a rectangular domain, otherwise the first wet cell.
+function _poisson_pin_index(nz::Int, nx::Int, wet::Union{Nothing,AbstractMatrix{Bool}})
+    if wet === nothing
+        return 1
+    end
+    for k in 1:nz, i in 1:nx
+        if wet[k, i]
+            return (k - 1) * nx + i
+        end
+    end
+    throw(ArgumentError("the Poisson domain has no wet cell"))
 end
 
 """
     PressureCorrectionSolver(shape, dx, dz; method="spectral", top_dirichlet=false, T=Float64)
 
 `top_dirichlet=true` requires `method="sparse"`: the spectral method's DCT-based fast transform cannot express this
-condition. `periodic_x=true` is supported by both methods; the spectral method uses an FFT in x and a DCT in z. See
+condition. `wet` (wet cells of a variable bed with solid cells) requires `method="sparse"` for solving: the spectral
+method only works on the rectangle (it is still constructed, so that hydrostatic runs with a bed can keep the default).
+`periodic_x=true` is supported by both methods; the spectral method uses an FFT in x and a DCT in z. See
 `build_poisson_matrix` for the boundary condition and docs section 15 for why a Dirichlet top condition is needed for
 dispersive non-hydrostatic surface waves.
 """
-function PressureCorrectionSolver(shape::Tuple{Int, Int}, dx::Real, dz::Real; method::String="spectral", top_dirichlet::Bool=false, periodic_x::Bool=false, T::Type{<:Real}=Float64)
+function PressureCorrectionSolver(shape::Tuple{Int, Int}, dx::Real, dz::Real; method::String="spectral", top_dirichlet::Bool=false, periodic_x::Bool=false, wet::Union{Nothing,BitMatrix}=nothing, T::Type{<:Real}=Float64)
     nz, nx = shape
 
     rhs = zeros(T, nz, nx)
@@ -197,11 +228,11 @@ function PressureCorrectionSolver(shape::Tuple{Int, Int}, dx::Real, dz::Real; me
             ifft_x_plan = nothing
         end
 
-        return PressureCorrectionSolver(shape, T(dx), T(dz), method, top_dirichlet, periodic_x, inv_lambda, nothing, nothing, rhs, rhs_hat, rhs_complex, rhs_hat_complex, p_corr, div_tmp, div_z_tmp, rhs_flat, p_corr_flat, dct_plan, idct_plan, fft_x_plan, ifft_x_plan, TimerOutput(), fftw_threads)
+        return PressureCorrectionSolver(shape, T(dx), T(dz), method, top_dirichlet, periodic_x, inv_lambda, nothing, nothing, rhs, rhs_hat, rhs_complex, rhs_hat_complex, p_corr, div_tmp, div_z_tmp, rhs_flat, p_corr_flat, dct_plan, idct_plan, fft_x_plan, ifft_x_plan, TimerOutput(), fftw_threads, wet)
     elseif method == "sparse"
-        A = build_poisson_matrix(shape, dx, dz; top_dirichlet=top_dirichlet, periodic_x=periodic_x)
+        A = build_poisson_matrix(shape, dx, dz; top_dirichlet=top_dirichlet, periodic_x=periodic_x, wet=wet)
         F = lu(A)
-        return PressureCorrectionSolver(shape, T(dx), T(dz), method, top_dirichlet, periodic_x, nothing, A, F, rhs, rhs_hat, rhs_complex, rhs_hat_complex, p_corr, div_tmp, div_z_tmp, rhs_flat, p_corr_flat, nothing, nothing, nothing, nothing, TimerOutput(), 1)
+        return PressureCorrectionSolver(shape, T(dx), T(dz), method, top_dirichlet, periodic_x, nothing, A, F, rhs, rhs_hat, rhs_complex, rhs_hat_complex, p_corr, div_tmp, div_z_tmp, rhs_flat, p_corr_flat, nothing, nothing, nothing, nothing, TimerOutput(), 1, wet)
     else
         throw(ArgumentError("Unsupported pressure solver method '$(method)'"))
     end
@@ -262,12 +293,35 @@ function solve!(solver::PressureCorrectionSolver{T}, u::AbstractMatrix{<:Real}, 
     # WHY: mean-removal / gauge-fixing is the solvability condition and null-space fix for a PURE NEUMANN operator
     # (1D null space, the constant mode). A Dirichlet top condition removes that null space, so the RHS mean must be
     # left as given and the solution's mean is a real, physical, non-arbitrary quantity that must not be zeroed.
+    if solver.wet !== nothing
+        if solver.method != "sparse"
+            throw(ArgumentError("the non-hydrostatic projection over a bed with solid cells requires pressure_solver_method=\"sparse\""))
+        end
+        @timeit solver.timers "pressure/mask_rhs" begin
+            @inbounds for idx in eachindex(solver.rhs)
+                if !solver.wet[idx]
+                    solver.rhs[idx] = 0.0
+                end
+            end
+        end
+    end
+
     if !solver.top_dirichlet
         @timeit solver.timers "pressure/remove_rhs_mean" begin
-            rhs_mean = mean(solver.rhs)
-            @inbounds for i in 1:nx
-                for k in 1:nz
-                    solver.rhs[k, i] -= rhs_mean
+            if solver.wet === nothing
+                rhs_mean = mean(solver.rhs)
+                @inbounds for i in 1:nx
+                    for k in 1:nz
+                        solver.rhs[k, i] -= rhs_mean
+                    end
+                end
+            else
+                # solvability over the wet cells only (Neumann walls at the bed and the obstacle)
+                rhs_mean = sum(solver.rhs) / count(solver.wet)
+                @inbounds for idx in eachindex(solver.rhs)
+                    if solver.wet[idx]
+                        solver.rhs[idx] -= rhs_mean
+                    end
                 end
             end
         end
@@ -331,7 +385,7 @@ function solve!(solver::PressureCorrectionSolver{T}, u::AbstractMatrix{<:Real}, 
     end
 
     if !solver.top_dirichlet
-        solver.rhs_flat[1] = 0.0   # matches the row-1 gauge pin in build_poisson_matrix (Neumann-Neumann only)
+        solver.rhs_flat[_poisson_pin_index(nz, nx, solver.wet)] = 0.0   # gauge pin of build_poisson_matrix (Neumann-Neumann only)
     end
 
     @timeit solver.timers "pressure/linear_solve" ldiv!(solver.p_corr_flat, solver.poisson_fact, solver.rhs_flat)
@@ -348,10 +402,17 @@ function solve!(solver::PressureCorrectionSolver{T}, u::AbstractMatrix{<:Real}, 
 
     if !solver.top_dirichlet
         @timeit solver.timers "pressure/remove_pcorr_mean" begin
-            p_mean = mean(solver.p_corr)
-            @inbounds for i in 1:nx
-                for k in 1:nz
-                    solver.p_corr[k, i] -= p_mean
+            if solver.wet === nothing
+                p_mean = mean(solver.p_corr)
+                @inbounds for i in 1:nx
+                    for k in 1:nz
+                        solver.p_corr[k, i] -= p_mean
+                    end
+                end
+            else
+                p_mean = sum(solver.p_corr) / count(solver.wet)   # solid cells hold p' = 0
+                @inbounds for idx in eachindex(solver.p_corr)
+                    solver.p_corr[idx] = solver.wet[idx] ? solver.p_corr[idx] - p_mean : 0.0
                 end
             end
         end

@@ -1092,6 +1092,38 @@ Analytical solution: linear standing wave over a uniformly raised bed of height 
 observed order in $(1.6, 2.4)$ between $n_x=20$ and 40 (measured 1.96). Same errors as the flat-bed seiche test, so the
 per-face depth of the barotropic solve is consistent.
 
+Non-hydrostatic projection over a bed: with solid cells the Poisson problem for $p'$ is solved on the wet cells only
+(sparse method). A wet cell couples only to wet neighbours (zero-flux walls at the bed and the obstacle, as at the outer
+walls), solid cells get $p'=0$, the gauge pin moves to the first wet cell and the mean removal runs over the wet cells.
+The spectral solver needs a rectangular domain and is refused when solid cells exist. A zero bed keeps the rectangular
+problem, so both solvers are unchanged there.
+
+### test_verify_flat_bed_reproduces_legacy_results_nonhydrostatic
+
+Purpose: zero bed in the non-hydrostatic mode reproduces the legacy results bit for bit, with the spectral and with the
+sparse solver.
+
+### test_verify_raised_flat_bed_equals_shallower_domain_nonhydrostatic
+
+Purpose: as the hydrostatic version, through the masked Poisson problem (sparse solver): a 1 m bed under 4 m equals a
+3 m domain to round-off.
+
+### test_verify_rest_state_and_projection_over_obstacle_nonhydrostatic
+
+Purpose: (1) stratified water at rest over the obstacle stays at rest to the round-off of the projection (below 1e-9 m/s
+and m after 400 steps; measured about 4e-11). (2) Lock exchange over the obstacle for 2000 steps: the projected
+velocities $(\hat u,\hat w)$ are divergence-free in every wet cell (below 1e-10 1/s against a velocity scale
+$u/\Delta x\approx0.1$ 1/s; measured 8e-13), volume and mass are conserved, u is zero on all closed faces. (3) The
+spectral solver raises `ArgumentError` with solid cells.
+
+### test_verify_masked_poisson_manufactured_solution
+
+Manufactured solution on the wet cells above a raised flat bed of height $d$:
+$p=\cos(\pi x/L)\cos(\pi(z-d)/(H-d))$ has zero normal derivative at the side walls, the bed and the top, and
+$\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The masked matrix of `build_poisson_matrix`
+(gauge pin at the first wet cell, mean removal over the wet cells) reproduces it with maximum errors 5.1e-3, 1.3e-3 and
+3.2e-4 on $32\times16$, $64\times32$ and $128\times64$ cells: observed orders 1.99 and 2.00 (required: 1.8-2.2).
+
 ## Additional validation scripts and literature basis
 
 The repository includes standalone validation scripts under `experiments/validation`:

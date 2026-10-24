@@ -168,4 +168,107 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test errors[2] < SEICHE_BED_REL_ERROR_MAX
         @test SEICHE_BED_ORDER_MIN < log2(errors[1] / errors[2]) < SEICHE_BED_ORDER_MAX
     end
+
+    BED_REST_TOL_NONHYDRO = 1e-9     # m/s and m: round-off of the projection in a resting, stratified state
+    BED_DIVERGENCE_TOL = 1e-10       # 1/s, divergence left by the masked projection (velocity scale u/dx ~ 0.1 1/s)
+    POISSON_ORDER_MIN = 1.8          # -, observed order of the 5-point Laplacian (expected 2)
+    POISSON_ORDER_MAX = 2.2
+
+    @testset "test_verify_flat_bed_reproduces_legacy_results_nonhydrostatic" begin
+        # Zero bed (no solid cells): the rectangular Poisson problem is kept, so both pressure solvers reproduce the
+        # legacy results bit for bit.
+        for method in ("spectral", "sparse")
+            legacy = Model(bed_test_config(use_hydrostatic=false, pressure_solver_method=method))
+            masked = Model(bed_test_config(use_hydrostatic=false, pressure_solver_method=method, bed_level=zeros(60)))
+            for _ in 1:200
+                step_forward!(legacy)
+                step_forward!(masked)
+            end
+            @test masked.state.u == legacy.state.u
+            @test masked.state.rho == legacy.state.rho
+            @test masked.state.eta == legacy.state.eta
+        end
+    end
+
+    @testset "test_verify_raised_flat_bed_equals_shallower_domain_nonhydrostatic" begin
+        # Same comparison as in the hydrostatic mode, now through the masked Poisson problem on the wet cells.
+        nb = 5
+        raised = Model(bed_test_config(use_hydrostatic=false, pressure_solver_method="sparse", bed_level=fill(1.0, 60)))
+        shallow = Model(bed_test_config(use_hydrostatic=false, pressure_solver_method="sparse", nz=15, depth=3.0))
+        for _ in 1:200
+            step_forward!(raised)
+            step_forward!(shallow)
+        end
+        @test maximum(abs, raised.state.u[(nb + 1):end, :] .- shallow.state.u) < BED_EQUIVALENCE_TOL_U
+        @test maximum(abs, raised.state.rho[(nb + 1):end, :] .- shallow.state.rho) < BED_EQUIVALENCE_TOL_RHO
+        @test maximum(abs, raised.state.eta .- shallow.state.eta) < BED_EQUIVALENCE_TOL_ETA
+    end
+
+    @testset "test_verify_rest_state_and_projection_over_obstacle_nonhydrostatic" begin
+        bed = zeros(60)
+        bed[28:33] .= 1.2
+        # resting stratified state stays at rest (to the round-off of the projection)
+        rest = Model(bed_test_config(use_hydrostatic=false, pressure_solver_method="sparse", bed_level=bed, nu=0.0))
+        zc = [(k - 0.5) * rest.dz for k in 1:rest.config.nz]
+        for i in 1:60, k in 1:rest.config.nz
+            rest.state.rho[k, i] = 1000.0 + 0.5 * (1.0 - zc[k] / rest.config.depth)
+        end
+        refresh_density_metadata!(rest)
+        for _ in 1:400
+            step_forward!(rest)
+        end
+        @test maximum(abs, rest.state.u) < BED_REST_TOL_NONHYDRO
+        @test maximum(abs, rest.state.w) < BED_REST_TOL_NONHYDRO
+        @test maximum(abs, rest.state.eta) < BED_REST_TOL_NONHYDRO
+
+        # lock exchange over the obstacle: the projected velocities are divergence-free in every wet cell
+        model = Model(bed_test_config(use_hydrostatic=false, pressure_solver_method="sparse", bed_level=bed))
+        d0 = compute_diagnostics(model)
+        for _ in 1:2000
+            step_forward!(model)
+        end
+        d1 = compute_diagnostics(model)
+        geo = model.geometry
+        divergence = div_x_u(model.ws.u_hat, model.dx) .+ div_z_w(model.ws.w_hat, model.dz)
+        @test maximum(abs, divergence[geo.wet_cell]) < BED_DIVERGENCE_TOL
+        @test abs(d1["water_volume"] - d0["water_volume"]) < BED_VOLUME_TOL
+        @test abs(d1["constituent_mass"] - d0["constituent_mass"]) < TOL_MODEL_IDENTITY * abs(d0["constituent_mass"])
+        @test all(==(0.0), model.state.u[.!geo.u_open])
+        @test maximum(abs, model.state.u) > 0.03    # contrast: the gravity current is running
+
+        # the spectral solver cannot work on a domain with solid cells
+        @test_throws ArgumentError step_forward!(Model(bed_test_config(use_hydrostatic=false, bed_level=bed)))
+    end
+
+    @testset "test_verify_masked_poisson_manufactured_solution" begin
+        # Manufactured solution on the wet cells above a raised flat bed of height d: p = cos(pi x/L) cos(pi (z-d)/(H-d))
+        # has zero normal derivative at the side walls, the bed and the top, and Laplacian
+        # -pi^2 (1/L^2 + 1/(H-d)^2) p. The masked Neumann problem (Neumann walls at the solid cells, gauge pin at the
+        # first wet cell, mean removal over the wet cells) must reproduce it with second-order accuracy.
+        L, H, d = 2.0, 1.0, 0.25
+        function poisson_error(n::Int)
+            nx, nz = 2n, n
+            dx, dz = L / nx, H / nz
+            geo = BedGeometry(fill(d, nx), nz, nx, dz)
+            A = build_poisson_matrix((nz, nx), dx, dz; wet=geo.wet_cell)
+            pin = findfirst(vec(permutedims(geo.wet_cell)))
+            p_exact = zeros(nz, nx)
+            rhs = zeros(nz * nx)
+            for k in 1:nz, i in 1:nx
+                geo.wet_cell[k, i] || continue
+                x, z = (i - 0.5) * dx, (k - 0.5) * dz
+                p_exact[k, i] = cos(pi * x / L) * cos(pi * (z - d) / (H - d))
+                rhs[(k - 1) * nx + i] = -pi^2 * (1 / L^2 + 1 / (H - d)^2) * p_exact[k, i]
+            end
+            wet_flat = vec(permutedims(geo.wet_cell))
+            rhs[wet_flat] .-= sum(rhs[wet_flat]) / count(wet_flat)
+            rhs[pin] = 0.0
+            p = permutedims(reshape(A \ rhs, nx, nz))
+            p_wet, e_wet = p[geo.wet_cell], p_exact[geo.wet_cell]
+            return maximum(abs, (p_wet .- sum(p_wet) / length(p_wet)) .- (e_wet .- sum(e_wet) / length(e_wet)))
+        end
+        errors = [poisson_error(n) for n in (16, 32, 64)]
+        @test POISSON_ORDER_MIN < log2(errors[1] / errors[2]) < POISSON_ORDER_MAX
+        @test POISSON_ORDER_MIN < log2(errors[2] / errors[3]) < POISSON_ORDER_MAX
+    end
 end

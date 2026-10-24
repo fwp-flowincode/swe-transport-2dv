@@ -643,7 +643,8 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
 
     geometry = BedGeometry(cfg.bed_level, cfg.nz, cfg.nx, dz; periodic_x=cfg.periodic_x)
     barotropic_solver = BarotropicSolver(cfg, dx, dz; T=T, geometry=geometry)
-    pressure_solver = PressureCorrectionSolver((cfg.nz, cfg.nx), dx, dz; method=cfg.pressure_solver_method, top_dirichlet=cfg.nonhydro_surface_dirichlet, periodic_x=cfg.periodic_x, T=T)
+    # WHY wet only with solid cells: a zero bed keeps the rectangular (and spectral-capable) Poisson problem unchanged
+    pressure_solver = PressureCorrectionSolver((cfg.nz, cfg.nx), dx, dz; method=cfg.pressure_solver_method, top_dirichlet=cfg.nonhydro_surface_dirichlet, periodic_x=cfg.periodic_x, wet=geometry.any_solid ? geometry.wet_cell : nothing, T=T)
 
     z_w = _linspace(0.0, cfg.depth, cfg.nz + 1)
     z_c = _linspace(dz / 2.0, cfg.depth - dz / 2.0, cfg.nz)
@@ -972,9 +973,8 @@ function step_forward!(model::Model)
     end
     geo = model.geometry
     masked = geo.has_bed
-    if masked && !cfg.use_hydrostatic
-        # WHY: guard until the non-hydrostatic projection works on the masked domain (issue #3 plan, phase 3).
-        throw(ArgumentError("bed_level is not yet supported in the non-hydrostatic mode (issue #3, in progress)"))
+    if geo.any_solid && !cfg.use_hydrostatic && cfg.pressure_solver_method != "sparse"
+        throw(ArgumentError("the non-hydrostatic mode over a bed with solid cells requires pressure_solver_method=\"sparse\" (the spectral solver needs a rectangular domain)"))
     end
     if masked && model.vegetation !== nothing
         throw(ArgumentError("bed_level is not supported together with vegetation"))
@@ -1140,6 +1140,11 @@ function step_forward!(model::Model)
             # below), never copied from ws.w_hat. The Dirichlet condition's effect on the physics is carried entirely
             # through the pressure field's effect on ws.u_hat (grad_pc_x, above) and hence on state.u.
             @views @. ws.w_hat[2:end-1, :] = ws.w_hat[2:end-1, :] - cfg.dt * (1.0 / cfg.rho0) * ws.grad_pc_z[2:end-1, :]
+            if masked
+                # WHY: the gradient between a wet cell and a solid cell (p' = 0 there) is not a physical force on a wall
+                _mask_u!(ws.u_hat, geo)
+                _mask_w!(ws.w_hat, geo)
+            end
 
             model.last_nonhydro_pcorr_max = maximum(abs, ws.p_corr)
             copyto!(model.last_p_corr, ws.p_corr)
