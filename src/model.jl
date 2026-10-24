@@ -987,8 +987,8 @@ function step_forward!(model::Model)
         top_layer_face_thickness!(ws.h_top_face, ws.eta_old, model.dz)
     end
 
-    @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=variable_top, periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing)
-    @timeit model.timers "step/advection_w" advection_term_w!(ws.adv_w, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_w_ws, ws.interpolation_ws, cfg.periodic_x; active=masked ? geo.w_active : nothing)
+    @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=variable_top, periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing, dt=cfg.dt)
+    @timeit model.timers "step/advection_w" advection_term_w!(ws.adv_w, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_w_ws, ws.interpolation_ws, cfg.periodic_x; active=masked ? geo.w_active : nothing, dt=cfg.dt)
 
     @timeit model.timers "step/hydrostatic_predictor" begin
         solve_hydrostatic_pressure!(ws.p_internal, st.rho, cfg.g, model.dz; top_half_layer=variable_top)

@@ -198,6 +198,24 @@ function _face_velocity_z!(vz_face::AbstractMatrix{<:Real}, vz::AbstractMatrix{<
     return vz_face
 end
 
+"""
+    _advective_flux_divergence!(out, phi, vx, vz, dx, dz, scheme, ws, periodic_x=false; active=nothing, dt=0.0)
+
+Conservative advective tendency `out = div(v*phi)` of a momentum component `phi` (m/s; units of phi times 1/s) on its own
+grid points, with the point velocities `vx`, `vz` (m/s) averaged to the faces. `scheme`: `"upwind1"` (donor cell) or
+`"tvd2"`: MC-limited piecewise-linear reconstruction with the Lax-Wendroff time correction, face value
+`phi_up + 0.5 (1 - c) s_up` with the face Courant number c = |v| dt/dx (resp. dz) -- the same scheme as the density
+transport (`_density_face_fluxes!`). `dt = 0` (s) gives the semi-discrete MUSCL flux. `active`: points next to solid
+walls (variable bed), see `BedGeometry`.
+
+WHY the time correction (model passes dt = cfg.dt): the momentum equations are advanced with one forward-Euler step,
+which adds kinetic energy of order (dt^2/2)|A|^2 per step; without the correction the MUSCL/forward-Euler update is
+first order in time and only weakly dissipative. In the lock exchange with obstacle (issue #3) the uncorrected scheme
+created kinetic energy after the gravity current hit the side wall (kinetic energy up to 1.5 times the released
+potential energy) and blew up; with the correction the energy budget stays consistent much longer.
+Sources: Sweby (1984), SIAM J. Numer. Anal. 21, 995-1011; LeVeque (2002), Finite Volume Methods for Hyperbolic
+Problems, ch. 6 (equation numbers not checked).
+"""
 function _advective_flux_divergence!(
     out::AbstractMatrix{<:Real},
     phi::AbstractMatrix{<:Real},
@@ -209,6 +227,7 @@ function _advective_flux_divergence!(
     ws::AdvectionWorkspace,
     periodic_x::Bool=false;
     active::Union{Nothing,AbstractMatrix{Bool}}=nothing,
+    dt::Real=0.0,
 )
     nz, nx = size(phi)
 
@@ -300,8 +319,9 @@ function _advective_flux_divergence!(
         @inbounds for k in 1:nz
             if periodic_x
                 v = ws.vx_face[k, 1]
-                left_x = phi[k, nx] + 0.5 * ws.slope_x[k, nx]
-                right_x = phi[k, 1] - 0.5 * ws.slope_x[k, 1]
+                time_factor = 0.5 * (1.0 - abs(v) * dt / dx)   # Lax-Wendroff correction; 0.5 for dt = 0
+                left_x = phi[k, nx] + time_factor * ws.slope_x[k, nx]
+                right_x = phi[k, 1] - time_factor * ws.slope_x[k, 1]
                 ws.flux_x[k, 1] = v >= 0.0 ? v * left_x : v * right_x
                 ws.flux_x[k, nx + 1] = ws.flux_x[k, 1]
             else
@@ -309,9 +329,10 @@ function _advective_flux_divergence!(
                 ws.flux_x[k, nx + 1] = 0.0
             end
             for i in 2:nx
-                left_x = phi[k, i - 1] + 0.5 * ws.slope_x[k, i - 1]
-                right_x = phi[k, i] - 0.5 * ws.slope_x[k, i]
                 v = ws.vx_face[k, i]
+                time_factor = 0.5 * (1.0 - abs(v) * dt / dx)
+                left_x = phi[k, i - 1] + time_factor * ws.slope_x[k, i - 1]
+                right_x = phi[k, i] - time_factor * ws.slope_x[k, i]
                 ws.flux_x[k, i] = v >= 0.0 ? v * left_x : v * right_x
                 if active !== nothing && !(active[k, i - 1] && active[k, i])
                     ws.flux_x[k, i] = 0.0
@@ -322,9 +343,10 @@ function _advective_flux_divergence!(
         @inbounds for i in 1:nx
             ws.flux_z[1, i] = 0.0
             for k in 2:nz
-                lower_z = phi[k - 1, i] + 0.5 * ws.slope_z[k - 1, i]
-                upper_z = phi[k, i] - 0.5 * ws.slope_z[k, i]
                 v = ws.vz_face[k, i]
+                time_factor = 0.5 * (1.0 - abs(v) * dt / dz)
+                lower_z = phi[k - 1, i] + time_factor * ws.slope_z[k - 1, i]
+                upper_z = phi[k, i] - time_factor * ws.slope_z[k, i]
                 ws.flux_z[k, i] = v >= 0.0 ? v * lower_z : v * upper_z
                 if active !== nothing && !(active[k - 1, i] && active[k, i])
                     ws.flux_z[k, i] = 0.0
@@ -388,14 +410,15 @@ function advection_term_u!(
     top_row_advective_form::Bool=false,
     periodic_x::Bool=false,
     active::Union{Nothing,AbstractMatrix{Bool}}=nothing,
+    dt::Real=0.0,
 )
     _interpolate_w_to_u!(ws_interp.w_u, w, ws_interp.w_center; periodic_x=periodic_x)
     if periodic_x
         nx = size(u, 2) - 1
-        _advective_flux_divergence!(@view(out[:, 1:nx]), @view(u[:, 1:nx]), @view(u[:, 1:nx]), @view(ws_interp.w_u[:, 1:nx]), dx, dz, scheme, ws_adv, true)
+        _advective_flux_divergence!(@view(out[:, 1:nx]), @view(u[:, 1:nx]), @view(u[:, 1:nx]), @view(ws_interp.w_u[:, 1:nx]), dx, dz, scheme, ws_adv, true; dt=dt)
         @views out[:, nx + 1] .= out[:, 1]
     else
-        _advective_flux_divergence!(out, u, u, ws_interp.w_u, dx, dz, scheme, ws_adv; active=active)
+        _advective_flux_divergence!(out, u, u, ws_interp.w_u, dx, dz, scheme, ws_adv; active=active, dt=dt)
     end
     if top_row_advective_form
         if periodic_x
@@ -435,9 +458,10 @@ function advection_term_w!(
     ws_interp::InterpolationWorkspace,
     periodic_x::Bool=false;
     active::Union{Nothing,AbstractMatrix{Bool}}=nothing,
+    dt::Real=0.0,
 )
     _interpolate_u_to_w!(ws_interp.u_w, u, ws_interp.u_center)
-    _advective_flux_divergence!(out, w, ws_interp.u_w, w, dx, dz, scheme, ws_adv, periodic_x; active=active)
+    _advective_flux_divergence!(out, w, ws_interp.u_w, w, dx, dz, scheme, ws_adv, periodic_x; active=active, dt=dt)
     return out
 end
 

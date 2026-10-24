@@ -114,11 +114,12 @@ F_{f}=v_f\,\phi_{upwind},
 
 with donor-cell choice based on the sign of face velocity $v_f$.
 
-`tvd2` (MUSCL-type reconstruction with MC limiter):
+`tvd2` (MC-limited reconstruction with Lax-Wendroff time correction, the same scheme as the density transport in
+section 4):
 
 ```math
-\phi^L_{i+1/2}=\phi_i+\frac{1}{2}s_i,\qquad
-\phi^R_{i+1/2}=\phi_{i+1}-\frac{1}{2}s_{i+1},
+\phi^L_{i+1/2}=\phi_i+\frac{1}{2}(1-C_f)\,s_i,\qquad
+\phi^R_{i+1/2}=\phi_{i+1}-\frac{1}{2}(1-C_f)\,s_{i+1},\qquad C_f=\frac{|v_f|\,\Delta t}{\Delta x},
 ```
 
 ```math
@@ -129,7 +130,12 @@ s_i = \mathrm{MC}(\Delta^-\phi_i,\Delta^+\phi_i),
 \mathrm{MC}(a,b)=\mathrm{minmod}\!\left(\mathrm{minmod}(2a,2b),\frac{a+b}{2}\right).
 ```
 
-The face flux is then upwinded between $(\phi^L,\phi^R)$ using the face velocity sign.
+The face flux is then upwinded between $(\phi^L,\phi^R)$ using the face velocity sign; $v_f$ is the average of the two
+neighbouring point velocities. The factor $(1-C_f)$ was added for issue #3: the momentum equations are advanced with one
+forward-Euler step, which adds kinetic energy of order $(\Delta t^2/2)|\mathcal{A}|^2$ per step. Without the correction the
+dense current of the lock exchange with obstacle created kinetic energy after hitting the side wall (up to 1.5 times the
+released potential energy) and blew up; with it the energy budget stays consistent until $t\sqrt{g'/a}\approx9$.
+`_advective_flux_divergence!` with `dt = 0` gives the former semi-discrete MUSCL flux.
 
 ### 4) Density transport method (`upwind1`, `tvd2`)
 
@@ -151,8 +157,8 @@ earlier results bit for bit):
 \rho_f=\rho_{i-1}+\tfrac12\,(1-C_f)\,s_{i-1},\qquad C_f=\frac{|v_f|\,\Delta t}{\Delta x},\qquad s_i=\mathrm{MC}(\Delta^-\rho_i,\Delta^+\rho_i),
 ```
 
-  mirrored for $v_f<0$, with $s=0$ in the boundary cells. Unlike the momentum `tvd2` scheme it contains the time-correction
-  factor $(1-C_f)$. The reason is that the update is a single forward-Euler step: without that factor, MUSCL with forward
+  mirrored for $v_f<0$, with $s=0$ in the boundary cells. It contains the time-correction factor $(1-C_f)$ (since issue #3
+  also used for momentum, section 3). The reason is that the update is a single forward-Euler step: without that factor, MUSCL with forward
   Euler is first order in time and TVD only for $C\le1/2$ in 1D; with it the scheme is second order in time and TVD up to
   $C=1$ in 1D (MC lies in Sweby's TVD region $0\le\psi(r)\le\min(2r,2)$). The unsplit 2D update satisfies a local maximum
   principle for $C_x+C_z\le1/2$ (each face coefficient is at most $C(2-C)\le2C$). It has no corner-transport
@@ -807,6 +813,13 @@ Reference equation:
 for spatially uniform $\mathbf{u}$.
 
 Validation section: upwind1 and tvd2 both near-zero on interior.
+
+### test_verify_tvd2_momentum_flux_equals_transport_scheme
+
+Purpose: with a constant velocity ($C_x=0.14$, $C_z=0.16$) the `tvd2` momentum tendency (`_advective_flux_divergence!` with
+`dt`) equals the `tvd2` density tendency (`advection_term_rho` with the same `dt`) to round-off for a smooth field with a
+step, i.e. both use the same flux-limited Lax-Wendroff scheme. Contrast: the semi-discrete momentum flux (`dt = 0`)
+differs.
 
 ### test_momentum_advection_conservative_in_closed_box
 
