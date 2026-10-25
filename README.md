@@ -33,7 +33,7 @@ Model
   - wind stress and wind-induced mixing;
   - Rayleigh damping and a Froude limiter for numerical stabilisation;
   - vegetation: canopy patches and individual stems, rigid or flexible (quasi-static elastica);
-  - a uniform body force (`body_force_x`, channel slope).
+  - a uniform body force (`body_force_x`, channel slope) and an absorbing sponge layer (`sponge_length`, `sponge_rate`).
 - Diagnostics: water volume, constituent mass, boundary fluxes, CFL numbers, reduced gravity and
   internal wave speed. Plots and animations are written to `output_barotropic/`.
 
@@ -54,7 +54,7 @@ README with a description, settings and figures in its `figures/` subfolder.
 | Internal seiche | `internal_seiche/` | two-layer standing internal wave, period |
 | Surface dam break | `surface_dam_break/` | barotropic bore and rarefaction, front speed |
 | [Wind-driven double gyre](experiments/wind_shear/README.md) | `wind_shear/` | wind stress over a closed two-layer basin, double gyre, hydrostatic vs. non-hydrostatic |
-| [Vegetation](experiments/vegetation/README.md) | `vegetation/` | rigid and flexible canopies and stems, emergent and submerged, against exact and 1D references |
+| [Vegetation](experiments/vegetation/README.md) | `vegetation/` | rigid and flexible canopies and stems, emergent and submerged; channel flow, wave damping and gravity currents against references |
 | Validation | `validation/` | comparisons with analytical or semi-analytical references |
 
 <a href="experiments/lock_exchange/README.md"><img src="experiments/lock_exchange/figures/lock_exchange_nonhydro.gif" alt="Lock exchange, non-hydrostatic" width="560"></a>
@@ -133,7 +133,8 @@ julia --project=. experiments/vegetation/plot_vegetation_reconfiguration.jl
 julia --project=. experiments/vegetation/plot_vegetation_channel.jl
 julia --project=. experiments/vegetation/plot_vegetation_patch.jl
 julia --project=. experiments/vegetation/run_oscillating_flow_with_flexible_vegetation.jl
-julia --project=. experiments/vegetation/run_lock_exchange_with_flexible_vegetation.jl
+julia --project=. experiments/vegetation/plot_vegetation_waves.jl
+julia --project=. experiments/vegetation/plot_vegetation_lock_exchange.jl
 julia --project=. experiments/validation/validate_surface_dam_break_front_speed.jl
 julia --project=. experiments/validation/validate_internal_seiche_period.jl
 julia --project=. experiments/validation/validate_lock_exchange_front_speed.jl

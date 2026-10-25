@@ -3,8 +3,8 @@ Vegetation
 
 Flow through and over aquatic vegetation: rigid and flexible stems, emergent and submerged canopies, described either as
 patches with averaged quantities or as individual stems (issue #8; plan and decisions in
-`docs/plan_issue_8_vegetation.md`). This folder holds step 1 of the plan: the vegetation model with its references in
-steady channel flow. Waves and gravity currents through canopies with quantitative references follow in step 2.
+`docs/plan_issue_8_vegetation.md`). Step 1 of the plan: the vegetation model with its references in steady channel
+flow. Step 2: wave damping and gravity currents through canopies.
 
 Model
 -----
@@ -28,9 +28,9 @@ Model
 The old stem model was replaced. It passed only 0.35 times the stem force to the fluid, had no stem density, and used
 tuning factors (a gain of 8, a per-stem `source_strength`) and a string-like bending term. In the configurations of the
 old tests its stems changed the wave amplitude by about 10⁻¹⁵ and the lock-exchange front position by less than one
-cell. The uniform-flow scripts of the old model are replaced by the channel and patch experiments below. The
-oscillating-flow, wave-damping and lock-exchange scripts are ported to the new stem parameters (EI, lateral spacing);
-their quantitative references follow in step 2.
+cell. Its uniform-flow, wave-damping and lock-exchange scripts are replaced by the experiments below, which have
+quantitative references. The oscillating-flow script is ported to the new stem parameters (EI, lateral spacing). It has
+no reference: a stem swaying under oscillating flow needs the dynamic stem model, which is not included.
 
 Reference cases
 ---------------
@@ -91,6 +91,56 @@ The stems bend to about half their length, the flow inside the canopy slows down
 The profiles show the typical inflection near the canopy top. This case is qualitative; it has no reference solution.
 After 60 s the flow is still adjusting, and near the outlet the prescribed uniform outflow distorts the flow.
 
+**Wave damping by a rigid canopy** (`plot_vegetation_waves.jl`, step 2). Regular waves come from a wavemaker at the
+left boundary (the linear-theory velocity profile) and are absorbed by a sponge layer at the right end (`sponge_length`,
+`sponge_rate`). Over rigid vertical cylinders the wave height of a linear wave decays as H(x) = H0 / (1 + β x), with
+
+    β = 4/(9π) C_D a H0 k (sinh³(kαh) + 3 sinh(kαh)) / ((sinh 2kh + 2kh) sinh kh)
+
+(Dalrymple, Kirby & Hwang 1984; Mendez & Losada 2004). This follows from the wave energy balance with the
+time-averaged drag dissipation; the shallow-water limit is β = C_D a α H0 / (3π h).
+
+![Wave height through rigid canopies against Dalrymple et al. (1984)](figures/vegetation_waves.png)
+
+The curves show the decay with canopy divided by the decay of the same run without canopy. This removes the numerical
+damping of the fully implicit free surface, about 2π²/N per period with N time steps per period (dotted curves). The
+model follows Dalrymple's decay in all three cases:
+
+| Case | Mode | Max deviation |
+|---|---|---|
+| shallow water, emergent: kh = 0.2, H0/h = 0.005, a = 10 1/m, 60 m | hydrostatic and non-hydrostatic | 0.94 % |
+| intermediate depth, emergent: kh = 1, H0/h = 0.05, a = 1 1/m | non-hydrostatic, dispersive surface condition | 0.37 % |
+| intermediate depth, submerged α = 0.5: kh = 1, a = 2 1/m | non-hydrostatic, dispersive surface condition | 0.11 % |
+
+The intermediate-depth cases need the dispersive surface condition (`nonhydro_surface_dirichlet`, section 15 of the test
+documentation); the hydrostatic mode has the shallow-water dispersion. The wave amplitude has to stay small. At
+H0/h = 0.05 in shallow water (Ursell number about 50) the first harmonic loses about 7 % of its height over the canopy
+length even without canopy, by nonlinear steepening into higher harmonics, which the linear theory does not describe.
+
+**Lock exchange through emergent canopies** (`plot_vegetation_lock_exchange.jl`, step 2). Heavy and light water start
+side by side in an 8 m tank (H = 0.2 m, g' = 0.02 m/s², stem diameter 6.4 mm, non-hydrostatic, 1 cm cells). The tank is
+either free of vegetation or filled with a canopy of a = 20 or 80 1/m.
+
+![Density without canopy and in the canopies](figures/vegetation_lock_exchange_snapshots.png)
+
+- **Without canopy:** the classical lock exchange, a block-shaped current with Kelvin-Helmholtz billows moving at a
+  constant speed.
+- **In the canopies:** the current becomes triangular. Its interface runs almost linearly from the gate to the toe, the
+  shape Tanino, Nepf & Kulis (2005) observed in their flume experiments with emergent cylinder arrays.
+
+![Front position against time](figures/vegetation_lock_exchange_front.png)
+
+Without canopy the front moves as x_f ∝ t (exponent 1.02 for 10-50 s, 0.98 for 50-150 s). In the canopies it
+decelerates. For a triangular current the pressure gradient is about g' H / x_f; balanced by the quadratic drag
+1/2 C_D a u², it gives x_f ∝ t^(2/3). The model exponents fall towards this value as the drag takes over: a = 20 1/m:
+0.89, 0.74, 0.68; a = 80 1/m: 0.82, 0.71, 0.68 (10-50 s, 50-150 s, 150-400 s).
+
+![Lock exchange without canopy (top) and in the canopy a = 80 1/m (bottom)](figures/vegetation_lock_exchange.gif)
+
+The scaling is derived here. Tanino et al. (2005) give a theoretical toe velocity and regime criteria (linear and
+quadratic drag), which still have to be compared in detail: their open author manuscript (MIT DSpace) could not be
+downloaded because of rate limiting.
+
 Tests
 -----
 
@@ -104,6 +154,8 @@ Tests
 - the momentum balance of a flexible patch;
 - the head loss;
 - the explicit-drag stability check;
+- the wave-height decay over a rigid canopy against Dalrymple et al. (1984);
+- the approach of a canopy lock exchange to x_f ∝ t^(2/3);
 - damping of a standing wave and delay of a lock-exchange front by a patch.
 
 Details: section 16 of `test/TESTS_TECHNICAL_DOCUMENTATION.md`.
@@ -114,7 +166,7 @@ Published data
 The standard laboratory data sets for submerged rigid and flexible canopies are not available here in machine-readable
 form. These are Dunn, López & García (1996), University of Illinois Hydraulic Engineering Series 51, and the
 compilation used by Huthoff, Augustijn & Hulscher (2007). Their repositories block automated downloads. With the PDFs
-in `docs/` (gitignored), the run tables can be digitised and compared in step 2 (bulk velocity; profiles as far as the
+in `docs/` (gitignored), the run tables can be digitised and compared (bulk velocity; profiles as far as the
 turbulence model allows).
 
 Scripts
@@ -123,9 +175,11 @@ Scripts
 - `plot_vegetation_reconfiguration.jl`: single flexible stem, R(Ca); a few seconds.
 - `plot_vegetation_channel.jl`: periodic channel references and grid convergence; about 3 min.
 - `plot_vegetation_patch.jl`: head loss and the flexible-patch animation; about 1 min.
-- `cases.jl`: shared settings, the 1D canopy reference and the reconfiguration helper (also used by the tests).
-- `run_oscillating_flow_with_flexible_vegetation.jl`, `run_wave_damping_with_flexible_vegetation.jl`,
-  `run_lock_exchange_with_flexible_vegetation.jl`: ported to the new model, references in step 2.
+- `plot_vegetation_waves.jl`: wave damping against Dalrymple et al. (1984); about 20 min.
+- `plot_vegetation_lock_exchange.jl`: lock exchange through canopies; about 10 min.
+- `cases.jl`: shared settings and references: the 1D canopy profile, the reconfiguration helper, the wave flume with
+  Dalrymple's decay coefficient, the canopy lock exchange (also used by the tests).
+- `run_oscillating_flow_with_flexible_vegetation.jl`: ported to the new model; qualitative (no reference).
 
 Output goes to `output_barotropic/vegetation_figures/`; the figures here are copies, the GIF reduced to every second
 frame and 640 px width.
@@ -133,6 +187,8 @@ frame and 640 px width.
     julia --project=. experiments/vegetation/plot_vegetation_reconfiguration.jl
     julia --project=. experiments/vegetation/plot_vegetation_channel.jl
     julia --project=. experiments/vegetation/plot_vegetation_patch.jl
+    julia --project=. experiments/vegetation/plot_vegetation_waves.jl
+    julia --project=. experiments/vegetation/plot_vegetation_lock_exchange.jl
 
 References
 ----------
@@ -145,3 +201,7 @@ References
 - Dunn, López & García (1996), Hydraulic Engineering Series 51, University of Illinois
 - Huthoff, Augustijn & Hulscher (2007), Water Resour. Res. 43, W06413
 - Timoshenko & Gere, Mechanics of Materials (cantilever deflection)
+- Dalrymple, Kirby & Hwang (1984), J. Waterway, Port, Coastal, Ocean Eng. 110(1), 67-79
+- Mendez & Losada (2004), Coastal Eng. 51, 103-118
+- Tanino, Nepf & Kulis (2005), Water Resour. Res. 41, W12402
+- Benjamin (1968), J. Fluid Mech. 31, 209-248

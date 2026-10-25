@@ -35,6 +35,10 @@ Base.@kwdef mutable struct ModelConfig
     # Uniform horizontal body force (m/s^2) on the whole water column, e.g. g times a channel slope; drives steady flow
     # in a periodic channel (vegetation reference cases, issue #8).
     body_force_x::Float64 = 0.0
+    # Absorbing sponge layer at the right end (e.g. for waves): over the last sponge_length (m) of the domain u is damped
+    # with the rate sponge_rate * s^2 (1/s), s = 0 ... 1 the relative position in the layer (quadratic ramp, implicit).
+    sponge_length::Float64 = 0.0
+    sponge_rate::Float64 = 0.0
     # Variable-thickness top layer (hydrostatic mode only): the top layer has the thickness dz + eta instead of
     # dz, its volume change d(eta)/dt enters the top-layer budgets, and the free surface is a material boundary
     # (zero flux through it). nothing (default) = automatic: on for the hydrostatic mode, off for the non-hydrostatic
@@ -131,6 +135,8 @@ function copy_config(cfg::ModelConfig)
         wind_stress_x=cfg.wind_stress_x,
         wind_mixing_diffusivity=cfg.wind_mixing_diffusivity,
         body_force_x=cfg.body_force_x,
+        sponge_length=cfg.sponge_length,
+        sponge_rate=cfg.sponge_rate,
         variable_top_layer=cfg.variable_top_layer,
         top_layer_min_fraction=cfg.top_layer_min_fraction,
         nonhydro_surface_dirichlet=cfg.nonhydro_surface_dirichlet,
@@ -1018,6 +1024,19 @@ function step_forward!(model::Model)
         if cfg.rayleigh_damping > 0.0
             damp = max(0.0, 1.0 - cfg.rayleigh_damping * cfg.dt)
             @. ws.u_hat = ws.u_hat * damp
+        end
+        if cfg.sponge_length > 0.0 && cfg.sponge_rate > 0.0
+            # WHY quadratic ramp and implicit factor: a smooth increase of the damping over a layer of one or more
+            # wavelengths absorbs waves with little reflection; 1/(1 + dt*rate) is stable for any rate.
+            x_sponge = cfg.length - cfg.sponge_length
+            @inbounds for i in 1:nxp1
+                s = ((i - 1) * model.dx - x_sponge) / cfg.sponge_length
+                s > 0.0 || continue
+                factor = 1.0 / (1.0 + cfg.dt * cfg.sponge_rate * min(s, 1.0)^2)
+                for k in 1:nz
+                    ws.u_hat[k, i] *= factor
+                end
+            end
         end
 
         if masked

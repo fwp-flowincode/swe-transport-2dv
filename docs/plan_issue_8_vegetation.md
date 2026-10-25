@@ -4,7 +4,7 @@ Plan: issue #8, review and update the vegetation tests
 Issue #8 asks for vegetation tests that cover rigid and flexible vegetation, submerged and emergent vegetation, patches
 with averaged (representative) quantities as well as individual stems, and comparisons with reference or analytical
 solutions where possible. This plan reviews the current vegetation model, proposes the model changes the tests need,
-and lists the reference solutions. Status: reviewed; decisions in section 7.
+and lists the reference solutions. Status: steps 1 and 2 implemented; decisions in section 7, outcome in section 9.
 
 1 Current state
 ---------------
@@ -93,7 +93,7 @@ A patch is described by its x-range [x0, x1], stem height h_v (m), stem diameter
 | R6 | Flexible stem/patch, large deflection | effective length and drag against Ca from Luhar & Nepf (2011); drag growing as U^(4/3) at large Ca (Vogel exponent -2/3) | `test_validate_*` |
 | R7 | Emergent patch in a channel with inflow/outflow | head loss across the patch from the momentum balance g H Delta_eta = 1/2 C_D a L U² H | `test_validate_*` |
 | R8 | Wave damping by a rigid emergent canopy | wave-height decay H(x) = H0 / (1 + alpha x) of Dalrymple, Kirby & Hwang (1984) / Mendez & Losada (2004) | experiment (+ test if robust) |
-| R9 | Lock exchange through an emergent canopy | drag-dominated front propagation of Tanino, Nepf & Tse (2005) | experiment |
+| R9 | Lock exchange through an emergent canopy | drag-dominated front propagation of Tanino, Nepf & Kulis (2005) | experiment |
 
 Coverage of the issue items:
 - rigid: R2, R3, R7, R8;
@@ -191,6 +191,23 @@ Data comparison: if the PDFs of Dunn et al. (1996) and Huthoff et al. (2007) are
 tables can be digitised and the submerged-canopy experiment compared run by run (bulk velocity; profiles where the
 turbulence model allows).
 
+9 Outcome
+---------
+
+- **Step 1** (commit c0a7f33): patches and individual stems, rigid and flexible (elastica); references R1-R7 reproduced
+  (see `experiments/vegetation/README.md`).
+- **Step 2:**
+  - R8 wave damping against Dalrymple et al. (1984): within 0.94 % in shallow water (both modes) and 0.37 % / 0.11 %
+    at intermediate depth (emergent / submerged, dispersive non-hydrostatic mode). An absorbing sponge layer
+    (`sponge_length`, `sponge_rate`) was added for the wave flume.
+  - R9 lock exchange through emergent canopies: triangular currents and the approach to x_f proportional to t^(2/3).
+    The exponent law is derived here; the toe velocity and regime criteria of Tanino, Nepf & Kulis (2005) are still
+    to be compared (the author manuscript could not be downloaded).
+- **Open:** dynamic flexible stems (waves, oscillating flow); vegetation turbulence (Nepf 1999); comparison with the
+  flume data of Dunn et al. (1996) once the report is available; Luhar & Nepf (2011) coefficient check; the fully
+  implicit free surface damps waves by about 2 pi²/N per period (a theta scheme would need time-averaged transports in
+  continuity, density transport and the projection).
+
 References
 ----------
 
@@ -200,7 +217,7 @@ References
 - Nepf (2012), Annu. Rev. Fluid Mech. 44, 123-142
 - Luhar & Nepf (2011), Limnol. Oceanogr. 56(6), 2003-2017
 - Luhar & Nepf (2016), J. Fluids Struct. 61, 20-41
-- Tanino, Nepf & Tse (2005), Water Resour. Res. 41, W12402
+- Tanino, Nepf & Kulis (2005), Water Resour. Res. 41, W12402
 - Timoshenko & Gere, Mechanics of Materials (cantilever deflection)
 - Alben, Shelley & Zhang (2002), Nature 420, 479-481 (drag reduction of flexible fibres)
 - Gosselin, de Langre & Machado-Almeida (2010), J. Fluid Mech. 650, 319-341 (reconfiguration regimes)

@@ -600,7 +600,10 @@ $\Delta t\,K\le1$ with the linearised drag rate $K$ (rigid patch: $\tfrac12C_Da|
 WHY explicit: an implicit factor applied to the predictor before the free-surface solve would make the steady state
 depend on $\Delta t$, because the surface-slope correction is not divided by it.
 
-`ModelConfig.body_force_x` (m/s²) adds a uniform body force (channel slope) for steady periodic-channel flow. The
+`ModelConfig.body_force_x` (m/s²) adds a uniform body force (channel slope) for steady periodic-channel flow.
+`sponge_length` (m) and `sponge_rate` (1/s) add an absorbing layer at the right end: over the last `sponge_length` the
+u predictor is multiplied by $1/(1+\Delta t\,r\,s^2)$, $s$ the relative position in the layer (quadratic ramp, implicit,
+stable for any rate); used for the wave cases. The
 former ad hoc vegetation viscosity (`vegetation_turbulence_strength`) and the old stem model (force relaxation 0.35,
 response gain 8, `source_strength`, string-like bending) were removed; in the old tests that model changed the wave
 amplitude by about $10^{-15}$ and the lock-exchange front by less than one cell.
@@ -1317,6 +1320,18 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The maske
 - `test_validate_patch_head_loss`: inflow/outflow channel, emergent patch; $g\Delta\eta=\tfrac12C_DaLU^2$ within
   0.3 % (observed $-0.03$ %), both modes.
 - `test_verify_explicit_drag_stability_check`: $\Delta t\,K=2$ is rejected.
+- `test_validate_wave_height_decay_over_rigid_canopy`: regular linear waves ($H_0/h=0.005$, $kh=0.2$) through an
+  emergent canopy ($a=10$ 1/m) over 60 m, wavemaker at the left boundary, sponge at the right end. The wave height
+  decays as $H_0/(1+\beta x)$ of Dalrymple, Kirby & Hwang (1984),
+  $\beta=\tfrac{4}{9\pi}C_DaH_0k\,(\sinh^3k\alpha h+3\sinh k\alpha h)/((\sinh2kh+2kh)\sinh kh)$ (derived from the wave
+  energy balance with the time-averaged drag dissipation). Compared: decay with canopy divided by decay without canopy,
+  which removes the numerical damping of the fully implicit free surface ($\approx2\pi^2/N$ per period with $N$ steps per
+  period). Within 1.5 % (observed 0.25-0.70 %). At larger amplitude ($H_0/h=0.05$, Ursell number about 50) the first
+  harmonic loses energy to higher harmonics by nonlinear steepening, which the linear theory does not describe.
+- `test_validate_canopy_lock_exchange_drag_regime`: lock exchange through a dense emergent canopy ($a=80$ 1/m,
+  $H=0.2$ m, $g'=0.02$ m/s²): the front exponent decreases from the inertial value towards $x_f\propto t^{2/3}$ of the
+  quadratic-drag regime (triangular current, pressure gradient $g'H/x_f$ balancing $\tfrac12C_Dau^2$); late exponent
+  within 0.04 of 2/3 (observed 0.685).
 - `test_vegetation_damps_free_surface_wave_motion`: a rigid patch around a velocity antinode of a standing wave
   reduces the wave energy after 10 s to below 0.8 of the case without vegetation (observed 0.69).
 - `test_vegetation_slows_lock_exchange_front`: a rigid patch in the right half delays the dense front by more than

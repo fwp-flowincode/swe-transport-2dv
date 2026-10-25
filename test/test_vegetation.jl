@@ -233,6 +233,27 @@ vegetation_test_config(; kwargs...) = vegetation_case_config(; kwargs...)
         @test_throws ArgumentError step_forward!(model)
     end
 
+    @testset "test_validate_wave_height_decay_over_rigid_canopy" begin
+        # Regular linear waves (H0/h = 0.005, kh = 0.2, shallow water) through an emergent rigid canopy (a = 10 1/m) over
+        # 60 m: the wave height decays as H0 / (1 + beta x) of Dalrymple, Kirby & Hwang (1984) (dalrymple_decay_coefficient
+        # in experiments/vegetation/cases.jl). Compared: the decay with canopy divided by the decay of the same run without
+        # canopy (removes the small numerical damping of the implicit free surface). Observed deviations 0.25 %, 0.34 %,
+        # 0.70 % at 20, 40, 60 m into the canopy (hydrostatic).
+        REL_TOL = 0.015
+        DEPTH, KH, WAVE_HEIGHT, A = 0.5, 0.2, 0.0025, 10.0      # m, -, m, 1/m
+        CANOPY = (10.0, 70.0)                                    # m
+        setup = (; depth=DEPTH, kh=KH, wave_height=WAVE_HEIGHT, use_hydrostatic=true, canopy=CANOPY, cells_per_wavelength=30, steps_per_period=2000)
+        bare = run_wave_flume(; frontal_area=0.0, setup...)
+        vegetated = run_wave_flume(; frontal_area=A, setup...)
+        i0 = findfirst(>=(CANOPY[1]), vegetated.x)
+        beta = dalrymple_decay_coefficient(; cd=1.0, a=A, H0=vegetated.H[i0], k=vegetated.k, h=DEPTH, alpha=1.0)
+        for x in (30.0, 50.0, 70.0)
+            i = findfirst(>=(x), vegetated.x)
+            ratio = (vegetated.H[i] / vegetated.H[i0]) / (bare.H[i] / bare.H[i0])
+            @test isapprox(ratio, 1 / (1 + beta * (vegetated.x[i] - vegetated.x[i0])); rtol=REL_TOL)
+        end
+    end
+
     @testset "test_vegetation_damps_free_surface_wave_motion" begin
         # Replaces the old single-stem test, whose stem changed the wave amplitude by about 1e-15 (old model: relaxation
         # factor 0.35 on the force and no stem density). An emergent rigid patch around a velocity antinode of the
@@ -256,6 +277,20 @@ vegetation_test_config(; kwargs...) = vegetation_case_config(; kwargs...)
         # J/m per unit density: potential g eta^2 / 2 plus depth-integrated kinetic u^2 / 2
         energy(m) = sum(0.5 * cfg.g * m.state.eta[i]^2 + 0.5 * m.dz * sum(abs2, @view m.state.u[:, i]) for i in 1:cfg.nx) * m.dx
                 @test energy(model_veg) < ENERGY_RATIO_MAX * energy(model_ref)
+    end
+
+    @testset "test_validate_canopy_lock_exchange_drag_regime" begin
+        # Lock exchange through a dense emergent canopy (a = 80 1/m, H = 0.2 m, g' = 0.02 m/s^2): the front decelerates
+        # from the inertial regime (x_f ~ t) towards the quadratic-drag regime x_f ~ t^(2/3) (run_canopy_lock_exchange in
+        # experiments/vegetation/cases.jl). Observed exponents (hydrostatic, 2 cm cells): 0.80 (10-50 s), 0.71
+        # (50-150 s), 0.685 (150-400 s, before the front reaches the wall).
+        EXPONENT_DRAG = 2 / 3
+        EXPONENT_TOL = 0.04
+        run = run_canopy_lock_exchange(; frontal_area=80.0, use_hydrostatic=true)
+        early = power_law_exponent(run.t, run.front, 10.0, 50.0)
+        late = power_law_exponent(run.t, run.front, 150.0, 400.0)
+        @test early > late
+        @test abs(late - EXPONENT_DRAG) < EXPONENT_TOL
     end
 
     @testset "test_vegetation_slows_lock_exchange_front" begin
