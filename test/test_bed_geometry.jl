@@ -2,6 +2,7 @@
 # Run with the full suite (runtests.jl) or on its own: julia --project=. test/test_bed_geometry.jl
 
 include(joinpath(@__DIR__, "test_common.jl"))
+include(joinpath(@__DIR__, "../experiments/lock_exchange_obstacle/cases.jl"))
 
 @testset "Bed geometry" begin
     @testset "test_verify_bed_geometry_masks_and_checks" begin
@@ -46,11 +47,52 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test cfg2.bed_level == bed && cfg2.bed_level !== cfg.bed_level
         @test copy_config(ModelConfig()).bed_level === nothing
 
+        float32_model = Model(ModelConfig(nx=nx, nz=20, length=1.2, depth=4.0, bed_level=fill(1.0, nx)); T=Float32)
+        @test float32_model.geometry.k_bed == fill(6, nx)
+
         # plots leave the bed blank (NaN), flat beds are passed through unchanged
         field = fill(1000.0, nz, nx)
         blanked = SweTransport2DV._blank_solid_cells(field, cfg)
         @test all(isnan, blanked[.!geo.wet_cell]) && all(==(1000.0), blanked[geo.wet_cell])
         @test SweTransport2DV._blank_solid_cells(field, ModelConfig(nx=nx, nz=nz)) === field
+    end
+
+    @testset "test_verify_bed_mass_and_surface_pressure_accounting" begin
+        bed = zeros(12)
+        bed[6:7] .= 0.6
+        model = Model(ModelConfig(nx=12, nz=20, length=12.0, depth=4.0, rho_left=1000.0, rho_right=1000.0, bed_level=bed))
+        @test model.initial_constituent_mass ≈ 46.8 * 1000.0
+
+        fill!(model.state.rho, 1000.0)
+        refresh_density_metadata!(model)
+        model.state.rho[.!model.geometry.wet_cell] .= 50_000.0
+        @test compute_diagnostics(model)["constituent_mass"] ≈ 46.8 * 1000.0
+        model.state.eta .= 0.1
+        @test SweTransport2DV._constituent_mass(model) ≈ 48.0 * 1000.0
+
+        fill!(model.state.p, 0.0)
+        model.state.eta[5] = 0.1
+        model.state.eta[8] = -0.1
+        expected_force = model.config.rho0 * model.config.g * 0.2 * 0.6
+        @test leo_obstacle_force(model) ≈ expected_force
+    end
+
+    @testset "test_verify_invalid_bed_velocities_are_masked_before_advection" begin
+        bed = zeros(60)
+        bed[28:33] .= 1.2
+        cfg = bed_test_config(bed_level=bed)
+        reference = Model(copy_config(cfg))
+        perturbed = Model(copy_config(cfg))
+        geo = perturbed.geometry
+        perturbed.state.u[.!geo.u_open] .= 10.0
+        perturbed.state.w[.!geo.w_open] .= 10.0
+
+        step_forward!(reference)
+        step_forward!(perturbed)
+        @test perturbed.state.u == reference.state.u
+        @test perturbed.state.w == reference.state.w
+        @test perturbed.state.rho == reference.state.rho
+        @test perturbed.state.eta == reference.state.eta
     end
 
     BED_EQUIVALENCE_TOL_U = 1e-10        # m/s, raised bed vs shallower domain (round-off from summation order)

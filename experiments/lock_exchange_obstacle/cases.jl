@@ -126,17 +126,19 @@ end
     leo_obstacle_force(model) -> Float64
 
 Horizontal pressure force on the obstacle per unit width (N/m): sum over the obstacle rows of
-(p_left - p_right) dz, with the total pressure p = hydrostatic + non-hydrostatic part (Pa) in the wet cells next to
-the two obstacle walls. Positive when it pushes the obstacle towards +x.
+`(p_left - p_right + rho0*g*(eta_left - eta_right)) dz`, where `p` is the hydrostatic plus non-hydrostatic part (Pa)
+in the wet cells next to the two obstacle walls. Positive when it pushes the obstacle towards +x.
 """
 function leo_obstacle_force(model::Model)
     geo = model.geometry
     cols = findall(>(1), geo.k_bed)
     i_left, i_right = first(cols) - 1, last(cols) + 1
     p = model.state.p
+    eta = model.state.eta
     force = 0.0
     for k in 1:(geo.k_bed[first(cols)] - 1)
-        force += (p[k, i_left] - p[k, i_right]) * model.dz
+        surface_force = model.config.rho0 * model.config.g * (eta[i_left] - eta[i_right])
+        force += (p[k, i_left] - p[k, i_right] + surface_force) * model.dz
     end
     return force
 end

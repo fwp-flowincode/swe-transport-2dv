@@ -268,6 +268,16 @@ end
 # Constituent mass (kg/m) of the current state; uses the variable top-layer thickness dz + eta when it is active.
 function _constituent_mass(model::Model)
     st = model.state
+    if model.geometry.any_solid
+        mass = sum(st.rho[model.geometry.wet_cell]) * model.dx * model.dz
+        if use_variable_top_layer(model.config)
+            nz = size(st.rho, 1)
+            @inbounds for i in eachindex(st.eta)
+                mass += st.rho[nz, i] * st.eta[i] * model.dx
+            end
+        end
+        return mass
+    end
     if use_variable_top_layer(model.config)
         return constituent_mass(st.rho, model.dx, model.dz; eta=st.eta)
     end
@@ -635,13 +645,12 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
 
     rho_min_init = minimum(st.rho)
     rho_max_init = maximum(st.rho)
-    initial_constituent_mass = constituent_mass(st.rho, dx, dz)
-
     last_p_hydro = zeros(T, cfg.nz, cfg.nx)
     last_p_corr = zeros(T, cfg.nz, cfg.nx)
     last_buoy_w = zeros(T, cfg.nz - 1, cfg.nx)
 
-    geometry = BedGeometry(cfg.bed_level, cfg.nz, cfg.nx, dz; periodic_x=cfg.periodic_x)
+    geometry = BedGeometry(cfg.bed_level, cfg.nz, cfg.nx, cfg.depth / cfg.nz; periodic_x=cfg.periodic_x)
+    initial_constituent_mass = geometry.any_solid ? sum(st.rho[geometry.wet_cell]) * dx * dz : constituent_mass(st.rho, dx, dz)
     barotropic_solver = BarotropicSolver(cfg, dx, dz; T=T, geometry=geometry)
     # WHY wet only with solid cells: a zero bed keeps the rectangular (and spectral-capable) Poisson problem unchanged
     pressure_solver = PressureCorrectionSolver((cfg.nz, cfg.nx), dx, dz; method=cfg.pressure_solver_method, top_dirichlet=cfg.nonhydro_surface_dirichlet, periodic_x=cfg.periodic_x, wet=geometry.any_solid ? geometry.wet_cell : nothing, T=T)
@@ -987,6 +996,11 @@ function step_forward!(model::Model)
         top_layer_face_thickness!(ws.h_top_face, ws.eta_old, model.dz)
     end
 
+    if masked
+        _mask_u!(st.u, geo)
+        _mask_w!(st.w, geo)
+    end
+
     @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=variable_top, periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing, dt=cfg.dt)
     @timeit model.timers "step/advection_w" advection_term_w!(ws.adv_w, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_w_ws, ws.interpolation_ws, cfg.periodic_x; active=masked ? geo.w_active : nothing, dt=cfg.dt)
 
@@ -1012,15 +1026,15 @@ function step_forward!(model::Model)
             @. ws.u_hat = ws.u_hat * damp
         end
 
+        if masked
+            _mask_u!(ws.u_hat, geo)
+        end
         if cfg.apply_froude_limiter
             fr_hat = froude_number(ws.u_hat, st.rho, cfg.rho0, cfg.g, cfg.depth)
             if isfinite(fr_hat) && fr_hat > cfg.max_froude && fr_hat > 0.0
                 fac = cfg.max_froude / fr_hat
                 @. ws.u_hat = ws.u_hat * fac
             end
-        end
-        if masked
-            _mask_u!(ws.u_hat, geo)
         end
     end
 
