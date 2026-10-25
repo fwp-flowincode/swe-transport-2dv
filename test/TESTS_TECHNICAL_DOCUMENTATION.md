@@ -11,7 +11,7 @@ every file includes, so each file also runs on its own (`julia --project=. test/
 | `test_pressure.jl` | hydrostatic integration, Poisson matrix, non-hydrostatic pressure solvers (sections 6, 7) |
 | `test_free_surface.jl` | barotropic solve, kinematic surface condition, continuity closure, wind forcing budgets (sections 8-10) |
 | `test_model.jl` | full-model runs: conservation, stabilisation, configuration, initial conditions, dense front, wind-driven double gyre |
-| `test_vegetation.jl` | flexible-vegetation stem model |
+| `test_vegetation.jl` | vegetation: rigid and flexible patches and individual stems (section 16) |
 | `test_nonhydrostatic.jl` | non-hydrostatic branch and free surface (sections 14, 15) |
 | `test_variable_top_layer.jl` | variable-thickness top layer (section 13) |
 
@@ -192,8 +192,7 @@ Optional bound-preserving clamping is applied during update:
 ### 5) Viscous diffusion of u (`diffusion_term!`)
 
 The viscous term of the horizontal momentum equation uses the viscosity $\nu$ (molecular `nu` plus the optional
-mixing-length eddy viscosity $\nu_t=l^2|\partial u/\partial z|$, capped at `max_turbulent_viscosity`, and the vegetation
-contribution) in flux form with face viscosities $\nu_f=\tfrac12(\nu_a+\nu_b)$:
+mixing-length eddy viscosity $\nu_t=l^2|\partial u/\partial z|$, capped at `max_turbulent_viscosity`) in flux form with face viscosities $\nu_f=\tfrac12(\nu_a+\nu_b)$:
 
 ```math
 \mathcal{D}(u)_{k,i}=\frac{F_{k+1/2}-F_{k-1/2}}{\Delta z}+\frac{G_{i+1/2}-G_{i-1/2}}{\Delta x},
@@ -570,6 +569,41 @@ not checked.
 - Sweby (1984), High resolution schemes using flux limiters for hyperbolic conservation laws, SIAM J. Numer. Anal. 21, 995-1011.
 - Ferziger and Peric (2002), *Computational Methods for Fluid Dynamics*.
 - Press et al. (2007), *Numerical Recipes* (elliptic solves, transforms, tridiagonal systems).
+
+### 16) Vegetation (`src/vegetation.jl`, issue #8)
+
+Two representations share one stem model. A **patch** (`VegetationPatch`) has the stem length $h_v$, diameter $b$,
+stem density $n$ (stems/m²) and drag coefficient $C_D$ over an x-range; a representative stem per u-face column
+carries the drag of its column, and the force per unit volume is $n$ times the stem force per unit height. The u-faces
+are weighted by the fraction of their control interval $x\pm\Delta x/2$ inside the patch. An **individual stem**
+(`VegetationStem`) stands for a row of stems with lateral spacing $\Delta y$; its force is deposited as
+$F/(\rho_0\Delta x\Delta z\Delta y)$, split linearly between the two neighbouring u-faces.
+
+Stems are rigid ($EI=\infty$) or flexible: inextensible, clamped at the base, quasi-static (elastica; Alben et al. 2002;
+Gosselin et al. 2010; Luhar & Nepf 2011),
+
+```math
+EI\,\frac{d\theta}{ds}=T(s),\qquad f_n=\tfrac12\rho_0 C_D b\,u_n|u_n|,\quad u_n=u\cos\theta,
+```
+
+with $T(s)$ the moment of the loads beyond $s$ (normal drag and net buoyancy per length $B_l$) and $\theta$ the angle
+from the vertical. Per unit vertical extent the horizontal drag is $\tfrac12\rho_0C_Db\,u|u|\cos^2\theta$. Discretisation:
+$N$ straight segments, angles at the segment midpoints, curvature at the nodes ($\theta_1=\kappa_0\Delta s/2$,
+$\theta_m=\theta_{m-1}+\kappa_{m-1}\Delta s$, second order). The segments are split at the cell boundaries; a piece in row
+$k$ uses the velocity of that row, and the same pieces load the stem and, with the opposite sign, the fluid (exact
+momentum exchange; a rigid patch gives exactly $\tfrac12C_Da\,u|u|$ per unit volume, $a=nb$). The posture is solved
+with Newton's method (finite-difference Jacobian, backtracking), warm-started every step. Stem parts above the free
+surface carry no load; the vertical drag component is not applied to $w$.
+
+The drag enters the u predictor explicitly, from the velocities of time level n. It is monotone for
+$\Delta t\,K\le1$ with the linearised drag rate $K$ (rigid patch: $\tfrac12C_Da|u|$); `step_forward!` checks this.
+WHY explicit: an implicit factor applied to the predictor before the free-surface solve would make the steady state
+depend on $\Delta t$, because the surface-slope correction is not divided by it.
+
+`ModelConfig.body_force_x` (m/s²) adds a uniform body force (channel slope) for steady periodic-channel flow. The
+former ad hoc vegetation viscosity (`vegetation_turbulence_strength`) and the old stem model (force relaxation 0.35,
+response gain 8, `source_strength`, string-like bending) were removed; in the old tests that model changed the wave
+amplitude by about $10^{-15}$ and the lock-exchange front by less than one cell.
 
 ## Test-by-test documentation
 
@@ -1257,6 +1291,36 @@ $p=\cos(\pi x/L)\cos(\pi(z-d)/(H-d))$ has zero normal derivative at the side wal
 $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The masked matrix of `build_poisson_matrix`
 (gauge pin at the first wet cell, mean removal over the wet cells) reproduces it with maximum errors 5.1e-3, 1.3e-3 and
 3.2e-4 on $32\times16$, $64\times32$ and $128\times64$ cells: observed orders 1.99 and 2.00 (required: 1.8-2.2).
+
+
+### Vegetation tests (`test_vegetation.jl`, section 16)
+
+- `test_verify_rigid_patch_drag_per_unit_volume`: kernel check, $-\tfrac12C_Da\,u|u|$ per unit volume with the
+  canopy-top cell fraction and the patch-edge weights, random velocities of both signs, to round-off.
+- `test_verify_stem_drag_equals_fluid_momentum_sink`: three flexible stems in a sheared profile; the momentum removed
+  from the fluid ($\rho_0\Delta x\Delta z\Delta y\sum a$) equals the sum of the stem drags to round-off; the stems bend
+  downstream and their drag stays below the rigid value.
+- `test_verify_cantilever_small_deflection_second_order`: uniform load $q=\tfrac12\rho C_Db U^2$, $Ca=0.005$; tip
+  deflection against $ql^4/(8EI)$, observed order 2.0 (errors $1.0\cdot10^{-2}$, $2.5\cdot10^{-3}$, $6.3\cdot10^{-4}$).
+- `test_validate_flexible_stem_reconfiguration`: $R=F/F_{rigid}\to1$ for $Ca=0.1$; slope of $\log R$ against
+  $\log Ca$ between $Ca=300$ and $3000$ within 0.02 of $-1/3$ (observed $-0.333$); buoyancy number $B=100$ keeps the
+  stem nearly rigid at $Ca=10$ ($R>0.95$), without buoyancy $R<0.6$.
+- `test_validate_emergent_rigid_canopy_uniform_velocity`: periodic channel, body force $G$; $U=\sqrt{2G/(C_Da)}$ exact,
+  observed $4\cdot10^{-12}$, both modes.
+- `test_validate_submerged_rigid_canopy_profile`: $h_v=H/2$, constant $\nu$; against the 1D reference
+  `canopy_reference_profile` ($\nu u''=\tfrac12C_Da\phi u|u|-G$, 4000 cells, Newton); orders above 1.8 (observed 1.94,
+  1.98), both modes.
+- `test_verify_individual_stems_match_patch`: 25 rigid stems at random positions with the patch-equivalent lateral
+  spacing give the patch velocity and balance the body force (observed $1.4\cdot10^{-6}$).
+- `test_verify_flexible_patch_momentum_balance`: flexible submerged patch; steady total drag $=\rho_0GHL$ within
+  $10^{-4}$, the stems bend, and the velocity exceeds the rigid case.
+- `test_validate_patch_head_loss`: inflow/outflow channel, emergent patch; $g\Delta\eta=\tfrac12C_DaLU^2$ within
+  0.3 % (observed $-0.03$ %), both modes.
+- `test_verify_explicit_drag_stability_check`: $\Delta t\,K=2$ is rejected.
+- `test_vegetation_damps_free_surface_wave_motion`: a rigid patch around a velocity antinode of a standing wave
+  reduces the wave energy after 10 s to below 0.8 of the case without vegetation (observed 0.69).
+- `test_vegetation_slows_lock_exchange_front`: a rigid patch in the right half delays the dense front by more than
+  1 m after 60 s.
 
 ## Additional validation scripts and literature basis
 

@@ -3,6 +3,9 @@ using Printf
 
 include(joinpath(@__DIR__, "common.jl"))
 
+# Ported to the vegetation model of issue #8 (physical stem parameters: bending stiffness EI, lateral spacing of the
+# row of stems; no tuning factors). A quantitative reference follows in step 2 of docs/plan_issue_8_vegetation.md.
+
 function run_case!(label::String, model, prefix::String, title::String)
     @printf("Running wave-damping case: %s\n", label)
     t0 = time()
@@ -74,8 +77,6 @@ high_canopy_on_cfg = copy_config(base_cfg)
 high_canopy_on_cfg.output_dir = vegetation_output_dir(joinpath("wave_damping", "high_canopy_turb_on"))
 high_canopy_on_cfg.use_turbulence_model = true
 high_canopy_on_cfg.turbulence_mixing_length = 0.08
-high_canopy_on_cfg.vegetation_turbulence_strength = 0.35
-high_canopy_on_cfg.vegetation_turbulence_spread_cells = 2
 high_canopy_on_cfg.max_turbulent_viscosity = 1e-4
 
 reference_model = Model(reference_cfg)
@@ -94,13 +95,10 @@ function attach_high_canopy!(model)
         VegetationStem(
             base_x=x,
             height=0.85 * cfg.depth,
-            diameter=0.06,
-            drag_coefficient=2.8,
-            stiffness=0.10,
-            damping=0.05,
-            mass_per_length=0.40,
-            sample_points=18,
-            source_strength=3.2,
+            diameter=0.06,              # m
+            drag_coefficient=1.2,       # -
+            bending_stiffness=0.1,      # N m^2
+            lateral_spacing=0.1,        # m
         ) for x in centers
     ]
     attach_vegetation!(model, VegetationModel(stems...))

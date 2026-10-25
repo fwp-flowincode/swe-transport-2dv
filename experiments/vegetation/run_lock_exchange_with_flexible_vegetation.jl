@@ -3,6 +3,9 @@ using Printf
 
 include(joinpath(@__DIR__, "common.jl"))
 
+# Ported to the vegetation model of issue #8 (physical stem parameters: bending stiffness EI, lateral spacing of the
+# row of stems; no tuning factors). A quantitative reference follows in step 2 of docs/plan_issue_8_vegetation.md.
+
 cfg = ModelConfig(
     nx=600,
     nz=120,
@@ -27,13 +30,10 @@ initialize_lock_exchange!(model)
 stem = VegetationStem(
     base_x=17.0,
     height=0.9 * cfg.depth,
-    diameter=0.04,
-    drag_coefficient=1.8,
-    stiffness=0.60,
-    damping=0.22,
-    mass_per_length=0.45,
-    sample_points=18,
-    source_strength=0.7,
+    diameter=0.04,              # m
+    drag_coefficient=1.2,       # -
+    bending_stiffness=0.5,      # N m^2
+    lateral_spacing=0.2,        # m
 )
 attach_vegetation!(model, VegetationModel(stem))
 
@@ -42,7 +42,7 @@ tag = case_tag(cfg)
 t0 = time()
 run!(model)
 t1 = time()
-final_tip_deflection = model.vegetation.stems[1].deflection[end]
+final_tip_deflection = stem_tip_deflection(model.vegetation.stems[1])
 outputs = copy_case_outputs!("vegetation_lock_exchange", tag; output_dir=cfg.output_dir)
 @printf("CASE=vegetation_lock_exchange FULL_WALL_SECONDS=%.2f\n", t1 - t0)
 print_case_outputs(outputs; title=@sprintf("Vegetation lock-exchange outputs (final tip deflection=%.3f m)", final_tip_deflection))

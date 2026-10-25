@@ -10,8 +10,6 @@ Base.@kwdef mutable struct ModelConfig
     nu::Float64 = 1e-6
     use_turbulence_model::Bool = false
     turbulence_mixing_length::Float64 = 0.0
-    vegetation_turbulence_strength::Float64 = 0.0
-    vegetation_turbulence_spread_cells::Int = 1
     max_turbulent_viscosity::Float64 = 5e-4
     dt::Float64 = 0.0025
     nt::Int = 40000
@@ -34,6 +32,9 @@ Base.@kwdef mutable struct ModelConfig
     output_dir::String = "output_barotropic"
     wind_stress_x::Float64 = 0.0
     wind_mixing_diffusivity::Float64 = 0.0
+    # Uniform horizontal body force (m/s^2) on the whole water column, e.g. g times a channel slope; drives steady flow
+    # in a periodic channel (vegetation reference cases, issue #8).
+    body_force_x::Float64 = 0.0
     # Variable-thickness top layer (hydrostatic mode only): the top layer has the thickness dz + eta instead of
     # dz, its volume change d(eta)/dt enters the top-layer budgets, and the free surface is a material boundary
     # (zero flux through it). nothing (default) = automatic: on for the hydrostatic mode, off for the non-hydrostatic
@@ -111,8 +112,6 @@ function copy_config(cfg::ModelConfig)
         nu=cfg.nu,
         use_turbulence_model=cfg.use_turbulence_model,
         turbulence_mixing_length=cfg.turbulence_mixing_length,
-        vegetation_turbulence_strength=cfg.vegetation_turbulence_strength,
-        vegetation_turbulence_spread_cells=cfg.vegetation_turbulence_spread_cells,
         max_turbulent_viscosity=cfg.max_turbulent_viscosity,
         dt=cfg.dt,
         nt=cfg.nt,
@@ -131,6 +130,7 @@ function copy_config(cfg::ModelConfig)
         output_dir=cfg.output_dir,
         wind_stress_x=cfg.wind_stress_x,
         wind_mixing_diffusivity=cfg.wind_mixing_diffusivity,
+        body_force_x=cfg.body_force_x,
         variable_top_layer=cfg.variable_top_layer,
         top_layer_min_fraction=cfg.top_layer_min_fraction,
         nonhydro_surface_dirichlet=cfg.nonhydro_surface_dirichlet,
@@ -942,32 +942,6 @@ function _compute_effective_viscosity_u!(nu_eff_u::AbstractMatrix{<:Real}, model
         end
     end
 
-    if model.vegetation !== nothing && cfg.vegetation_turbulence_strength > 0.0
-        spread = max(0, cfg.vegetation_turbulence_spread_cells)
-        for stem in model.vegetation.stems
-            x_nodes, z_nodes = vegetation_path(stem; npts=length(stem.deflection))
-            @inbounds for j in eachindex(x_nodes)
-                px = clamp((x_nodes[j] / model.dx) + 1.0, 1.0, nxp1 * 1.0)
-                pz = clamp((z_nodes[j] / model.dz) + 0.5, 1.0, nz * 1.0)
-                i0 = clamp(round(Int, px), 1, nxp1)
-                k0 = clamp(round(Int, pz), 1, nz)
-
-                u_loc = abs(st.u[k0, i0])
-                nu_add = cfg.vegetation_turbulence_strength * stem.config.diameter * u_loc
-
-                i_lo = max(1, i0 - spread)
-                i_hi = min(nxp1, i0 + spread)
-                k_lo = max(1, k0 - spread)
-                k_hi = min(nz, k0 + spread)
-                for ii in i_lo:i_hi
-                    for kk in k_lo:k_hi
-                        nu_eff_u[kk, ii] += nu_add
-                    end
-                end
-            end
-        end
-    end
-
     max_nu = cfg.nu + max(cfg.max_turbulent_viscosity, 0.0)
     @inbounds for idx in eachindex(nu_eff_u)
         nu_eff_u[idx] = min(nu_eff_u[idx], max_nu)
@@ -1022,7 +996,7 @@ function step_forward!(model::Model)
         nz, nxp1 = size(st.u)
         @inbounds for i in 1:nxp1
             for k in 1:nz
-                ws.u_hat[k, i] = st.u[k, i] + cfg.dt * (-ws.adv_u[k, i] - (1.0 / cfg.rho0) * ws.grad_p_x[k, i] + ws.diff_u[k, i])
+                ws.u_hat[k, i] = st.u[k, i] + cfg.dt * (-ws.adv_u[k, i] - (1.0 / cfg.rho0) * ws.grad_p_x[k, i] + ws.diff_u[k, i] + cfg.body_force_x)
             end
         end
 
@@ -1060,7 +1034,14 @@ function step_forward!(model::Model)
 
     if model.vegetation !== nothing
         @timeit model.timers "step/vegetation_coupling" begin
-            vegetation_source!(ws.adv_u, model.vegetation, ws.u_hat, ws.p_internal, cfg.dt, model.dx, model.dz, cfg.rho0)
+            # Explicit (forward Euler) drag from the velocities of time level n, like the other explicit terms.
+            # WHY explicit: an implicit factor applied here, before the free-surface solve, would make the steady state
+            # depend on dt (the surface-slope correction below is not divided by it); see src/vegetation.jl.
+            vegetation_source!(ws.adv_u, model.vegetation, st.u, st.eta, model.dx, model.dz, cfg.rho0; periodic_x=cfg.periodic_x)
+            drag_rate = vegetation_drag_rate(model.vegetation)
+            if cfg.dt * drag_rate > VEGETATION_EXPLICIT_DRAG_LIMIT
+                throw(ArgumentError("vegetation drag too stiff for the explicit step: dt * |a/u| = $(cfg.dt * drag_rate) > $(VEGETATION_EXPLICIT_DRAG_LIMIT); reduce dt"))
+            end
             @. ws.u_hat = ws.u_hat + cfg.dt * ws.adv_u
         end
     end
