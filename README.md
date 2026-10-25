@@ -25,6 +25,8 @@ Model
 - Momentum advection: second-order TVD (MUSCL/MC limiter) or first-order upwind.
 - Density advection (`transport_advection_scheme`): conservative first-order upwind (default) or
   second-order TVD (flux-limited Lax-Wendroff, MC limiter).
+- Variable bed (`bed_level`): a bed level per column on the z-level grid (staircase), e.g. sills and
+  obstacles; the non-hydrostatic projection then uses the sparse solver on the wet cells.
 - Optional extras:
   - molecular viscosity;
   - mixing-length turbulence;
@@ -43,6 +45,7 @@ README with a description, settings and figures in its `figures/` subfolder.
 | Experiment | Folder | Topic |
 |---|---|---|
 | [Lock exchange](experiments/lock_exchange/README.md) | `lock_exchange/` | gravity current, front speed, Kelvin-Helmholtz billows, hydrostatic vs. non-hydrostatic |
+| [Lock exchange with obstacle](experiments/lock_exchange_obstacle/README.md) | `lock_exchange_obstacle/` | density-stratified dam break with obstacle, variable bed, Boussinesq scaling |
 | [Rayleigh-Taylor instability](experiments/rayleigh_taylor/README.md) | `rayleigh_taylor/` | heavy over light fluid, linear growth vs. theory, overturning and mixing |
 | [Kelvin-Helmholtz instability](experiments/kelvin_helmholtz/README.md) | `kelvin_helmholtz/` | stratified shear layer, periodic domain, billow merging and mixing |
 | Buoyant plumes | `plumes/` | rising and sinking plumes |
@@ -62,6 +65,12 @@ fronts (see the [lock-exchange README](experiments/lock_exchange/README.md)).*
 
 *Rayleigh-Taylor instability, non-hydrostatic, 400 x 160 cells: a heavy layer on top of light water overturns
 into sinking plumes (see the [Rayleigh-Taylor README](experiments/rayleigh_taylor/README.md)).*
+
+<a href="experiments/lock_exchange_obstacle/README.md"><img src="experiments/lock_exchange_obstacle/figures/lock_exchange_obstacle.gif" alt="Lock exchange with obstacle" width="440"></a>
+
+*Lock exchange with obstacle, non-hydrostatic, 584 x 584 cells over a variable bed: a column of heavy water
+collapses, overflows a small obstacle and runs up the far wall, a density-stratified version of the classical dam
+break with obstacle (see the [lock-exchange-with-obstacle README](experiments/lock_exchange_obstacle/README.md)).*
 
 Folder layout
 -------------

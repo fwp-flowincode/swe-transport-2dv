@@ -4,6 +4,27 @@
 include(joinpath(@__DIR__, "test_common.jl"))
 
 @testset "Advection" begin
+    @testset "test_verify_tvd2_momentum_flux_equals_transport_scheme" begin
+        # With a constant velocity the tvd2 momentum flux (point velocities averaged to the faces) and the tvd2 density
+        # flux (face velocities) are the same flux-limited Lax-Wendroff scheme: identical tendencies for the same dt.
+        # Contrast: the semi-discrete momentum flux (dt = 0, no time correction) differs.
+        nz, nx = 12, 16
+        dx, dz, dt = 0.1, 0.05, 0.02          # m, m, s
+        xc = [(i - 0.5) * dx for i in 1:nx]
+        zc = [(k - 0.5) * dz for k in 1:nz]
+        phi = [sin(2pi * x / (nx * dx)) * cos(pi * z / (nz * dz)) + 0.3 * (x > 0.8) for z in zc, x in xc]
+        cu, cw = 0.7, -0.4                    # m/s, Courant numbers 0.14 and 0.16
+        ws = SweTransport2DV.AdvectionWorkspace(nz, nx)
+        momentum = zeros(nz, nx)
+        SweTransport2DV._advective_flux_divergence!(momentum, phi, fill(cu, nz, nx), fill(cw, nz, nx), dx, dz, "tvd2", ws; dt=dt)
+        transport = advection_term_rho(fill(cu, nz, nx + 1), fill(cw, nz + 1, nx), phi, dx, dz; scheme="tvd2", dt=dt)
+        @test maximum(abs, momentum .- transport) < TOL_IDENTITY * maximum(abs, transport)
+
+        semi_discrete = zeros(nz, nx)
+        SweTransport2DV._advective_flux_divergence!(semi_discrete, phi, fill(cu, nz, nx), fill(cw, nz, nx), dx, dz, "tvd2", ws; dt=0.0)
+        @test maximum(abs, semi_discrete .- transport) > 1e3 * TOL_IDENTITY * maximum(abs, transport)
+    end
+
     @testset "test_density_advection_zero_for_uniform_density" begin
         nz, nx = 8, 10
         rho = fill(1000.0, nz, nx)

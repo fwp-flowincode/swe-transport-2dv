@@ -35,6 +35,26 @@ function _ensure_batch_plot_backend!()
     return nothing
 end
 
+"""
+    _blank_solid_cells(field, config) -> field or copy
+
+Cell-centred `field` (nz x nx) with NaN in the cells below `config.bed_level` (variable bed), so that heatmaps leave the
+bed blank and `_finite_clims` ignores it. Returns `field` itself for a flat bed.
+"""
+function _blank_solid_cells(field::AbstractMatrix{<:Real}, config)
+    if config.bed_level === nothing
+        return field
+    end
+    nz, nx = size(field)
+    geo = BedGeometry(config.bed_level, nz, nx, config.depth / nz)
+    if !geo.any_solid
+        return field
+    end
+    blanked = Float64.(field)
+    blanked[.!geo.wet_cell] .= NaN
+    return blanked
+end
+
 function _finite_clims(data; center::Bool=false, min_span::Real=PLOT_RANGE_MIN_SPAN)
     lo = Inf
     hi = -Inf
@@ -314,11 +334,13 @@ function plot_state(state, config; title::String="", filename::String="", eta_pr
     u_c, w_c = _cell_center_velocity(u, w)
     i_idx, j_idx = _quiver_sampling(config)
     q_scale = _quiver_scale(u_c, w_c, config)
+    # the arrows use the unblanked velocities (zero in the bed, not drawn); the heatmaps leave the bed blank
+    u_plot, w_plot, p_plot, rho_plot = (_blank_solid_cells(f, config) for f in (u_c, w_c, p, rho))
 
-    p1 = heatmap(x_centers, z_centers, u_c; aspect_ratio=:auto, title="u-velocity (cell-centered)", xlabel="x (m)", ylabel="z (m, physical)", color=:viridis, clims=_finite_clims(u_c), ylims=(0.0, z_top))
-    p2 = heatmap(x_centers, z_centers, w_c; aspect_ratio=:auto, title="w-velocity (cell-centered)", xlabel="x (m)", ylabel="z (m, physical)", color=:viridis, clims=_finite_clims(w_c), ylims=(0.0, z_top))
-    p3 = heatmap(x_centers, z_centers, p; aspect_ratio=:auto, title="Internal Pressure", xlabel="x (m)", ylabel="z (m, physical)", color=:viridis, clims=_finite_clims(p), ylims=(0.0, z_top))
-    p4 = heatmap(x_centers, z_centers, rho; aspect_ratio=:auto, title="Density", xlabel="x (m)", ylabel="z (m, physical)", color=:viridis, clims=_finite_clims(rho), ylims=(0.0, z_top))
+    p1 = heatmap(x_centers, z_centers, u_plot; aspect_ratio=:auto, title="u-velocity (cell-centered)", xlabel="x (m)", ylabel="z (m, physical)", color=:viridis, clims=_finite_clims(u_plot), ylims=(0.0, z_top))
+    p2 = heatmap(x_centers, z_centers, w_plot; aspect_ratio=:auto, title="w-velocity (cell-centered)", xlabel="x (m)", ylabel="z (m, physical)", color=:viridis, clims=_finite_clims(w_plot), ylims=(0.0, z_top))
+    p3 = heatmap(x_centers, z_centers, p_plot; aspect_ratio=:auto, title="Internal Pressure", xlabel="x (m)", ylabel="z (m, physical)", color=:viridis, clims=_finite_clims(p_plot), ylims=(0.0, z_top))
+    p4 = heatmap(x_centers, z_centers, rho_plot; aspect_ratio=:auto, title="Density", xlabel="x (m)", ylabel="z (m, physical)", color=:viridis, clims=_finite_clims(rho_plot), ylims=(0.0, z_top))
 
     xq, zq, uq, wq = _quiver_vectors(u_c, w_c, x_centers, z_centers, i_idx, j_idx, q_scale, min_visible_len)
     _plot_velocity_vectors!(p4, xq, zq, uq, wq; min_draw_mag=min_draw_mag)
@@ -331,6 +353,7 @@ function plot_state(state, config; title::String="", filename::String="", eta_pr
     p5 = plot(x_centers, eta; title="Free Surface Elevation (eta)", xlabel="x (m)", ylabel="Elevation (m)", legend=false, ylim=(-eta_ylim, eta_ylim))
 
     div = div_x_u(u, config.length / config.nx) .+ div_z_w(w, config.depth / config.nz)
+    div = _blank_solid_cells(div, config)
     p6 = heatmap(x_centers, z_centers, div; aspect_ratio=:auto, title="Divergence (du/dx + dw/dz)", xlabel="x (m)", ylabel="z (m)", color=:balance, clims=_finite_clims(div; center=true))
 
     if eta_prev !== nothing && dt !== nothing && dt > 0.0
@@ -401,7 +424,7 @@ function create_animation(history, config; filename::String="animation.gif", sav
         t = frame_times !== nothing && i <= length(frame_times) ? frame_times[i] : (i - 1) * frame_dt
         density_title = @sprintf("Density at t=%.2fs", t)
 
-        p_top = heatmap(x_centers, z_centers, st.rho; aspect_ratio=:auto, color=:viridis, clims=(vmin, vmax), title=density_title, xlabel="x (m)", ylabel="z (m, physical)", ylims=(0.0, z_top_fixed))
+        p_top = heatmap(x_centers, z_centers, _blank_solid_cells(st.rho, config); aspect_ratio=:auto, color=:viridis, clims=(vmin, vmax), title=density_title, xlabel="x (m)", ylabel="z (m, physical)", ylims=(0.0, z_top_fixed))
         xq, zq, uq, wq = _quiver_vectors(u_c, w_c, x_centers, z_centers, i_idx, j_idx, q_scale, min_visible_len)
         _plot_velocity_vectors!(p_top, xq, zq, uq, wq; min_draw_mag=min_draw_mag)
         _plot_vegetation!(p_top, vegetation)
@@ -453,6 +476,7 @@ function plot_pressure_buoyancy_diagnostics(state, config, p_hydro::AbstractMatr
     pc_lim = max(PLOT_RANGE_MIN_SPAN, maximum(abs, p_corr))
     b_lim = max(PLOT_RANGE_MIN_SPAN, maximum(abs, buoy_c))
 
+    p_hydro, p_corr, p_total, buoy_c = (_blank_solid_cells(f, config) for f in (p_hydro, p_corr, p_total, buoy_c))
     p1 = heatmap(x_centers, z_centers, p_hydro; aspect_ratio=:auto, title="Hydrostatic Pressure", xlabel="x (m)", ylabel="z (m)", color=:viridis, clims=_finite_clims(p_hydro))
     p2 = heatmap(x_centers, z_centers, p_corr; aspect_ratio=:auto, title="Non-hydrostatic Pressure Correction", xlabel="x (m)", ylabel="z (m)", color=:balance, clims=_finite_clims(p_corr; center=true))
     p3 = heatmap(x_centers, z_centers, p_total; aspect_ratio=:auto, title="Total Internal Pressure", xlabel="x (m)", ylabel="z (m)", color=:viridis, clims=_finite_clims(p_total))

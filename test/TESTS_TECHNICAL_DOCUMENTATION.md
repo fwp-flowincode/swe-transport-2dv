@@ -114,11 +114,12 @@ F_{f}=v_f\,\phi_{upwind},
 
 with donor-cell choice based on the sign of face velocity $v_f$.
 
-`tvd2` (MUSCL-type reconstruction with MC limiter):
+`tvd2` (MC-limited reconstruction with Lax-Wendroff time correction, the same scheme as the density transport in
+section 4):
 
 ```math
-\phi^L_{i+1/2}=\phi_i+\frac{1}{2}s_i,\qquad
-\phi^R_{i+1/2}=\phi_{i+1}-\frac{1}{2}s_{i+1},
+\phi^L_{i+1/2}=\phi_i+\frac{1}{2}(1-C_f)\,s_i,\qquad
+\phi^R_{i+1/2}=\phi_{i+1}-\frac{1}{2}(1-C_f)\,s_{i+1},\qquad C_f=\frac{|v_f|\,\Delta t}{\Delta x},
 ```
 
 ```math
@@ -129,7 +130,12 @@ s_i = \mathrm{MC}(\Delta^-\phi_i,\Delta^+\phi_i),
 \mathrm{MC}(a,b)=\mathrm{minmod}\!\left(\mathrm{minmod}(2a,2b),\frac{a+b}{2}\right).
 ```
 
-The face flux is then upwinded between $(\phi^L,\phi^R)$ using the face velocity sign.
+The face flux is then upwinded between $(\phi^L,\phi^R)$ using the face velocity sign; $v_f$ is the average of the two
+neighbouring point velocities. The factor $(1-C_f)$ was added for issue #3: the momentum equations are advanced with one
+forward-Euler step, which adds kinetic energy of order $(\Delta t^2/2)|\mathcal{A}|^2$ per step. Without the correction the
+dense current of the lock exchange with obstacle created kinetic energy after hitting the side wall (up to 1.5 times the
+released potential energy) and blew up; with it the energy budget stays consistent until $t\sqrt{g'/a}\approx9$.
+`_advective_flux_divergence!` with `dt = 0` gives the former semi-discrete MUSCL flux.
 
 ### 4) Density transport method (`upwind1`, `tvd2`)
 
@@ -151,8 +157,8 @@ earlier results bit for bit):
 \rho_f=\rho_{i-1}+\tfrac12\,(1-C_f)\,s_{i-1},\qquad C_f=\frac{|v_f|\,\Delta t}{\Delta x},\qquad s_i=\mathrm{MC}(\Delta^-\rho_i,\Delta^+\rho_i),
 ```
 
-  mirrored for $v_f<0$, with $s=0$ in the boundary cells. Unlike the momentum `tvd2` scheme it contains the time-correction
-  factor $(1-C_f)$. The reason is that the update is a single forward-Euler step: without that factor, MUSCL with forward
+  mirrored for $v_f<0$, with $s=0$ in the boundary cells. It contains the time-correction factor $(1-C_f)$ (since issue #3
+  also used for momentum, section 3). The reason is that the update is a single forward-Euler step: without that factor, MUSCL with forward
   Euler is first order in time and TVD only for $C\le1/2$ in 1D; with it the scheme is second order in time and TVD up to
   $C=1$ in 1D (MC lies in Sweby's TVD region $0\le\psi(r)\le\min(2r,2)$). The unsplit 2D update satisfies a local maximum
   principle for $C_x+C_z\le1/2$ (each face coefficient is at most $C(2-C)\le2C$). It has no corner-transport
@@ -808,6 +814,13 @@ for spatially uniform $\mathbf{u}$.
 
 Validation section: upwind1 and tvd2 both near-zero on interior.
 
+### test_verify_tvd2_momentum_flux_equals_transport_scheme
+
+Purpose: with a constant velocity ($C_x=0.14$, $C_z=0.16$) the `tvd2` momentum tendency (`_advective_flux_divergence!` with
+`dt`) equals the `tvd2` density tendency (`advection_term_rho` with the same `dt`) to round-off for a smooth field with a
+step, i.e. both use the same flux-limited Lax-Wendroff scheme. Contrast: the semi-discrete momentum flux (`dt = 0`)
+differs.
+
 ### test_momentum_advection_conservative_in_closed_box
 
 Purpose: ensure net momentum-advection tendency integrates to near zero in closed domain.
@@ -1045,6 +1058,100 @@ and density within the initial bounds; the density differs from an `upwind1` run
 `ArgumentError`, `copy_config` carries the option, and the default is `upwind1`. The output file tag (`output_case_tag`,
 used by `run!` and by `case_tag` in `experiments/common/helpers.jl`) names both schemes, e.g.
 `hydro_mom-tvd2_trans-upwind1_dt0p0025_L30p0_H4p0_dx0p300_dz0p200`.
+
+### Variable bed (issue #3)
+
+`ModelConfig.bed_level` (m above the grid bottom, one value per column) defines a staircase bed on the z-level grid
+(`BedGeometry`, `src/geometry.jl`). Each value must be a whole number of cells and leave at least two wet cells, so the
+bed stays below the top layer; dry columns and `periodic_x` are not supported. The masks: wet cells; open u-faces
+(both neighbouring cells wet, u may be non-zero) and active u-faces (at least one wet neighbour, walls with u = 0 that
+take part in the stencils like the outer domain faces); open w-faces (above the bed) and active w-faces (plus the bed
+face, w = 0). An explicit `bed_level`, also all zeros, uses the masked code paths; `nothing` keeps the legacy paths.
+
+### test_verify_bed_geometry_masks_and_checks
+
+Purpose: masks of an obstacle three cells high in two columns (lowest wet cell, wet-cell count, face bed levels, wall and
+interior faces of the obstacle, bed face of w); a zero bed has no solid cells and all faces open; invalid input (not a
+whole number of cells, fewer than two wet cells, negative, wrong length, periodic) raises `ArgumentError`;
+`copy_config` copies the bed level; the plotting helper leaves solid cells blank (NaN) and passes flat-bed fields through;
+a Float32 model builds the same masks (the alignment check uses the Float64 cell height, since 1.0/0.2f0 is not a whole
+number in Float32).
+
+### test_verify_bed_mass_and_surface_pressure_accounting
+
+Purpose: with solid cells the constituent mass counts the wet cells only (an obstacle of 2 x 3 cells in a 12 m x 4 m
+domain leaves 46.8 m² of water, mass 46,800 kg/m for 1000 kg/m³), unaffected by the unused density stored in solid
+cells; with the variable top layer the surface elevation adds $\rho\,\eta\,\Delta x$ per column (48,000 kg/m for
+$\eta=0.1$ m). The obstacle-force diagnostic of the experiment (`leo_obstacle_force`) includes the free-surface pressure
+$\rho_0 g(\eta_{left}-\eta_{right})$, which the model applies separately from `state.p`: with $p=0$ and an elevation
+difference of 0.2 m over a 0.6 m high obstacle the force is $\rho_0 g\cdot0.2\cdot0.6$.
+
+### test_verify_invalid_bed_velocities_are_masked_before_advection
+
+Purpose: arbitrary velocities on closed u-faces and on or below the bed (here 10 m/s, e.g. from an initializer that
+does not know the bed) are removed at the start of the step, so one step gives the same state as from a clean start.
+
+### test_verify_flat_bed_reproduces_legacy_results_hydrostatic
+
+Purpose: an explicit zero bed runs through every masked code path (advection, diffusion and transport masks, velocity
+masking, per-face barotropic depth, w reconstruction from the bed, mass-correction mask). After 200 lock-exchange steps
+u, w, rho and eta must equal the legacy flat-bed run bit for bit, with and without the variable top layer.
+
+### test_verify_raised_flat_bed_equals_shallower_domain_hydrostatic
+
+Purpose: a uniform bed of 1 m (5 cells) under a 4 m domain must give the same lock exchange as a 3 m domain with 15
+layers: velocities within 1e-10 m/s, densities within 1e-9 kg/m³, eta within 1e-11 m after 200 steps (round-off from
+the summation order of the mass correction); u and w are exactly zero in and on the bed.
+
+### test_verify_rest_state_over_obstacle_hydrostatic
+
+Purpose: horizontally stratified water at rest over an obstacle (6 cells high) stays exactly at rest for 400 steps,
+both top-layer modes. On the z-level grid the hydrostatic pressure at a level depends only on the water above, so the
+obstacle walls produce no pressure-gradient error.
+
+### test_verify_lock_exchange_over_obstacle_conserves_hydrostatic
+
+Purpose: lock exchange over the obstacle for 2000 steps: water volume and constituent mass conserved, density within
+its initial bounds in the wet cells, u exactly zero on all closed faces, and the current is running (contrast).
+
+### test_validate_seiche_over_raised_bed
+
+Analytical solution: linear standing wave over a uniformly raised bed of height d, period $T=2L/\sqrt{g(H-d)}$
+($L=20$ m, $H=4$ m, $d=1$ m). Required: relative period error below 5e-4 on $n_x=40$ (measured 2.7e-4) and an
+observed order in $(1.6, 2.4)$ between $n_x=20$ and 40 (measured 1.96). Same errors as the flat-bed seiche test, so the
+per-face depth of the barotropic solve is consistent.
+
+Non-hydrostatic projection over a bed: with solid cells the Poisson problem for $p'$ is solved on the wet cells only
+(sparse method). A wet cell couples only to wet neighbours (zero-flux walls at the bed and the obstacle, as at the outer
+walls), solid cells get $p'=0$, the gauge pin moves to the first wet cell and the mean removal runs over the wet cells.
+The spectral solver needs a rectangular domain and is refused when solid cells exist. A zero bed keeps the rectangular
+problem, so both solvers are unchanged there.
+
+### test_verify_flat_bed_reproduces_legacy_results_nonhydrostatic
+
+Purpose: zero bed in the non-hydrostatic mode reproduces the legacy results bit for bit, with the spectral and with the
+sparse solver.
+
+### test_verify_raised_flat_bed_equals_shallower_domain_nonhydrostatic
+
+Purpose: as the hydrostatic version, through the masked Poisson problem (sparse solver): a 1 m bed under 4 m equals a
+3 m domain to round-off.
+
+### test_verify_rest_state_and_projection_over_obstacle_nonhydrostatic
+
+Purpose: (1) stratified water at rest over the obstacle stays at rest to the round-off of the projection (below 1e-9 m/s
+and m after 400 steps; measured about 4e-11). (2) Lock exchange over the obstacle for 2000 steps: the projected
+velocities $(\hat u,\hat w)$ are divergence-free in every wet cell (below 1e-10 1/s against a velocity scale
+$u/\Delta x\approx0.1$ 1/s; measured 8e-13), volume and mass are conserved, u is zero on all closed faces. (3) The
+spectral solver raises `ArgumentError` with solid cells.
+
+### test_verify_masked_poisson_manufactured_solution
+
+Manufactured solution on the wet cells above a raised flat bed of height $d$:
+$p=\cos(\pi x/L)\cos(\pi(z-d)/(H-d))$ has zero normal derivative at the side walls, the bed and the top, and
+$\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The masked matrix of `build_poisson_matrix`
+(gauge pin at the first wet cell, mean removal over the wet cells) reproduces it with maximum errors 5.1e-3, 1.3e-3 and
+3.2e-4 on $32\times16$, $64\times32$ and $128\times64$ cells: observed orders 1.99 and 2.00 (required: 1.8-2.2).
 
 ## Additional validation scripts and literature basis
 

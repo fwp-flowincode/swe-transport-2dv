@@ -198,6 +198,24 @@ function _face_velocity_z!(vz_face::AbstractMatrix{<:Real}, vz::AbstractMatrix{<
     return vz_face
 end
 
+"""
+    _advective_flux_divergence!(out, phi, vx, vz, dx, dz, scheme, ws, periodic_x=false; active=nothing, dt=0.0)
+
+Conservative advective tendency `out = div(v*phi)` of a momentum component `phi` (m/s; units of phi times 1/s) on its own
+grid points, with the point velocities `vx`, `vz` (m/s) averaged to the faces. `scheme`: `"upwind1"` (donor cell) or
+`"tvd2"`: MC-limited piecewise-linear reconstruction with the Lax-Wendroff time correction, face value
+`phi_up + 0.5 (1 - c) s_up` with the face Courant number c = |v| dt/dx (resp. dz) -- the same scheme as the density
+transport (`_density_face_fluxes!`). `dt = 0` (s) gives the semi-discrete MUSCL flux. `active`: points next to solid
+walls (variable bed), see `BedGeometry`.
+
+WHY the time correction (model passes dt = cfg.dt): the momentum equations are advanced with one forward-Euler step,
+which adds kinetic energy of order (dt^2/2)|A|^2 per step; without the correction the MUSCL/forward-Euler update is
+first order in time and only weakly dissipative. In the lock exchange with obstacle (issue #3) the uncorrected scheme
+created kinetic energy after the gravity current hit the side wall (kinetic energy up to 1.5 times the released
+potential energy) and blew up; with the correction the energy budget stays consistent much longer.
+Sources: Sweby (1984), SIAM J. Numer. Anal. 21, 995-1011; LeVeque (2002), Finite Volume Methods for Hyperbolic
+Problems, ch. 6 (equation numbers not checked).
+"""
 function _advective_flux_divergence!(
     out::AbstractMatrix{<:Real},
     phi::AbstractMatrix{<:Real},
@@ -207,7 +225,9 @@ function _advective_flux_divergence!(
     dz::Real,
     scheme::AbstractString,
     ws::AdvectionWorkspace,
-    periodic_x::Bool=false,
+    periodic_x::Bool=false;
+    active::Union{Nothing,AbstractMatrix{Bool}}=nothing,
+    dt::Real=0.0,
 )
     nz, nx = size(phi)
 
@@ -235,6 +255,9 @@ function _advective_flux_divergence!(
                 else
                     ws.flux_x[k, i] = v * phi[k, i]
                 end
+                if active !== nothing && !(active[k, i - 1] && active[k, i])
+                    ws.flux_x[k, i] = 0.0   # solid wall between the two points
+                end
             end
         end
 
@@ -246,6 +269,9 @@ function _advective_flux_divergence!(
                     ws.flux_z[k, i] = v * phi[k - 1, i]
                 else
                     ws.flux_z[k, i] = v * phi[k, i]
+                end
+                if active !== nothing && !(active[k - 1, i] && active[k, i])
+                    ws.flux_z[k, i] = 0.0
                 end
             end
             ws.flux_z[nz + 1, i] = 0.0
@@ -269,6 +295,10 @@ function _advective_flux_divergence!(
                     a = phi[k, i] - phi[k, i - 1]
                     b = phi[k, i + 1] - phi[k, i]
                     ws.slope_x[k, i] = _monotonized_central_scalar(a, b)
+                    # WHY: next to a solid point the slope is zero, as in the outermost points of the domain
+                    if active !== nothing && !(active[k, i - 1] && active[k, i] && active[k, i + 1])
+                        ws.slope_x[k, i] = 0.0
+                    end
                 end
             end
         end
@@ -279,6 +309,9 @@ function _advective_flux_divergence!(
                     a = phi[k, i] - phi[k - 1, i]
                     b = phi[k + 1, i] - phi[k, i]
                     ws.slope_z[k, i] = _monotonized_central_scalar(a, b)
+                    if active !== nothing && !(active[k - 1, i] && active[k, i] && active[k + 1, i])
+                        ws.slope_z[k, i] = 0.0
+                    end
                 end
             end
         end
@@ -286,8 +319,9 @@ function _advective_flux_divergence!(
         @inbounds for k in 1:nz
             if periodic_x
                 v = ws.vx_face[k, 1]
-                left_x = phi[k, nx] + 0.5 * ws.slope_x[k, nx]
-                right_x = phi[k, 1] - 0.5 * ws.slope_x[k, 1]
+                time_factor = 0.5 * (1.0 - abs(v) * dt / dx)   # Lax-Wendroff correction; 0.5 for dt = 0
+                left_x = phi[k, nx] + time_factor * ws.slope_x[k, nx]
+                right_x = phi[k, 1] - time_factor * ws.slope_x[k, 1]
                 ws.flux_x[k, 1] = v >= 0.0 ? v * left_x : v * right_x
                 ws.flux_x[k, nx + 1] = ws.flux_x[k, 1]
             else
@@ -295,20 +329,28 @@ function _advective_flux_divergence!(
                 ws.flux_x[k, nx + 1] = 0.0
             end
             for i in 2:nx
-                left_x = phi[k, i - 1] + 0.5 * ws.slope_x[k, i - 1]
-                right_x = phi[k, i] - 0.5 * ws.slope_x[k, i]
                 v = ws.vx_face[k, i]
+                time_factor = 0.5 * (1.0 - abs(v) * dt / dx)
+                left_x = phi[k, i - 1] + time_factor * ws.slope_x[k, i - 1]
+                right_x = phi[k, i] - time_factor * ws.slope_x[k, i]
                 ws.flux_x[k, i] = v >= 0.0 ? v * left_x : v * right_x
+                if active !== nothing && !(active[k, i - 1] && active[k, i])
+                    ws.flux_x[k, i] = 0.0
+                end
             end
         end
 
         @inbounds for i in 1:nx
             ws.flux_z[1, i] = 0.0
             for k in 2:nz
-                lower_z = phi[k - 1, i] + 0.5 * ws.slope_z[k - 1, i]
-                upper_z = phi[k, i] - 0.5 * ws.slope_z[k, i]
                 v = ws.vz_face[k, i]
+                time_factor = 0.5 * (1.0 - abs(v) * dt / dz)
+                lower_z = phi[k - 1, i] + time_factor * ws.slope_z[k - 1, i]
+                upper_z = phi[k, i] - time_factor * ws.slope_z[k, i]
                 ws.flux_z[k, i] = v >= 0.0 ? v * lower_z : v * upper_z
+                if active !== nothing && !(active[k - 1, i] && active[k, i])
+                    ws.flux_z[k, i] = 0.0
+                end
             end
             ws.flux_z[nz + 1, i] = 0.0
         end
@@ -367,14 +409,16 @@ function advection_term_u!(
     ws_interp::InterpolationWorkspace;
     top_row_advective_form::Bool=false,
     periodic_x::Bool=false,
+    active::Union{Nothing,AbstractMatrix{Bool}}=nothing,
+    dt::Real=0.0,
 )
     _interpolate_w_to_u!(ws_interp.w_u, w, ws_interp.w_center; periodic_x=periodic_x)
     if periodic_x
         nx = size(u, 2) - 1
-        _advective_flux_divergence!(@view(out[:, 1:nx]), @view(u[:, 1:nx]), @view(u[:, 1:nx]), @view(ws_interp.w_u[:, 1:nx]), dx, dz, scheme, ws_adv, true)
+        _advective_flux_divergence!(@view(out[:, 1:nx]), @view(u[:, 1:nx]), @view(u[:, 1:nx]), @view(ws_interp.w_u[:, 1:nx]), dx, dz, scheme, ws_adv, true; dt=dt)
         @views out[:, nx + 1] .= out[:, 1]
     else
-        _advective_flux_divergence!(out, u, u, ws_interp.w_u, dx, dz, scheme, ws_adv)
+        _advective_flux_divergence!(out, u, u, ws_interp.w_u, dx, dz, scheme, ws_adv; active=active, dt=dt)
     end
     if top_row_advective_form
         if periodic_x
@@ -412,10 +456,12 @@ function advection_term_w!(
     scheme::AbstractString,
     ws_adv::AdvectionWorkspace,
     ws_interp::InterpolationWorkspace,
-    periodic_x::Bool=false,
+    periodic_x::Bool=false;
+    active::Union{Nothing,AbstractMatrix{Bool}}=nothing,
+    dt::Real=0.0,
 )
     _interpolate_u_to_w!(ws_interp.u_w, u, ws_interp.u_center)
-    _advective_flux_divergence!(out, w, ws_interp.u_w, w, dx, dz, scheme, ws_adv, periodic_x)
+    _advective_flux_divergence!(out, w, ws_interp.u_w, w, dx, dz, scheme, ws_adv, periodic_x; active=active, dt=dt)
     return out
 end
 
@@ -436,7 +482,7 @@ function advection_term_w(
     return out
 end
 
-function diffusion_term!(res::AbstractMatrix{<:Real}, phi::AbstractMatrix{<:Real}, nu::Real, dx::Real, dz::Real; periodic_x::Bool=false)
+function diffusion_term!(res::AbstractMatrix{<:Real}, phi::AbstractMatrix{<:Real}, nu::Real, dx::Real, dz::Real; periodic_x::Bool=false, active::Union{Nothing,AbstractMatrix{Bool}}=nothing)
     nz, nx = size(phi)
     fill!(res, 0.0)
     nphysical = periodic_x ? nx - 1 : nx
@@ -448,6 +494,9 @@ function diffusion_term!(res::AbstractMatrix{<:Real}, phi::AbstractMatrix{<:Real
             lap_x = (right - 2.0 * phi[k, i] + left) / (dx * dx)
             lap_z = (phi[k + 1, i] - 2.0 * phi[k, i] + phi[k - 1, i]) / (dz * dz)
             res[k, i] = nu * (lap_x + lap_z)
+            if active !== nothing && !(active[k, i] && active[k, i - 1] && active[k, i + 1] && active[k - 1, i] && active[k + 1, i])
+                res[k, i] = 0.0   # next to a solid point: no diffusion, as in the outermost points of the domain
+            end
         end
     end
     if periodic_x
@@ -456,7 +505,7 @@ function diffusion_term!(res::AbstractMatrix{<:Real}, phi::AbstractMatrix{<:Real
     return res
 end
 
-function diffusion_term!(res::AbstractMatrix{<:Real}, phi::AbstractMatrix{<:Real}, nu::AbstractMatrix{<:Real}, dx::Real, dz::Real; periodic_x::Bool=false)
+function diffusion_term!(res::AbstractMatrix{<:Real}, phi::AbstractMatrix{<:Real}, nu::AbstractMatrix{<:Real}, dx::Real, dz::Real; periodic_x::Bool=false, active::Union{Nothing,AbstractMatrix{Bool}}=nothing)
     nz, nx = size(phi)
     fill!(res, 0.0)
     nphysical = periodic_x ? nx - 1 : nx
@@ -468,6 +517,9 @@ function diffusion_term!(res::AbstractMatrix{<:Real}, phi::AbstractMatrix{<:Real
             lap_x = (right - 2.0 * phi[k, i] + left) / (dx * dx)
             lap_z = (phi[k + 1, i] - 2.0 * phi[k, i] + phi[k - 1, i]) / (dz * dz)
             res[k, i] = nu[k, i] * (lap_x + lap_z)
+            if active !== nothing && !(active[k, i] && active[k, i - 1] && active[k, i + 1] && active[k - 1, i] && active[k + 1, i])
+                res[k, i] = 0.0
+            end
         end
     end
     if periodic_x
@@ -526,6 +578,7 @@ function _density_face_fluxes!(
     scheme::AbstractString;
     h_top_face::Union{Nothing,AbstractVector{<:Real}}=nothing,
     periodic_x::Bool=false,
+    active::Union{Nothing,AbstractMatrix{Bool}}=nothing,
 )
     nz, nx = size(rho)
 
@@ -572,6 +625,10 @@ function _density_face_fluxes!(
             @inbounds for i in 2:(nx - 1)
                 for k in 1:nz
                     ws.slope_x[k, i] = _monotonized_central_scalar(rho[k, i] - rho[k, i - 1], rho[k, i + 1] - rho[k, i])
+                    # WHY: next to a solid cell the slope is zero, as in the outermost cells of the domain
+                    if active !== nothing && !(active[k, i - 1] && active[k, i] && active[k, i + 1])
+                        ws.slope_x[k, i] = 0.0
+                    end
                 end
             end
         end
@@ -580,6 +637,9 @@ function _density_face_fluxes!(
             @inbounds for i in 1:nx
                 for k in 2:(nz - 1)
                     ws.slope_z[k, i] = _monotonized_central_scalar(rho[k, i] - rho[k - 1, i], rho[k + 1, i] - rho[k, i])
+                    if active !== nothing && !(active[k - 1, i] && active[k, i] && active[k + 1, i])
+                        ws.slope_z[k, i] = 0.0
+                    end
                 end
             end
         end
@@ -640,9 +700,10 @@ function advection_term_rho!(
     scheme::AbstractString="upwind1",
     dt::Real=0.0,
     periodic_x::Bool=false,
+    active::Union{Nothing,AbstractMatrix{Bool}}=nothing,
 )
     nz, nx = size(rho)
-    _density_face_fluxes!(ws, rho, u, w, dt, dx, dz, scheme; periodic_x=periodic_x)
+    _density_face_fluxes!(ws, rho, u, w, dt, dx, dz, scheme; periodic_x=periodic_x, active=active)
 
     @inbounds for i in 1:nx
         for k in 1:nz
@@ -739,10 +800,11 @@ function advect_density!(
     scheme::AbstractString="upwind1",
     top_row_advective_form::Bool=false,
     periodic_x::Bool=false,
+    active::Union{Nothing,AbstractMatrix{Bool}}=nothing,
     rho_min=nothing,
     rho_max=nothing,
 )
-    advection_term_rho!(ws.adv, u, w, rho, dx, dz, ws; scheme=scheme, dt=dt, periodic_x=periodic_x)
+    advection_term_rho!(ws.adv, u, w, rho, dx, dz, ws; scheme=scheme, dt=dt, periodic_x=periodic_x, active=active)
     if top_row_advective_form
         _density_top_row_advective_form!(ws.adv, rho, u, w, dx, dz; periodic_x=periodic_x)
     end
@@ -873,6 +935,7 @@ function advect_density_top_layer!(
     eta_old::AbstractVector{<:Real},
     eta_new::AbstractVector{<:Real};
     scheme::AbstractString="upwind1",
+    active::Union{Nothing,AbstractMatrix{Bool}}=nothing,
     rho_min=nothing,
     rho_max=nothing,
 )
@@ -881,7 +944,7 @@ function advect_density_top_layer!(
     # WHY: only the top-layer equation is written for h*rho (thickness-integrated), so only the top-row x-fluxes carry
     # h_top_face; the layers below use the plain density flux, exactly as advect_density!. The face flux at the free
     # surface (flux_z[nz + 1, :]) is zero: material boundary, no flux through the top of the top layer.
-    _density_face_fluxes!(ws, rho, u, w, dt, dx, dz, scheme; h_top_face=h_top_face)
+    _density_face_fluxes!(ws, rho, u, w, dt, dx, dz, scheme; h_top_face=h_top_face, active=active)
 
     @inbounds for i in 1:nx
         for k in 1:(nz - 1)

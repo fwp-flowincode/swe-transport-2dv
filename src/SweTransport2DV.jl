@@ -10,6 +10,7 @@ using Statistics
 using TimerOutputs
 
 include("state.jl")
+include("geometry.jl")
 include("diagnostics.jl")
 include("physics.jl")
 include("pressure.jl")
@@ -30,7 +31,7 @@ export build_poisson_matrix, solve_nonhydrostatic_pressure, PressureCorrectionSo
 export solve!
 export QUIVER_STRIDE, QUIVER_TARGET_COUNT_X, QUIVER_TARGET_COUNT_Z, QUIVER_TARGET_LENGTH_FACTOR
 export plot_state, create_animation, plot_pressure_buoyancy_diagnostics
-export ModelConfig, Model, BarotropicSolver, solve_variable_thickness!
+export ModelConfig, Model, BarotropicSolver, solve_variable_thickness!, BedGeometry
 export top_layer_face_thickness!, advect_density_upwind_top_layer!, advect_density_top_layer!, use_variable_top_layer
 export VegetationStemConfig, VegetationStem, VegetationModel
 export attach_vegetation!, clear_vegetation!, vegetation_source!, copy_vegetation, vegetation_path, set_x_inflow_outflow!, clear_x_inflow_outflow!

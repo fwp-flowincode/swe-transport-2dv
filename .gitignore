@@ -5,3 +5,5 @@ run_logs/
 __pycache__/
 .pytest_cache/
 .venv/
+# Third-party papers (not redistributed)
+docs/*.pdf
