@@ -66,6 +66,12 @@ fronts (see the [lock-exchange README](experiments/lock_exchange/README.md)).*
 *Rayleigh-Taylor instability, non-hydrostatic, 400 x 160 cells: a heavy layer on top of light water overturns
 into sinking plumes (see the [Rayleigh-Taylor README](experiments/rayleigh_taylor/README.md)).*
 
+<a href="experiments/lock_exchange_obstacle/README.md"><img src="experiments/lock_exchange_obstacle/figures/lock_exchange_obstacle.gif" alt="Lock exchange with obstacle" width="440"></a>
+
+*Lock exchange with obstacle, non-hydrostatic, 584 x 584 cells over a variable bed: a column of heavy water
+collapses, overflows a small obstacle and runs up the far wall, a density-stratified version of the classical dam
+break with obstacle (see the [lock-exchange-with-obstacle README](experiments/lock_exchange_obstacle/README.md)).*
+
 Folder layout
 -------------
 - `src/`: Julia package source.
