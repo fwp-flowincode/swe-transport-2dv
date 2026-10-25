@@ -67,15 +67,18 @@ if !(0.70 <= ratio <= 1.10)
     error(@sprintf("Wind-shear transport validation failed: ratio %.3f outside [0.70, 1.10]", ratio))
 end
 
-# WHY (threshold 1.5e-3, not the earlier 5e-3): this case runs with the (default) variable top layer, under which the
+# WHY (threshold 5e-4, after 5e-3 and 1.5e-3): this case runs with the (default) variable top layer, under which the
 # interior mixing measured here is the genuine wind-driven overturning circulation only. With the legacy fixed top
 # face, a moving surface's zero top-face flux acted as an additional, non-physical density source (see
-# swe_transport_2dv_jl/test/TESTS_TECHNICAL_DOCUMENTATION.md section 13) that inflated delta_varz well past 5e-3 at
-# this same duration/forcing; the physically correct value is about 2.1e-3. Extending the run or raising the wind
-# stress to recover more separation runs into the u ~ tau*t/(rho0*dz) scaling above breaking down (the ratio bound),
-# so the threshold is lowered instead, with headroom (about 1.4x) below the value observed on this grid.
-if delta_varz <= 1.5e-3
-    error(@sprintf("Wind-shear mixing validation failed: variance reduction %.6e <= 1.5e-3", delta_varz))
+# test/TESTS_TECHNICAL_DOCUMENTATION.md section 13) that inflated delta_varz well past 5e-3 at this same
+# duration/forcing. A second, smaller artefact of the same kind remained until issue #4: the wind increment was added
+# to u after the barotropic solve, so the top-layer budget did not close in the two wall columns (docs section 10);
+# it raised delta_varz from about 7.0e-4 to 2.1e-3. Extending the run or raising the wind stress to recover more
+# separation runs into the u ~ tau*t/(rho0*dz) scaling above breaking down (the ratio bound), so the threshold is
+# lowered instead, with headroom (about 1.4x) below the value observed on this grid.
+const DELTA_VARZ_MIN = 5e-4   # (kg/m^3)^2
+if delta_varz <= DELTA_VARZ_MIN
+    error(@sprintf("Wind-shear mixing validation failed: variance reduction %.6e <= %.1e", delta_varz, DELTA_VARZ_MIN))
 end
 
 println("Wind-shear transport/mixing validation passed.")

@@ -929,9 +929,14 @@ function _compute_effective_viscosity_u!(nu_eff_u::AbstractMatrix{<:Real}, model
 
     if cfg.use_turbulence_model && cfg.turbulence_mixing_length > 0.0
         ml2 = cfg.turbulence_mixing_length * cfg.turbulence_mixing_length
+        # WHY rows 1 and nz (one-sided shear): the flux-form diffusion_term! couples the top and bottom rows to their
+        # neighbours with the face viscosity 0.5*(nu[k] + nu[k +- 1]); without a turbulent value there, the coupling of
+        # a wind-driven top row would be halved.
         @inbounds for i in 1:nxp1
-            for k in 2:(nz - 1)
-                shear = abs((st.u[k + 1, i] - st.u[k - 1, i]) / (2.0 * model.dz))
+            for k in 1:nz
+                k_up = min(k + 1, nz)
+                k_down = max(k - 1, 1)
+                shear = abs((st.u[k_up, i] - st.u[k_down, i]) / ((k_up - k_down) * model.dz))
                 nu_eff_u[k, i] += ml2 * shear
             end
         end
@@ -1021,6 +1026,21 @@ function step_forward!(model::Model)
             end
         end
 
+        if cfg.wind_stress_x != 0.0
+            # Wind stress tau_x (Pa) as a body force on the top layer, du = dt * tau_x / (rho0 * h_top), with the
+            # top-layer thickness h_top = dz (fixed grid) or dz + eta at the u-face (variable top layer).
+            # WHY in the predictor (it used to be added to st.u after the barotropic solve and the non-hydrostatic
+            # projection): the free-surface solve and the projection then see the wind transport, as in the
+            # semi-implicit scheme of Casulli & Cheng (1992), where the surface stress enters the explicit part of the
+            # top-layer momentum equation. Added afterwards, the depth-integrated divergence of the final u no longer
+            # matched -d(eta)/dt in the two wall columns and the non-hydrostatic u was not divergence-free there.
+            wlo, whi = cfg.periodic_x ? (1, nxp1) : (2, nxp1 - 1)
+            @inbounds for i in wlo:whi
+                h_top = variable_top ? ws.h_top_face[i] : model.dz
+                ws.u_hat[nz, i] += cfg.dt * cfg.wind_stress_x / (cfg.rho0 * h_top)
+            end
+        end
+
         if cfg.rayleigh_damping > 0.0
             damp = max(0.0, 1.0 - cfg.rayleigh_damping * cfg.dt)
             @. ws.u_hat = ws.u_hat * damp
@@ -1080,13 +1100,16 @@ function step_forward!(model::Model)
     # decouples eta from the projection in both modes; nothing changes for the hydrostatic branch, whose projection
     # block below is a no-op.
     @timeit model.timers "step/barotropic_solve" begin
+        # WHY (both branches): the solve uses the boundary-face transport that the final velocities will have, so
+        # that eta^{n+1} - eta^n = -dt * sum_k div(h*u^{n+1}) holds exactly (and the top-layer budgets close). The
+        # predictor above also fills the wall faces (advection and diffusion evaluated from interior neighbours); on
+        # the fixed grid this used to enter the eta equation as a spurious flux through closed walls, so the water
+        # volume drifted (seen in the non-hydrostatic wind-shear case, issue #4).
+        _apply_x_boundary_conditions!(model, ws.u_hat)
+        if masked
+            _mask_u!(ws.u_hat, geo)
+        end
         if variable_top
-            # WHY: the solve uses the boundary-face transport that the final velocities will have, so that
-            # eta^{n+1} - eta^n = -dt * sum_k div(h*u^{n+1}) holds exactly and the top-layer budgets close.
-            _apply_x_boundary_conditions!(model, ws.u_hat)
-            if masked
-                _mask_u!(ws.u_hat, geo)
-            end
             solve_variable_thickness!(model.barotropic_solver, st.eta, ws.u_hat, ws.eta_old, ws.h_top_face)
             _check_top_layer_thickness(model, st.eta)
         else
@@ -1174,13 +1197,6 @@ function step_forward!(model::Model)
         @inbounds for i in ilo:ihi
             for k in 1:cfg.nz
                 st.u[k, i] = ws.u_hat[k, i]
-            end
-        end
-
-        if cfg.wind_stress_x != 0.0
-            du_wind = cfg.dt * cfg.wind_stress_x / (cfg.rho0 * model.dz)
-            @inbounds for i in ilo:ihi
-                st.u[cfg.nz, i] += du_wind
             end
         end
 
