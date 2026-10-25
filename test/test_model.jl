@@ -153,6 +153,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
         WIND_RAMP_DURATION = 20.0             # s, stress increases linearly from zero
         U_TOP_MIN = 1e-2                     # m/s, surface flow in the wind direction
         U_BOTTOM_MAX = -1e-4                 # m/s, lower-layer return flow
+        W_MIN = 1e-4                         # m/s, vertical motion closing the circulation at the walls
         DRHO_MARGIN_MIN = 1e-3               # kg/m^3, reduction in interface density jump
         VARZ_MARGIN_MIN = 1e-3               # (kg/m^3)^2, reduction in vertical density variance
         MASS_TOL_ATOL = 1e-8        # kg/m
@@ -211,6 +212,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
             # The closed walls create the opposing lower-layer return flow of the double gyre.
             @test u_top > U_TOP_MIN
             @test u_bottom < U_BOTTOM_MAX
+            @test maximum(abs, model.state.w) > W_MIN
             @test drho_interface1 < drho_interface0 - DRHO_MARGIN_MIN
             @test varz1 < varz0 - VARZ_MARGIN_MIN
             @test isapprox(mass1, mass0, atol=MASS_TOL_ATOL, rtol=MASS_TOL_RTOL)
