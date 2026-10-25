@@ -43,7 +43,7 @@ Results
 ![Density at t* = 0, 1, 2, 3, 5 and 7](figures/lock_exchange_obstacle_snapshots.png)
 
 - **t* = 1:** the column collapses; the heavy water forms a nose that runs towards the obstacle.
-- **t* = 1.9:** the front reaches the obstacle. Part of the current is lifted over it, while the light water flows
+- **t* = 1.9:** the front reaches the obstacle; the force on it peaks. Part of the current is lifted over it, while the light water flows
   back above the current. Kelvin-Helmholtz billows form on the interface.
 - **t* = 3-5:** the current continues behind the obstacle as a turbulent head; the column behind it has drained to a
   thin layer.
@@ -63,13 +63,16 @@ and the horizontal pressure force on the obstacle collapse when plotted against 
 
 | drho (kg/m³) | front at obstacle (t*) | front at 3.9a (t*) | peak force F/(rho0 g' a²) | peak force (N/m) |
 |---|---|---|---|---|
-| 1 | 1.87 | 6.30 | 0.380 at t* = 1.87 | 0.080 |
-| 10 | 1.92 | 6.30 | 0.378 at t* = 1.87 | 0.79 |
-| 50 | 1.92 | 6.50 | 0.367 at t* = 1.87 | 3.8 |
-| 10 (1 mm grid) | 1.89 | 6.27 | 0.386 at t* = 1.89 | |
+| 1 | 1.87 | 6.30 | 0.382 at t* = 1.87 | 0.080 |
+| 10 | 1.92 | 6.30 | 0.377 at t* = 1.97 | 0.79 |
+| 50 | 1.92 | 6.50 | 0.378 at t* = 1.92 | 4.0 |
+| 10 (1 mm grid) | 1.89 | 6.27 | 0.390 at t* = 1.94 | |
 
-The dimensionless results agree within about 3 %, and the finer grid confirms them. The largest deviations are for
-50 kg/m³ (a slightly slower front, small early force oscillations from free-surface waves).
+The dimensionless front positions agree within about 3 % and the peak forces within about 1.5 %; the finer grid
+confirms them. The largest deviation is the slightly slower front for 50 kg/m³. The force is the horizontal pressure
+force per unit width: the total pressure (hydrostatic and non-hydrostatic part plus the free-surface pressure
+rho0 g eta, which the model applies separately) integrated over the obstacle walls. The small oscillations around
+t* < 1 come from free-surface waves.
 
 How large the density difference can be: the solver itself has no limit. The pressure solves are direct, and all three
 runs are stable at the same CFL numbers. The limit is physical: the Boussinesq approximation neglects terms of relative

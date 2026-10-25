@@ -657,7 +657,7 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
 
     z_w = _linspace(0.0, cfg.depth, cfg.nz + 1)
     z_c = _linspace(dz / 2.0, cfg.depth - dz / 2.0, cfg.nz)
-    rho_0_w = _interp_linear(z_w, z_c, @view st.rho[:, 1])
+    rho_0_w = T.(_interp_linear(z_w, z_c, @view st.rho[:, 1]))
     rho_0_w_2d = repeat(reshape(@view(rho_0_w[2:end-1]), :, 1), 1, cfg.nx)
     grad_p_z_reference = zeros(T, cfg.nz + 1, cfg.nx)   # filled by _refresh_density_metadata! below
 

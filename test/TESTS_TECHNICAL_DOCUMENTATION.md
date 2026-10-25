@@ -1073,7 +1073,23 @@ face, w = 0). An explicit `bed_level`, also all zeros, uses the masked code path
 Purpose: masks of an obstacle three cells high in two columns (lowest wet cell, wet-cell count, face bed levels, wall and
 interior faces of the obstacle, bed face of w); a zero bed has no solid cells and all faces open; invalid input (not a
 whole number of cells, fewer than two wet cells, negative, wrong length, periodic) raises `ArgumentError`;
-`copy_config` copies the bed level; the plotting helper leaves solid cells blank (NaN) and passes flat-bed fields through.
+`copy_config` copies the bed level; the plotting helper leaves solid cells blank (NaN) and passes flat-bed fields through;
+a Float32 model builds the same masks (the alignment check uses the Float64 cell height, since 1.0/0.2f0 is not a whole
+number in Float32).
+
+### test_verify_bed_mass_and_surface_pressure_accounting
+
+Purpose: with solid cells the constituent mass counts the wet cells only (an obstacle of 2 x 3 cells in a 12 m x 4 m
+domain leaves 46.8 m² of water, mass 46,800 kg/m for 1000 kg/m³), unaffected by the unused density stored in solid
+cells; with the variable top layer the surface elevation adds $\rho\,\eta\,\Delta x$ per column (48,000 kg/m for
+$\eta=0.1$ m). The obstacle-force diagnostic of the experiment (`leo_obstacle_force`) includes the free-surface pressure
+$\rho_0 g(\eta_{left}-\eta_{right})$, which the model applies separately from `state.p`: with $p=0$ and an elevation
+difference of 0.2 m over a 0.6 m high obstacle the force is $\rho_0 g\cdot0.2\cdot0.6$.
+
+### test_verify_invalid_bed_velocities_are_masked_before_advection
+
+Purpose: arbitrary velocities on closed u-faces and on or below the bed (here 10 m/s, e.g. from an initializer that
+does not know the bed) are removed at the start of the step, so one step gives the same state as from a clean start.
 
 ### test_verify_flat_bed_reproduces_legacy_results_hydrostatic
 

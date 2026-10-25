@@ -77,6 +77,19 @@ include(joinpath(@__DIR__, "../experiments/lock_exchange_obstacle/cases.jl"))
         @test leo_obstacle_force(model) ≈ expected_force
     end
 
+    BED_EQUIVALENCE_TOL_U = 1e-10        # m/s, raised bed vs shallower domain (round-off from summation order)
+    BED_EQUIVALENCE_TOL_RHO = 1e-9       # kg/m^3
+    BED_EQUIVALENCE_TOL_ETA = 1e-11      # m
+    BED_VOLUME_TOL = 1e-8                # m^2, water-volume drift over a run (same as the legacy tests)
+    SEICHE_BED_ORDER_MIN = 1.6           # -, observed order of the second-order free-surface scheme
+    SEICHE_BED_ORDER_MAX = 2.4
+    SEICHE_BED_REL_ERROR_MAX = 5e-4      # -, relative period error on the finer grid (measured 2.7e-4)
+
+    # lock-exchange settings shared by the model-level tests below
+    bed_test_config(; kwargs...) = ModelConfig(; nx=60, nz=20, dt=0.005, use_hydrostatic=true, transport_advection_scheme="tvd2",
+        rayleigh_damping=0.0, apply_froude_limiter=false, nu=1e-4, write_plots=false, write_animation=false,
+        write_pressure_buoyancy_diagnostics=false, kwargs...)
+
     @testset "test_verify_invalid_bed_velocities_are_masked_before_advection" begin
         bed = zeros(60)
         bed[28:33] .= 1.2
@@ -94,19 +107,6 @@ include(joinpath(@__DIR__, "../experiments/lock_exchange_obstacle/cases.jl"))
         @test perturbed.state.rho == reference.state.rho
         @test perturbed.state.eta == reference.state.eta
     end
-
-    BED_EQUIVALENCE_TOL_U = 1e-10        # m/s, raised bed vs shallower domain (round-off from summation order)
-    BED_EQUIVALENCE_TOL_RHO = 1e-9       # kg/m^3
-    BED_EQUIVALENCE_TOL_ETA = 1e-11      # m
-    BED_VOLUME_TOL = 1e-8                # m^2, water-volume drift over a run (same as the legacy tests)
-    SEICHE_BED_ORDER_MIN = 1.6           # -, observed order of the second-order free-surface scheme
-    SEICHE_BED_ORDER_MAX = 2.4
-    SEICHE_BED_REL_ERROR_MAX = 5e-4      # -, relative period error on the finer grid (measured 2.7e-4)
-
-    # lock-exchange settings shared by the model-level tests below
-    bed_test_config(; kwargs...) = ModelConfig(; nx=60, nz=20, dt=0.005, use_hydrostatic=true, transport_advection_scheme="tvd2",
-        rayleigh_damping=0.0, apply_froude_limiter=false, nu=1e-4, write_plots=false, write_animation=false,
-        write_pressure_buoyancy_diagnostics=false, kwargs...)
 
     @testset "test_verify_flat_bed_reproduces_legacy_results_hydrostatic" begin
         # An explicit zero bed runs through all masked code paths; it must reproduce the legacy flat-bed results bit
