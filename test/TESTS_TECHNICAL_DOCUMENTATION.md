@@ -855,7 +855,8 @@ Validation section: rightmost density-threshold front position advances in +x.
 
 ### test_wind_shear_drives_transport_and_surface_mixing
 
-Purpose: verify wind-stress forcing produces surface transport and mixing.
+Purpose: verify a gradual wind-stress ramp drives the closed-basin, vertically stratified flow from rest into a
+double-gyre circulation in both hydrostatic and non-hydrostatic modes.
 
 Reference scalings:
 
@@ -865,7 +866,15 @@ Reference scalings:
 \text{wind-driven mixing} \Rightarrow \downarrow\,\mathrm{Var}_z(\rho).
 ```
 
-Validation section: windy run must increase top velocity and reduce interface sharpness/vertical variance while conserving constituent mass. Duration (6 s) and wind stress were picked so the genuine, advection-driven interior mixing signal clears the margins with headroom under the (default) variable top layer; with the legacy fixed top face a moving surface's zero top-face flux acted as an additional, non-physical density source that used to dominate this test's signal by roughly an order of magnitude at a much shorter duration (see section 13) — this test result is itself evidence for the section 13 defect, not just a regression guard.
+Setup: closed 10 m x 4 m domain, initially stagnant two-layer stratification, 120 s run, and wind stress ramped linearly
+from zero to 0.2 Pa over the first 20 s. Both modes use `tvd2` momentum and density advection, with the hydrostatic
+mode's variable-thickness top layer enabled by default.
+
+Validation section: surface flow must develop in the wind direction with an opposing lower-layer return flow; the
+interface density jump and vertical density variance must decrease, constituent mass must be conserved, and the
+transport CFL must remain below the `tvd2` monotonicity limit. The paired modes ensure the circulation is not specific
+to either pressure treatment. The shorter predecessor only checked surface transport and mixing during constant
+forcing; the longer ramped run gives the closed-basin gyres time to develop.
 
 ### test_nonhydrostatic_branch_produces_pressure_correction
 

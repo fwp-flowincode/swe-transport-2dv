@@ -146,83 +146,76 @@ include(joinpath(@__DIR__, "test_common.jl"))
     end
 
     @testset "test_wind_shear_drives_transport_and_surface_mixing" begin
-        # Named tolerances/setup (no hardcoded values inside the test body below).
-        NSTEPS = 3000               # -, simulated time = NSTEPS*dt = 6 s
-        WIND_STRESS_X = 1.0         # Pa (kg/(m s^2)), applied wind stress
-        U_TOP_MARGIN_MIN = 3e-4     # m/s, required u_top_wind - u_top_calm
-        DRHO_MARGIN_MIN = 1e-3      # kg/m^3, required drho_interface_calm - drho_interface_wind
-        VARZ_MARGIN_MIN = 1e-3      # (kg/m^3)^2, required varz_calm - varz_wind
+        # Named setup/tolerances (no hardcoded values inside the test body below).
+        T_END = 120.0                        # s, long enough for the closed-basin circulation to develop
+        DT = 0.01                            # s
+        WIND_STRESS_X_MAX = 0.2              # Pa (kg/(m s^2))
+        WIND_RAMP_DURATION = 20.0             # s, stress increases linearly from zero
+        U_TOP_MIN = 1e-2                     # m/s, surface flow in the wind direction
+        U_BOTTOM_MAX = -1e-4                 # m/s, lower-layer return flow
+        DRHO_MARGIN_MIN = 1e-3               # kg/m^3, reduction in interface density jump
+        VARZ_MARGIN_MIN = 1e-3               # (kg/m^3)^2, reduction in vertical density variance
         MASS_TOL_ATOL = 1e-8        # kg/m
         MASS_TOL_RTOL = 1e-8        # -
 
-        # WHY (NSTEPS, WIND_STRESS_X): under the (now-default) variable top layer the interior mixing this test
-        # measures is driven only by the wind-induced overturning circulation (advection), not by a numerical
-        # artifact. It is genuine but small over a short run: with the legacy fixed top face, a moving surface with a
-        # zero top-face flux acted as an additional, non-physical density source (see docs section 13) that used to
-        # dominate this test's signal by roughly an order of magnitude. NSTEPS and WIND_STRESS_X were picked (see
-        # test/TESTS_TECHNICAL_DOCUMENTATION.md) so the genuine effect still clears the margins below with headroom.
-        cfg_calm = ModelConfig(
-            length=10.0,
-            depth=4.0,
-            nx=80,
-            nz=40,
-            dt=0.002,
-            nt=1,
-            use_hydrostatic=true,
-            momentum_advection_scheme="upwind1",
-            rayleigh_damping=0.0,
-            apply_froude_limiter=false,
-            write_plots=false,
-            write_animation=false,
-            write_pressure_buoyancy_diagnostics=false,
-        )
-        cfg_wind = copy_config(cfg_calm)
-        cfg_wind.wind_stress_x = WIND_STRESS_X
-        cfg_wind.wind_mixing_diffusivity = 0.02
-
-        model_calm = Model(cfg_calm)
-        model_wind = Model(cfg_wind)
-
-        for m in (model_calm, model_wind)
+        for use_hydrostatic in (true, false)
+            cfg = ModelConfig(
+                length=10.0,
+                depth=4.0,
+                nx=80,
+                nz=40,
+                dt=DT,
+                nt=round(Int, T_END / DT),
+                use_hydrostatic=use_hydrostatic,
+                periodic_x=false,
+                momentum_advection_scheme="tvd2",
+                transport_advection_scheme="tvd2",
+                rayleigh_damping=0.0005,
+                wind_stress_x=0.0,
+                wind_mixing_diffusivity=0.02,
+                write_plots=false,
+                write_animation=false,
+                write_pressure_buoyancy_diagnostics=false,
+            )
+            model = Model(cfg)
             initialize_internal_seiche!(
-                m;
+                model;
                 rho_top=999.0,
                 rho_bottom=1001.0,
                 interface_height_fraction=0.5,
                 interface_tilt_amplitude_fraction=0.0,
             )
+            @test all(iszero, model.state.u)
+            @test all(iszero, model.state.w)
+            @test all(iszero, model.state.eta)
+
+            eta0 = use_variable_top_layer(cfg) ? model.state.eta : nothing
+            mass0 = constituent_mass(model.state.rho, model.dx, model.dz; eta=eta0)
+            varz0 = mean([var(@view model.state.rho[:, i]) for i in 1:cfg.nx])
+            k_interface = Int(cld(cfg.nz, 2))
+            drho_interface0 = mean(abs.(@view(model.state.rho[k_interface, :]) .- @view(model.state.rho[k_interface + 1, :])))
+
+            ramp_steps = round(Int, WIND_RAMP_DURATION / cfg.dt)
+            for n in 1:cfg.nt
+                cfg.wind_stress_x = WIND_STRESS_X_MAX * min(n / ramp_steps, 1.0)
+                step_forward!(model)
+            end
+
+            u_top = mean(@view model.state.u[cfg.nz, 2:cfg.nx])
+            u_bottom = mean(@view model.state.u[1:cld(cfg.nz, 4), 2:cfg.nx])
+            drho_interface1 = mean(abs.(@view(model.state.rho[k_interface, :]) .- @view(model.state.rho[k_interface + 1, :])))
+            varz1 = mean([var(@view model.state.rho[:, i]) for i in 1:cfg.nx])
+            eta1 = use_variable_top_layer(cfg) ? model.state.eta : nothing
+            mass1 = constituent_mass(model.state.rho, model.dx, model.dz; eta=eta1)
+
+            # The closed walls create the opposing lower-layer return flow of the double gyre.
+            @test u_top > U_TOP_MIN
+            @test u_bottom < U_BOTTOM_MAX
+            @test drho_interface1 < drho_interface0 - DRHO_MARGIN_MIN
+            @test varz1 < varz0 - VARZ_MARGIN_MIN
+            @test isapprox(mass1, mass0, atol=MASS_TOL_ATOL, rtol=MASS_TOL_RTOL)
+            @test compute_diagnostics(model)["cfl_total"] < 0.5
         end
-
-        mass0_calm = constituent_mass(model_calm.state.rho, model_calm.dx, model_calm.dz)
-        mass0_wind = constituent_mass(model_wind.state.rho, model_wind.dx, model_wind.dz)
-
-        for _ in 1:NSTEPS
-            step_forward!(model_calm)
-            step_forward!(model_wind)
-        end
-
-        u_top_calm = mean(abs.(@view model_calm.state.u[cfg_calm.nz, 2:cfg_calm.nx]))
-        u_top_wind = mean(abs.(@view model_wind.state.u[cfg_wind.nz, 2:cfg_wind.nx]))
-
-        k_interface = Int(cld(cfg_calm.nz, 2))
-        drho_interface_calm = mean(abs.(@view(model_calm.state.rho[k_interface, :]) .- @view(model_calm.state.rho[k_interface + 1, :])))
-        drho_interface_wind = mean(abs.(@view(model_wind.state.rho[k_interface, :]) .- @view(model_wind.state.rho[k_interface + 1, :])))
-
-        varz_calm = mean([var(@view model_calm.state.rho[:, i]) for i in 1:cfg_calm.nx])
-        varz_wind = mean([var(@view model_wind.state.rho[:, i]) for i in 1:cfg_wind.nx])
-
-        # WHY (no `eta=`): mass conservation is checked with the plain (non-eta) constituent_mass on purpose. The
-        # wind-driven set-up is close to antisymmetric about the domain centre (classic closed-basin tilt), so
-        # sum(eta)*dx stays near zero and the plain and eta-aware diagnostics agree; using the plain one here also
-        # exercises that the top-layer density kernel does not silently break the legacy mass diagnostic.
-        mass1_calm = constituent_mass(model_calm.state.rho, model_calm.dx, model_calm.dz)
-        mass1_wind = constituent_mass(model_wind.state.rho, model_wind.dx, model_wind.dz)
-
-        @test u_top_wind > u_top_calm + U_TOP_MARGIN_MIN
-        @test drho_interface_wind < drho_interface_calm - DRHO_MARGIN_MIN
-        @test varz_wind < varz_calm - VARZ_MARGIN_MIN
-        @test isapprox(mass1_calm, mass0_calm, atol=MASS_TOL_ATOL, rtol=MASS_TOL_RTOL)
-        @test isapprox(mass1_wind, mass0_wind, atol=MASS_TOL_ATOL, rtol=MASS_TOL_RTOL)
     end
 
     @testset "test_periodic_kelvin_helmholtz_boundaries_and_conservation" begin
