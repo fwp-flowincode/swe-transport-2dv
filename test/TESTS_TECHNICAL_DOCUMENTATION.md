@@ -6,11 +6,11 @@ every file includes, so each file also runs on its own (`julia --project=. test/
 
 | File | Area |
 |---|---|
-| `test_operators_and_diagnostics.jl` | state layout, grad/div operators, buoyancy, diagnostics |
+| `test_operators_and_diagnostics.jl` | state layout, grad/div operators, viscous diffusion (section 5), buoyancy, diagnostics |
 | `test_advection.jl` | density (transport) and momentum advection, `upwind1` and `tvd2` (sections 3, 4) |
 | `test_pressure.jl` | hydrostatic integration, Poisson matrix, non-hydrostatic pressure solvers (sections 6, 7) |
-| `test_free_surface.jl` | barotropic solve, kinematic surface condition, continuity closure (sections 8, 9) |
-| `test_model.jl` | full-model runs: conservation, stabilisation, configuration, initial conditions, dense front, wind shear |
+| `test_free_surface.jl` | barotropic solve, kinematic surface condition, continuity closure, wind forcing budgets (sections 8-10) |
+| `test_model.jl` | full-model runs: conservation, stabilisation, configuration, initial conditions, dense front, wind-driven double gyre |
 | `test_vegetation.jl` | flexible-vegetation stem model |
 | `test_nonhydrostatic.jl` | non-hydrostatic branch and free surface (sections 14, 15) |
 | `test_variable_top_layer.jl` | variable-thickness top layer (section 13) |
@@ -86,9 +86,10 @@ earlier ordering that had the free-surface solve AFTER the non-hydrostatic proje
 
 1. Compute momentum advection tendencies for $u$ and $w$.
 2. Build hydrostatic pressure predictor $p_h$.
-3. Form provisional velocities $(u^{\ast},w^{\ast})$ from advection, pressure gradients, and buoyancy.
-4. Advance free surface with depth-integrated transport using a barotropic solve (uses the un-projected $u^{\ast}$ in both
-   modes), and correct $u^{\ast}$ with the free-surface slope.
+3. Form provisional velocities $(u^{\ast},w^{\ast})$ from advection, pressure gradients, viscous diffusion (section 5),
+   buoyancy and the wind stress (top row, section 10).
+4. Enforce wall boundary values on $u^{\ast}$, advance free surface with depth-integrated transport using a barotropic solve
+   (uses the un-projected $u^{\ast}$ in both modes), and correct $u^{\ast}$ with the free-surface slope.
 5. Optionally apply non-hydrostatic projection to the (now surface-corrected) $(u^{\ast},w^{\ast})$ (when `use_hydrostatic=false`;
    section 14).
 6. Enforce wall boundary values on $u$.
@@ -188,13 +189,29 @@ Optional bound-preserving clamping is applied during update:
 \rho^{n+1}\leftarrow\mathrm{clip}(\rho^{n+1},\rho_{min},\rho_{max}).
 ```
 
-### 5) Optional scalar diffusion operator
+### 5) Viscous diffusion of u (`diffusion_term!`)
 
-The library includes a second-order centered Laplacian diffusion operator:
+The viscous term of the horizontal momentum equation uses the viscosity $\nu$ (molecular `nu` plus the optional
+mixing-length eddy viscosity $\nu_t=l^2|\partial u/\partial z|$, capped at `max_turbulent_viscosity`, and the vegetation
+contribution) in flux form with face viscosities $\nu_f=\tfrac12(\nu_a+\nu_b)$:
 
 ```math
-\mathcal{D}(\phi)=\nu\left(\frac{\phi_{i+1}-2\phi_i+\phi_{i-1}}{\Delta x^2} + \frac{\phi_{k+1}-2\phi_k+\phi_{k-1}}{\Delta z^2}\right).
+\mathcal{D}(u)_{k,i}=\frac{F_{k+1/2}-F_{k-1/2}}{\Delta z}+\frac{G_{i+1/2}-G_{i-1/2}}{\Delta x},
+\qquad F_{k+1/2}=\nu_f\frac{u_{k+1}-u_k}{\Delta z},\quad G_{i+1/2}=\nu_f\frac{u_{i+1}-u_i}{\Delta x}.
 ```
+
+Zero flux through the bed and the free surface, $F_{1/2}=F_{n_z+1/2}=0$ (free slip at the bed, no stress at the top; the
+wind stress enters the top row as a body force, section 10, which is the same stress condition). Over a variable bed the
+face below the lowest wet row is treated as the bed; at the walls (outer and obstacle) $u=0$ enters the horizontal flux.
+Second order in space, conservative in $z$, and the 5-point Laplacian for constant $\nu$ in the interior. Explicit
+forward-Euler stability: $2\nu\Delta t(1/\Delta x^2+1/\Delta z^2)\le1$. Tests:
+`test_verify_diffusion_flux_form_second_order_convergence` (manufactured solution with $\nu(z)$, order 2 in the max norm
+including the top and bottom rows) and `test_verify_diffusion_flux_form_conserves_column_momentum`.
+
+The former kernel $\nu\,\nabla^2u$ skipped the top and bottom rows: the top row had no viscous coupling to the row below,
+so a wind stress stayed in the top cell. At $\Delta z=0.025$ m the resulting surface jet kept accelerating and the
+hydrostatic downwelling at the downwind wall broke the run down (issue #4). The mixing-length $\nu_t$ uses one-sided shear
+in the top and bottom rows, so that their face viscosity is not halved.
 
 ### 6) Hydrostatic pressure integration
 
@@ -261,7 +278,10 @@ and one-sided edge coefficients at boundaries.
 
 Implemented boundary behavior includes:
 
-1. No-normal-flow walls for horizontal velocity (`u[:,1]=u[:,end]=0`).
+1. No-normal-flow walls for horizontal velocity (`u[:,1]=u[:,end]=0`), applied to the provisional $u^{\ast}$ before the
+   barotropic solve as well as to the final $u$. The predictor also fills the wall faces (advection and diffusion evaluated
+   from interior neighbours); on the fixed grid these values used to enter $\partial_x\hat U$ as a flux through the closed
+   walls, so the water volume drifted (issue #4; `test_verify_wind_forcing_closes_volume_and_kinematic_budgets`).
 2. Zero normal advective flux at outer faces for upwind/TVD fluxes.
 3. Bottom vertical velocity reconstruction anchored at $w_{bottom}=0$.
 4. Top kinematic enforcement by replacement:
@@ -290,11 +310,18 @@ with
 Fr = \frac{\max|u|}{\sqrt{g'H}},\qquad g'=g\,\frac{\rho_{max}-\rho_{min}}{\rho_0}.
 ```
 
-Wind stress forcing at the top $u$ row:
+Wind stress forcing at the top $u$ row, part of the provisional velocity $u^{\ast}$ (step 3 of section 2):
 
 ```math
-\Delta u_{wind}=\Delta t\,\frac{\tau_x}{\rho_0\Delta z}.
+\Delta u_{wind}=\Delta t\,\frac{\tau_x}{\rho_0 h_{top}},
+\qquad h_{top}=\Delta z\ \text{(fixed grid)}\ \text{or}\ \Delta z+\eta_{face}\ \text{(variable top layer)}.
 ```
+
+The barotropic solve and the non-hydrostatic projection therefore include the wind transport, as in the semi-implicit
+scheme of Casulli & Cheng (1992), where the surface stress enters the explicit part of the top-layer momentum equation. It
+used to be added to the final $u$ after both; the depth-integrated divergence of $u$ then differed from $-\eta_t$ in the two
+wall columns by $\Delta u_{wind}\Delta z/\Delta x$ per step, and the non-hydrostatic $u$ was not divergence-free there
+(issue #4).
 
 Wind-driven near-surface density exchange (conservative two-layer mixing):
 
@@ -794,6 +821,19 @@ w_{top} = \frac{\partial \eta}{\partial t}.
 
 Validation section: tracks maximum domain divergence, top-row divergence, and kinematic mismatch over multiple steps, with strict residual thresholds. The analogous identity for the variable top layer (a different closure in the top row; see section 13) is `test_verify_variable_top_layer_closes_kinematic_and_volume_budgets`.
 
+### test_verify_wind_forcing_closes_volume_and_kinematic_budgets
+
+Purpose: verify that the wind forcing keeps the water volume and the kinematic surface condition closed in all three
+free-surface treatments (hydrostatic with variable top layer, hydrostatic fixed grid, non-hydrostatic).
+
+Setup: closed 10 m x 4 m basin, 40 x 20 cells, two layers at rest, wind stress 0.2 Pa, $\nu=10^{-3}$ m²/s (non-zero
+diffusion at the predictor's wall faces), 200 steps.
+
+Validation section: $|\sum\eta\,\Delta x|<10^{-12}$ m² and the kinematic mismatch $|w_{top}^{rec}-\eta_t|$ below
+$10^{-10}$ m/s every step, and a non-zero set-up. Before the fixes of issue #4 the volume drifted by about $10^{-8}$ m² on
+the fixed grid (wall faces of $u^{\ast}$ in the barotropic solve) and the mismatch was about $8\cdot10^{-6}$ m/s in all
+three treatments (wind added after the solve); see sections 9 and 10.
+
 ### test_long_run_conservation_and_froude_control
 
 Purpose: long-run integration stability and conservation.
@@ -853,28 +893,84 @@ Reference expectation: dense underflow front moves into lighter-fluid side.
 
 Validation section: rightmost density-threshold front position advances in +x.
 
-### test_wind_shear_drives_transport_and_surface_mixing
+### test_validate_wind_driven_double_gyre
 
-Purpose: verify a gradual wind-stress ramp drives the closed-basin, vertically stratified flow from rest into a
-double-gyre circulation in both hydrostatic and non-hydrostatic modes.
+Purpose: validate that a wind stress building up over a closed, stratified basin drives the double gyre of issue #4 in both
+the hydrostatic and the non-hydrostatic mode: a clockwise cell in the light upper layer (downwind at the surface, upwind
+just above the interface) and, through the interfacial shear stress, a counter-clockwise cell in the heavy lower layer
+(upwind just below the interface, downwind along the bed) (Monismith 1986; Spigel & Imberger 1980).
 
-Reference scalings:
+Diagnostic: streamfunction of the mean $u$ over the middle half of the basin, averaged in time over $300\le t\le600$ s,
 
 ```math
-\frac{\partial u}{\partial t} \approx \frac{\tau_x}{\rho_0\Delta z},
-\qquad
-\text{wind-driven mixing} \Rightarrow \downarrow\,\mathrm{Var}_z(\rho).
+\psi(z)=\int_0^z \bar u\,dz',
+\qquad \psi<0 \text{ in the upper layer},\quad \psi>0 \text{ in the lower layer}.
 ```
 
-Setup: closed 10 m x 4 m domain, initially stagnant two-layer stratification, 120 s run, and wind stress ramped linearly
-from zero to 0.2 Pa over the first 20 s. Both modes use `tvd2` momentum and density advection, with the hydrostatic
-mode's variable-thickness top layer enabled by default.
+Setup: closed 10 m x 4 m basin, 80 x 40 cells, two layers at rest (999 over 1001 kg/m³, interface at mid-depth), wind
+stress ramped linearly from zero to 0.2 Pa over 20 s, 600 s, `tvd2` momentum and density advection, mixing-length eddy
+viscosity ($l=0.2$ m, capped at $5\cdot10^{-3}$ m²/s), no Rayleigh damping, no Froude limiter. With the molecular viscosity
+alone the wind momentum stays near the surface and no stress acts across the interface: the lower layer then only sloshes
+with the internal seiche and $\psi$ in the lower layer changes sign with its phase. The time average removes the seiche,
+which remains on top of the gyres.
 
-Validation section: surface flow must develop in the wind direction with an opposing lower-layer return flow; the
-interface density jump and vertical density variance must decrease, constituent mass must be conserved, and the
-transport CFL must remain below the `tvd2` monotonicity limit. The paired modes ensure the circulation is not specific
-to either pressure treatment. The shorter predecessor only checked surface transport and mixing during constant
-forcing; the longer ramped run gives the closed-basin gyres time to develop.
+Validation section: $\psi_{upper}<-0.005$ m²/s (simulated $-0.0184$ in both modes), $\psi_{lower}>0.0015$ m²/s ($+0.0054$
+hydrostatic, $+0.0057$ non-hydrostatic), mean surface velocity above 0.02 m/s (0.045) and mean bed velocity downwind above
+0.0015 m/s (0.0057, 0.0060). The interface jump (2 kg/m³) and the vertical density variance decrease (by 1.05 and
+1.26 kg/m³; the density has no diffusivity, so this is numerical diffusion in the sheared, seiching interface, not a
+physical entrainment rate). Constituent mass and water volume are conserved and the CFL number stays below the `tvd2`
+limit 0.5.
+
+The predecessor (Copilot, 120 s, molecular viscosity) asserted upwind flow in the bottom quarter, i.e. a single overturning
+cell; this contradicts the counter-rotating lower cell and failed in both modes (bed flow +0.0017 and +0.0010 m/s). The
+experiment `experiments/wind_shear/` runs the same physics in a 20 m basin at 400 x 160 cells.
+
+### test_verify_steady_wind_profile_uniform_density_second_order
+
+Purpose: verify the wind forcing and the viscous term against the exact steady wind-driven flow in a closed basin of
+uniform density with a constant viscosity and a free-slip bed (`wind_steady_uniform` in
+`experiments/wind_shear/cases.jl`, which gives the derivation). Far from the end walls
+
+```math
+\nu u''=G,\quad u'(0)=0,\quad \nu u'(H)=\tau/\rho_0,\quad \int_0^H u\,dz=0
+\;\Rightarrow\;
+u(z)=\frac{s}{2H}\left(z^2-\frac{H^2}{3}\right),\quad s=\frac{\tau}{\rho_0\nu},\qquad \frac{\partial\eta}{\partial x}=\frac{\tau}{\rho_0 gH}.
+```
+
+Setup: 40 m x 4 m basin, 40 columns, $\nu=10^{-2}$ m²/s, $\tau=0.2$ Pa, started from the exact state (u, $\eta$), 600 s,
+mean u over $x=15$-$25$ m averaged over the last 200 s, $n_z=5,10,20$, both modes.
+
+Validation section: observed order of the maximum profile error above 1.8 (observed 1.98 and 1.88; errors
+$1.3\cdot10^{-4}$, $3.4\cdot10^{-5}$, $9.2\cdot10^{-6}$ m/s, which equal the midpoint-rule offset $s\,\Delta z^2/(24H)$ of
+the discrete zero-flux condition) and surface slope within 1 % (observed 0.07 %). On finer grids the error levels off at
+about $3\cdot10^{-6}$ m/s ($10^{-4}$ of the surface velocity), independent of the run length (not investigated further).
+
+### test_validate_steady_two_layer_wind_double_gyre
+
+Purpose: validate the double gyre against the exact steady two-layer solution for one constant viscosity
+(`wind_steady_two_layer`): a parabola per layer, continuous velocity and stress at the interface, zero flux per layer.
+With lower-layer thickness $a$, upper $b$, $\zeta=z-a$:
+
+```math
+u_{lower}=\frac{g_1}{2}\left(z^2-\frac{a^2}{3}\right),\quad
+u_{upper}=\frac{g_2}{2}\zeta^2+g_1a\zeta+\frac{g_1a^2}{3},\quad
+g_1=-\frac{s\,b}{2aH},\quad g_2=\frac{s(2H+b)}{2bH},
+```
+
+```math
+\frac{\partial\eta}{\partial x}=\frac{\nu g_2}{g},\qquad \frac{\partial\zeta}{\partial x}=\frac{\nu(g_1-g_2)}{g'}.
+```
+
+Since $g_1<0$ the lower layer flows upwind at the interface and downwind along the bed (the counter-rotating cell); the
+velocity does not depend on the density difference, only the interface tilt does.
+
+Setup: as above with two layers (999 over 1001 kg/m³, interface at mid-depth, initially tilted with the exact slope as
+a staircase of whole cells), $n_z=40$, 2400 s (at 600 s the internal seiche excited by the staircase is not yet damped),
+averages over the last 600 s, both modes.
+
+Validation section: profile error below 2 % of the exact surface velocity (observed 0.16-0.17 %), downwind bed flow,
+upwind flow below the interface, surface slope within 2 % (observed 0.09 %) and interface slope within 3 % (observed
+0.3 % hydrostatic, 0.5 % non-hydrostatic). The experiment `plot_wind_shear_analytic.jl` runs both cases from rest.
 
 ### test_nonhydrostatic_branch_produces_pressure_correction
 

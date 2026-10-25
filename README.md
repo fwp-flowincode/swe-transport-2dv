@@ -52,7 +52,7 @@ README with a description, settings and figures in its `figures/` subfolder.
 | Jet | `jet/` | impulse jet, shear |
 | Internal seiche | `internal_seiche/` | two-layer standing internal wave, period |
 | Surface dam break | `surface_dam_break/` | barotropic bore and rarefaction, front speed |
-| Wind shear | `wind_shear/` | wind-driven surface transport and mixing |
+| [Wind-driven double gyre](experiments/wind_shear/README.md) | `wind_shear/` | wind stress over a closed two-layer basin, double gyre, hydrostatic vs. non-hydrostatic |
 | Vegetation | `vegetation/` | uniform, oscillating and density-driven flow through flexible stems |
 | Validation | `validation/` | comparisons with analytical or semi-analytical references |
 
@@ -71,6 +71,12 @@ into sinking plumes (see the [Rayleigh-Taylor README](experiments/rayleigh_taylo
 *Lock exchange with obstacle, non-hydrostatic, 584 x 584 cells over a variable bed: a column of heavy water
 collapses, overflows a small obstacle and runs up the far wall, a density-stratified version of the classical dam
 break with obstacle (see the [lock-exchange-with-obstacle README](experiments/lock_exchange_obstacle/README.md)).*
+
+<a href="experiments/wind_shear/README.md"><img src="experiments/wind_shear/figures/wind_shear_nonhydro.gif" alt="Wind-driven double gyre, non-hydrostatic" width="560"></a>
+
+*Wind-driven double gyre, non-hydrostatic, 400 x 160 cells: a wind stress over a closed two-layer basin drives a
+clockwise cell in the upper layer and a counter-rotating cell in the lower layer, with an internal seiche on top (see the
+[wind-driven double gyre README](experiments/wind_shear/README.md)).*
 
 Folder layout
 -------------
@@ -120,7 +126,8 @@ julia --project=. experiments/internal_seiche/run_internal_seiche_dt005_400s_ani
 julia --project=. experiments/surface_dam_break/run_surface_dam_break_dt001_60s_anim.jl
 julia --project=. experiments/kelvin_helmholtz/plot_kelvin_helmholtz.jl
 julia --project=. experiments/kelvin_helmholtz/run_kelvin_helmholtz_dt00025_120s_anim.jl
-julia --project=. experiments/wind_shear/run_wind_shear_dt001_30s_anim.jl
+julia --project=. experiments/wind_shear/plot_wind_shear.jl
+julia --project=. experiments/wind_shear/plot_wind_shear_analytic.jl
 julia --project=. experiments/vegetation/run_uniform_flow_with_flexible_vegetation.jl
 julia --project=. experiments/vegetation/run_oscillating_flow_with_flexible_vegetation.jl
 julia --project=. experiments/vegetation/run_uniform_flow_with_stiff_short_vegetation.jl
