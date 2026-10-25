@@ -482,44 +482,52 @@ function advection_term_w(
     return out
 end
 
-function diffusion_term!(res::AbstractMatrix{<:Real}, phi::AbstractMatrix{<:Real}, nu::Real, dx::Real, dz::Real; periodic_x::Bool=false, active::Union{Nothing,AbstractMatrix{Bool}}=nothing)
-    nz, nx = size(phi)
-    fill!(res, 0.0)
-    nphysical = periodic_x ? nx - 1 : nx
-    ilo, ihi = periodic_x ? (1, nphysical) : (2, nx - 1)
-    @inbounds for i in ilo:ihi
-        for k in 2:(nz - 1)
-            left = periodic_x ? phi[k, mod1(i - 1, nphysical)] : phi[k, i - 1]
-            right = periodic_x ? phi[k, mod1(i + 1, nphysical)] : phi[k, i + 1]
-            lap_x = (right - 2.0 * phi[k, i] + left) / (dx * dx)
-            lap_z = (phi[k + 1, i] - 2.0 * phi[k, i] + phi[k - 1, i]) / (dz * dz)
-            res[k, i] = nu * (lap_x + lap_z)
-            if active !== nothing && !(active[k, i] && active[k, i - 1] && active[k, i + 1] && active[k - 1, i] && active[k + 1, i])
-                res[k, i] = 0.0   # next to a solid point: no diffusion, as in the outermost points of the domain
-            end
-        end
-    end
-    if periodic_x
-        @views res[:, end] .= res[:, 1]
-    end
-    return res
-end
+_nu_at(nu::Real, k::Int, i::Int) = nu
+_nu_at(nu::AbstractMatrix{<:Real}, k::Int, i::Int) = nu[k, i]
 
-function diffusion_term!(res::AbstractMatrix{<:Real}, phi::AbstractMatrix{<:Real}, nu::AbstractMatrix{<:Real}, dx::Real, dz::Real; periodic_x::Bool=false, active::Union{Nothing,AbstractMatrix{Bool}}=nothing)
+"""
+    diffusion_term!(res, phi, nu, dx, dz; periodic_x=false, active=nothing)
+
+Viscous term `d/dx(nu dphi/dx) + d/dz(nu dphi/dz)` (units of `phi` per s) of the face velocity `phi` (m/s, nz x nx) with
+the viscosity `nu` (m^2/s, >= 0; a number, or an nz x nx matrix at the points of `phi`), in flux form with the face
+viscosity `nu_f = 0.5*(nu_a + nu_b)`:
+
+    res[k,i] = (F[k+1/2] - F[k-1/2]) / dz + (G[i+1/2] - G[i-1/2]) / dx,
+    F[k+1/2] = nu_f (phi[k+1] - phi[k]) / dz,   G[i+1/2] = nu_f (phi[i+1] - phi[i]) / dx.
+
+Boundaries: zero flux through the bed and the free surface (`F[1/2] = F[nz+1/2] = 0`: free slip at the bed, no stress at
+the top; a wind stress enters the top row as a body force in `step_forward!`, which is the same stress condition). The
+outermost points in x (the wall faces) get `res = 0`; their value (`phi = 0` at a wall) enters the neighbouring flux.
+With `active` (nz x nx; for u: a face next to at least one wet cell), inactive points get `res = 0` and the vertical flux
+to an inactive neighbour (the face below the bed) is zero, i.e. the same free-slip bed as at k = 1; obstacle walls
+(active, `u = 0`) act like the outer walls.
+
+Second order in space for smooth `nu`; sum(phi) dz per column is conserved by the vertical part. Explicit
+forward-Euler stability: `2 nu dt (1/dx^2 + 1/dz^2) <= 1`. For constant `nu` this is the 5-point Laplacian in the
+interior.
+WHY flux form over the top and bottom rows: the former kernel `nu * Laplacian` skipped rows 1 and nz, so the top row had
+no viscous coupling to the row below, and a wind stress stayed in the top cell (issue #4).
+"""
+function diffusion_term!(res::AbstractMatrix{<:Real}, phi::AbstractMatrix{<:Real}, nu::Union{Real,AbstractMatrix{<:Real}}, dx::Real, dz::Real; periodic_x::Bool=false, active::Union{Nothing,AbstractMatrix{Bool}}=nothing)
     nz, nx = size(phi)
     fill!(res, 0.0)
     nphysical = periodic_x ? nx - 1 : nx
     ilo, ihi = periodic_x ? (1, nphysical) : (2, nx - 1)
     @inbounds for i in ilo:ihi
-        for k in 2:(nz - 1)
-            left = periodic_x ? phi[k, mod1(i - 1, nphysical)] : phi[k, i - 1]
-            right = periodic_x ? phi[k, mod1(i + 1, nphysical)] : phi[k, i + 1]
-            lap_x = (right - 2.0 * phi[k, i] + left) / (dx * dx)
-            lap_z = (phi[k + 1, i] - 2.0 * phi[k, i] + phi[k - 1, i]) / (dz * dz)
-            res[k, i] = nu[k, i] * (lap_x + lap_z)
-            if active !== nothing && !(active[k, i] && active[k, i - 1] && active[k, i + 1] && active[k - 1, i] && active[k + 1, i])
-                res[k, i] = 0.0
+        il = periodic_x ? mod1(i - 1, nphysical) : i - 1
+        ir = periodic_x ? mod1(i + 1, nphysical) : i + 1
+        for k in 1:nz
+            if active !== nothing && !active[k, i]
+                continue   # res stays 0
             end
+            nu_c = _nu_at(nu, k, i)
+            g_right = 0.5 * (nu_c + _nu_at(nu, k, ir)) * (phi[k, ir] - phi[k, i]) / dx
+            g_left = 0.5 * (nu_c + _nu_at(nu, k, il)) * (phi[k, i] - phi[k, il]) / dx
+            has_top = k < nz && (active === nothing || active[k + 1, i])
+            has_bottom = k > 1 && (active === nothing || active[k - 1, i])
+            f_top = has_top ? 0.5 * (nu_c + _nu_at(nu, k + 1, i)) * (phi[k + 1, i] - phi[k, i]) / dz : 0.0
+            f_bottom = has_bottom ? 0.5 * (nu_c + _nu_at(nu, k - 1, i)) * (phi[k, i] - phi[k - 1, i]) / dz : 0.0
+            res[k, i] = (g_right - g_left) / dx + (f_top - f_bottom) / dz
         end
     end
     if periodic_x

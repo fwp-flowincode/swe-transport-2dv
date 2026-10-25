@@ -51,4 +51,33 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test max_top_div < 1e-10
         @test max_kinematic < 1e-10
     end
+
+    @testset "test_verify_wind_forcing_closes_volume_and_kinematic_budgets" begin
+        # Closed basin under wind stress with an eddy viscosity, in the three free-surface treatments. Two former
+        # defects (issue #4): the u predictor's wall faces entered the fixed-grid barotropic solve (water volume
+        # drifted, about 1e-8 m^2 after 200 steps here), and the wind increment was added after the barotropic solve
+        # and the projection (kinematic mismatch about 2e-5 m/s per step in the wall columns).
+        NSTEPS = 200                 # -
+        WIND_STRESS_X = 0.2          # Pa
+        NU_EDDY = 1e-3               # m^2/s, gives non-zero diffusion at the wall faces of the predictor
+        VOLUME_TOL = 1e-12           # m^2, |sum(eta) dx| after NSTEPS; round-off level is ~1e-17
+        KINEMATIC_TOL = 1e-10        # m/s, model.last_kinematic_mismatch (same bound as the closure test above)
+        for (use_hydrostatic, variable_top_layer) in ((true, true), (true, false), (false, false))
+            cfg = ModelConfig(length=10.0, depth=4.0, nx=40, nz=20, dt=0.01, nt=NSTEPS, use_hydrostatic=use_hydrostatic,
+                variable_top_layer=variable_top_layer, nu=NU_EDDY, wind_stress_x=WIND_STRESS_X, rayleigh_damping=0.0,
+                apply_froude_limiter=false, write_plots=false, write_animation=false,
+                write_pressure_buoyancy_diagnostics=false)
+            model = Model(cfg)
+            initialize_internal_seiche!(model; rho_top=999.0, rho_bottom=1001.0, interface_height_fraction=0.5,
+                interface_tilt_amplitude_fraction=0.0)
+            max_kinematic = 0.0
+            for _ in 1:NSTEPS
+                step_forward!(model)
+                max_kinematic = max(max_kinematic, model.last_kinematic_mismatch)
+            end
+            @test abs(sum(model.state.eta) * model.dx) < VOLUME_TOL
+            @test max_kinematic < KINEMATIC_TOL
+            @test maximum(abs, model.state.eta) > 0.0   # the wind does set up the surface
+        end
+    end
 end

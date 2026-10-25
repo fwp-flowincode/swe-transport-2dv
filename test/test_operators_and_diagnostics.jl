@@ -64,4 +64,57 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test b[1] < 0.0
         @test b[2] > 0.0
     end
+
+    @testset "test_verify_diffusion_flux_form_second_order_convergence" begin
+        # Manufactured field on the u-grid (x faces x_i = (i-1) dx, walls at x = 0 and L where phi = 0; cell-centred z):
+        #   phi = sin(pi x / L) cos(pi z / H),  nu(z) = NU0 (1 + NU_SLOPE z / H),
+        #   d/dx(nu phi_x) + d/dz(nu phi_z) = nu phi_xx + nu' phi_z + nu phi_zz.
+        # phi_z = 0 at z = 0 and H, consistent with the zero-flux bed and surface of diffusion_term!.
+        L = 2.0                      # m
+        H = 1.0                      # m
+        NU0 = 1e-3                   # m^2/s
+        NU_SLOPE = 0.5               # -, relative change of nu over the depth
+        GRIDS = (16, 32, 64)         # nz; nx = 2 nz
+        ORDER_MIN = 1.9              # -, expected order 2 in the max norm (top and bottom rows included)
+        errors = Float64[]
+        for nz in GRIDS
+            nx = 2nz
+            dx, dz = L / nx, H / nz
+            x = [(i - 1) * dx for i in 1:(nx + 1)]
+            z = [(k - 0.5) * dz for k in 1:nz]
+            phi = [sin(pi * xi / L) * cos(pi * zk / H) for zk in z, xi in x]
+            nu = [NU0 * (1 + NU_SLOPE * zk / H) for zk in z, xi in x]
+            exact = [NU0 * (1 + NU_SLOPE * zk / H) * (-(pi / L)^2 - (pi / H)^2) * sin(pi * xi / L) * cos(pi * zk / H) -
+                     NU0 * NU_SLOPE / H * (pi / H) * sin(pi * xi / L) * sin(pi * zk / H) for zk in z, xi in x]
+            res = similar(phi)
+            diffusion_term!(res, phi, nu, dx, dz)
+            push!(errors, maximum(abs, res[:, 2:nx] .- exact[:, 2:nx]))
+            @test all(iszero, res[:, 1]) && all(iszero, res[:, end])   # wall faces
+        end
+        orders = log2.(errors[1:end-1] ./ errors[2:end])
+        @test all(orders .> ORDER_MIN)
+    end
+
+    @testset "test_verify_diffusion_flux_form_conserves_column_momentum" begin
+        # Periodic in x and uniform in x: only the vertical fluxes act, and with zero flux through the bed and the
+        # surface sum_k res[k, i] dz vanishes for any profile and any positive viscosity profile.
+        NZ = 24                      # -
+        NX = 8                       # -, physical columns (nx + 1 faces with the periodic seam)
+        DZ = 0.1                     # m
+        DX = 0.2                     # m
+        rng = MersenneTwister(4)
+        profile = randn(rng, NZ)                     # m/s
+        nu_profile = 1e-3 .* (1 .+ rand(rng, NZ))    # m^2/s
+        phi = repeat(profile, 1, NX + 1)
+        nu = repeat(nu_profile, 1, NX + 1)
+        res = similar(phi)
+        diffusion_term!(res, phi, nu, DX, DZ; periodic_x=true)
+        @test maximum(abs, vec(sum(res; dims=1)) .* DZ) < TOL_IDENTITY
+        @test maximum(abs, res) > 0.0
+        # constant nu: the scalar method gives the same result as a constant matrix
+        res_scalar = similar(phi)
+        diffusion_term!(res_scalar, phi, nu_profile[1], DX, DZ; periodic_x=true)
+        diffusion_term!(res, phi, fill(nu_profile[1], NZ, NX + 1), DX, DZ; periodic_x=true)
+        @test res_scalar == res
+    end
 end
