@@ -119,7 +119,8 @@ length even without canopy, by nonlinear steepening into higher harmonics, which
 
 **Lock exchange through emergent canopies** (`plot_vegetation_lock_exchange.jl`, step 2). Heavy and light water start
 side by side in an 8 m tank (H = 0.2 m, g' = 0.02 m/s², stem diameter 6.4 mm, non-hydrostatic, 1 cm cells). The tank is
-either free of vegetation or filled with a canopy of a = 20 or 80 1/m.
+either free of vegetation or filled over its whole length with a rigid patch of a = 20 or 80 1/m. (These figures do not
+draw the canopy, which fills the whole tank; the next case shows the vegetation explicitly.)
 
 ![Density without canopy and in the canopies](figures/vegetation_lock_exchange_snapshots.png)
 
@@ -140,6 +141,35 @@ decelerates. For a triangular current the pressure gradient is about g' H / x_f;
 The scaling is derived here. Tanino et al. (2005) give a theoretical toe velocity and regime criteria (linear and
 quadratic drag), which still have to be compared in detail: their open author manuscript (MIT DSpace) could not be
 downloaded because of rate limiting.
+
+**Lock exchange into vegetation: patches and individual stems** (`plot_vegetation_lock_exchange_canopies.jl`). The
+same tank, with vegetation in the right half only (x = 4-8 m, starting at the gate). The canopy has the same frontal
+area a = 20 1/m in five representations:
+- no vegetation;
+- a rigid patch with averaged quantities;
+- individual rigid stems in rows every 10 cm, with the lateral spacing of the same stem density;
+- the same rows as individual flexible stems (EI = 10⁻⁷ N m²);
+- a flexible patch with the same stiffness.
+
+The vegetation is drawn: patches as a shaded region with their representative stems, individual stems as lines with
+their computed shapes.
+
+![Lock exchange into vegetation, five representations](figures/vegetation_lock_canopies.gif)
+
+![Density and vegetation at 60, 150 and 300 s](figures/vegetation_lock_canopies_snapshots.png)
+
+- **Without vegetation:** the current crosses the tank in about 140 s and is reflected at the end wall.
+- **With vegetation:** the current turns triangular as soon as it enters the canopy, and it decelerates. Behind the
+  gate, outside the canopy, the light water returns as an upper layer.
+- **Rigid patch vs individual rigid stems:** practically the same front (3.55 m and 3.44 m after 300 s, 3 %), although
+  the stems stand in discrete rows and the patch is a continuum.
+- **Flexible stems:** they bend towards the gate in the light water that flows back over the dense current (mean tip
+  displacement 6 cm). Bending reduces their drag, so the front moves faster than with rigid vegetation (3.75 m with
+  individual flexible stems, 3.83 m with the flexible patch). Here too the two representations agree within 3 %.
+- **Stiffness:** with EI = 10⁻⁶ N m² the stems bent by only about 1 cm. The current in the canopy is slow (about
+  1 cm/s), and the Cauchy number Ca = ρ C_D b U² l³/(2 EI) was only about 3.
+
+![Front position, five representations](figures/vegetation_lock_canopies_front.png)
 
 Tests
 -----
@@ -176,7 +206,9 @@ Scripts
 - `plot_vegetation_channel.jl`: periodic channel references and grid convergence; about 3 min.
 - `plot_vegetation_patch.jl`: head loss and the flexible-patch animation; about 1 min.
 - `plot_vegetation_waves.jl`: wave damping against Dalrymple et al. (1984); about 20 min.
-- `plot_vegetation_lock_exchange.jl`: lock exchange through canopies; about 10 min.
+- `plot_vegetation_lock_exchange.jl`: lock exchange through canopies over the whole tank, front scaling; about 10 min.
+- `plot_vegetation_lock_exchange_canopies.jl`: lock exchange into vegetation in the right half, patches and individual
+  rigid and flexible stems, vegetation drawn; about 35 min.
 - `cases.jl`: shared settings and references: the 1D canopy profile, the reconfiguration helper, the wave flume with
   Dalrymple's decay coefficient, the canopy lock exchange (also used by the tests).
 - `run_oscillating_flow_with_flexible_vegetation.jl`: ported to the new model; qualitative (no reference).
@@ -189,6 +221,7 @@ frame and 640 px width.
     julia --project=. experiments/vegetation/plot_vegetation_patch.jl
     julia --project=. experiments/vegetation/plot_vegetation_waves.jl
     julia --project=. experiments/vegetation/plot_vegetation_lock_exchange.jl
+    julia --project=. experiments/vegetation/plot_vegetation_lock_exchange_canopies.jl
 
 References
 ----------
