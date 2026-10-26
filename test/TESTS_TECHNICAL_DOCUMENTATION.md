@@ -11,7 +11,8 @@ every file includes, so each file also runs on its own (`julia --project=. test/
 | `test_pressure.jl` | hydrostatic integration, Poisson matrix, non-hydrostatic pressure solvers (sections 6, 7) |
 | `test_free_surface.jl` | barotropic solve, kinematic surface condition, continuity closure, wind forcing budgets (sections 8-10) |
 | `test_model.jl` | full-model runs: conservation, stabilisation, configuration, initial conditions, dense front, wind-driven double gyre |
-| `test_vegetation.jl` | flexible-vegetation stem model |
+| `test_vegetation.jl` | vegetation: rigid and flexible patches and individual stems (section 16) |
+| `test_turbulence.jl` | k-epsilon closure, bed wall functions, turbulent density diffusion (section 17) |
 | `test_nonhydrostatic.jl` | non-hydrostatic branch and free surface (sections 14, 15) |
 | `test_variable_top_layer.jl` | variable-thickness top layer (section 13) |
 
@@ -192,8 +193,7 @@ Optional bound-preserving clamping is applied during update:
 ### 5) Viscous diffusion of u (`diffusion_term!`)
 
 The viscous term of the horizontal momentum equation uses the viscosity $\nu$ (molecular `nu` plus the optional
-mixing-length eddy viscosity $\nu_t=l^2|\partial u/\partial z|$, capped at `max_turbulent_viscosity`, and the vegetation
-contribution) in flux form with face viscosities $\nu_f=\tfrac12(\nu_a+\nu_b)$:
+mixing-length eddy viscosity $\nu_t=l^2|\partial u/\partial z|$, capped at `max_turbulent_viscosity`) in flux form with face viscosities $\nu_f=\tfrac12(\nu_a+\nu_b)$:
 
 ```math
 \mathcal{D}(u)_{k,i}=\frac{F_{k+1/2}-F_{k-1/2}}{\Delta z}+\frac{G_{i+1/2}-G_{i-1/2}}{\Delta x},
@@ -570,6 +570,107 @@ not checked.
 - Sweby (1984), High resolution schemes using flux limiters for hyperbolic conservation laws, SIAM J. Numer. Anal. 21, 995-1011.
 - Ferziger and Peric (2002), *Computational Methods for Fluid Dynamics*.
 - Press et al. (2007), *Numerical Recipes* (elliptic solves, transforms, tridiagonal systems).
+
+### 16) Vegetation (`src/vegetation.jl`, issue #8)
+
+Two representations share one stem model. A **patch** (`VegetationPatch`) has the stem length $h_v$, diameter $b$,
+stem density $n$ (stems/m²) and drag coefficient $C_D$ over an x-range; a representative stem per u-face column
+carries the drag of its column, and the force per unit volume is $n$ times the stem force per unit height. The u-faces
+are weighted by the fraction of their control interval $x\pm\Delta x/2$ inside the patch. An **individual stem**
+(`VegetationStem`) stands for a row of stems with lateral spacing $\Delta y$; its force is deposited as
+$F/(\rho_0\Delta x\,h\,\Delta y)$, split linearly between the two neighbouring u-faces. Here $h$ is the layer thickness
+of the momentum equation: $\Delta z$, and in the top row with the variable top layer its u-face thickness. Stems are
+loaded up to the top of the momentum layers: $n_z\Delta z$ on the fixed grid (linear free surface, the top layer keeps
+$\Delta z$) and $(n_z-1)\Delta z+h_{top}$ with the variable top layer (individual stems: interpolated to the base). Earlier
+the loads reached $n_z\Delta z+\eta$ while the force was divided by $\Delta z$, which scaled the top-row drag by
+$(\Delta z+\eta)/\Delta z$.
+
+Stems are rigid ($EI=\infty$) or flexible: inextensible, clamped at the base, quasi-static (elastica; Alben et al. 2002;
+Gosselin et al. 2010; Luhar & Nepf 2011),
+
+```math
+EI\,\frac{d\theta}{ds}=T(s),\qquad f_n=\tfrac12\rho_0 C_D b\,u_n|u_n|,\quad u_n=u\cos\theta,
+```
+
+with $T(s)$ the moment of the loads beyond $s$ (normal drag and net buoyancy per length $B_l$) and $\theta$ the angle
+from the vertical. Per unit vertical extent the horizontal drag is $\tfrac12\rho_0C_Db\,u|u|\cos^2\theta$. Discretisation:
+$N$ straight segments, angles at the segment midpoints, curvature at the nodes ($\theta_1=\kappa_0\Delta s/2$,
+$\theta_m=\theta_{m-1}+\kappa_{m-1}\Delta s$, second order). The segments are split at the cell boundaries; a piece in row
+$k$ uses the velocity of that row, and the same pieces load the stem and, with the opposite sign, the fluid (exact
+momentum exchange; a rigid patch gives exactly $\tfrac12C_Da\,u|u|$ per unit volume, $a=nb$). The posture is solved
+with Newton's method (finite-difference Jacobian, backtracking), warm-started every step. If Newton fails (e.g. from an
+upright stem at $Ca\gtrsim3000$), the load is applied in stages (velocity times $\sqrt{\lambda}$, $\lambda=1/n\ldots1$, with
+$n=8, 32, 128$) from the start posture; postures that still do not converge are counted in
+`VegetationModel.posture_failures`. Stem parts above the free
+surface carry no load; the vertical drag component is not applied to $w$.
+
+The drag enters the u predictor explicitly, from the velocities of time level n. It is monotone for
+$\Delta t\,K\le1$ with the linearised drag rate $K$ (rigid patch: $\tfrac12C_Da|u|$); `step_forward!` checks this.
+WHY explicit: an implicit factor applied to the predictor before the free-surface solve would make the steady state
+depend on $\Delta t$, because the surface-slope correction is not divided by it.
+
+`ModelConfig.body_force_x` (m/s²) adds a uniform body force (channel slope) for steady periodic-channel flow.
+`sponge_length` (m) and `sponge_rate` (1/s) add an absorbing layer at the right end: over the last `sponge_length` the
+u predictor is multiplied by $1/(1+\Delta t\,r\,s^2)$, $s$ the relative position in the layer (quadratic ramp, implicit,
+stable for any rate); used for the wave cases. The
+former ad hoc vegetation viscosity (`vegetation_turbulence_strength`) and the old stem model (force relaxation 0.35,
+response gain 8, `source_strength`, string-like bending) were removed; in the old tests that model changed the wave
+amplitude by about $10^{-15}$ and the lock-exchange front by less than one cell.
+
+### 17) k-epsilon turbulence closure (`src/turbulence.jl`, issue #8)
+
+Selected with `turbulence_closure = "k_epsilon"` (flat bed and fixed top layer only: the closure assumes layers of
+equal thickness, so the automatic default of `variable_top_layer` is false with it and an explicit
+`variable_top_layer=true` is rejected; the closure cannot be switched on or off after the model is built). Standard high-Reynolds-number k-epsilon (Launder &
+Spalding 1974; Rodi 1993) on the cell centres:
+
+```math
+\frac{Dk}{Dt}=\partial_z\!\left(\Big(\nu+\frac{\nu_t}{\sigma_k}\Big)\partial_z k\right)+P+G+C_{fk}P_v-\varepsilon,\qquad
+\frac{D\varepsilon}{Dt}=\partial_z\!\left(\Big(\nu+\frac{\nu_t}{\sigma_\varepsilon}\Big)\partial_z\varepsilon\right)
++\frac{\varepsilon}{k}\left(C_1(P+C_{f\varepsilon}P_v)+C_3\max(G,0)-C_2\varepsilon\right),\qquad \nu_t=C_\mu\frac{k^2}{\varepsilon},
+```
+
+with $P=\nu_t[(\partial_zu+\partial_xw)^2+2(\partial_xu)^2+2(\partial_zw)^2]$, the buoyancy term
+$G=-(\nu_t/\sigma_\rho)N^2$, $N^2=-(g/\rho_0)\partial_z\rho$ ($C_3=0$ stable, 1 unstable; Rodi 1987), and the vegetation
+production $P_v$, the work of the drag per unit mass (from the u-face accelerations of `vegetation_source!` times $u$,
+averaged to the cells; $\tfrac12C_Da|u|^3$ for a rigid canopy). Constants: $C_\mu=0.09$, $C_1=1.44$, $C_2=1.92$,
+$\sigma_k=1.0$, $\sigma_\varepsilon=1.3$, $\sigma_\rho=0.7$; vegetation weights $C_{fk}=1.0$, $C_{f\varepsilon}=1.33$
+(Lopez & Garcia 1997, WES Technical Report WRP-CP-10, Eqs. 26-27 and p. 58; adjustable per `KEpsilonState`).
+
+Numerics after each flow and density update: explicit first-order upwind advection (conservative, closed walls,
+periodic or zero-gradient inflow), then per column a backward-Euler vertical diffusion with the sinks linearised
+implicitly (Patankar: $\varepsilon/k^\ast\,k$, $C_2\varepsilon^\ast/k^\ast\,\varepsilon$, negative buoyancy); positive for
+any $\Delta t$, first order in time. Bed: with `bed_roughness_length` $z_0>0$ a log-law quadratic friction
+$c_b|u_1|u_1$ on the lowest row, $c_b=(\kappa/\ln(z_1/z_0))^2$, $z_1=\Delta z/2$, and the wall functions
+$k_1=u_*^2/\sqrt{C_\mu}$, $\varepsilon_1=u_*^3/(\kappa z_1)$ (Rodi 1993); otherwise free slip and zero flux. Surface:
+zero flux for $k$; for $\varepsilon$ the value $\varepsilon_s=C_\mu^{3/4}k_s^{3/2}/(\kappa\,0.07H)$ (Rodi 1993; default, as
+in Lopez & Garcia 1997) or zero flux.
+The momentum equation uses $\nu+\nu_t$ (u-faces: mean of the neighbouring cells; the mixing-length cap does not apply).
+Density gets the turbulent diffusivity $\nu_t/\sigma_\rho$ (implicit, conservative with the layer thicknesses, top layer
+$\Delta z+\eta$).
+
+Known limitations: first order in time; in a homogeneous emergent canopy the level of k is not fixed by the
+vegetation terms (below).
+
+**Vegetation terms.** $C_1$ multiplies the vegetation term in the $\varepsilon$ equation (Lopez & Garcia 1997, Eq. 27).
+In a homogeneous canopy without shear the k equation then drives $\varepsilon\to C_{fk}P_v$ and the $\varepsilon$
+equation $\varepsilon\to(C_1C_{f\varepsilon}/C_2)P_v$; with $C_{f\varepsilon}=(C_2/C_1)C_{fk}$ (their p. 24, after Burke
+1982) both agree, and $C_{f\varepsilon}=1.33$ gives $0.9975$ (test). The level of k is neutral, so it drifts slowly in an
+emergent canopy; a wake length scale would fix it. An earlier version without $C_1$ gave $\varepsilon/P_v=0.693$ and
+unbounded k.
+
+**Comparison with Lopez & Garcia (1997) and Dunn et al. (1996)** (`experiments/vegetation/plot_vegetation_dunn_k_epsilon.jl`,
+`plot_vegetation_manning.jl`). Flexible runs are computed as rigid canopies of the deflected height, as Lopez & Garcia
+did. Against their computed k-epsilon profiles (runs 1, 9, 13, 17, digitized from Figs. 6.1, 6.2, 6.4, 6.5): velocity
+0.92-1.03 of theirs, stress peak 0.97-1.05, stress in the lower canopy 0.68-1.35. Against the measurements: the depth-mean
+velocity is 1.09-1.29 times the measured Q/(bH) (rigid runs, measured $C_{DB}$; 1.17-1.31 with $C_D=1$), and the measured
+stress at the canopy top is only 0.12-0.83 of the 2D momentum balance $gS(H-h_p)$. Lopez & Garcia's model overpredicts
+in the same way; they attribute both to secondary currents in the 0.91 m wide flume. The shape of the velocity profile in
+the canopy, $u/u(h_p)$, agrees with the measurements (median deviation 4.8 %, largest 21 %). In their plant-density
+series (Figs. 6.16, 6.18) the momentum transfer to the bed agrees within a few per cent, but over dense canopies in deep
+water (H/h_p = 6-9) our model gives more resistance: Manning n up to 1.25 (160 stems/m²) and 1.53 (1581 stems/m²) times
+theirs at their depth. Our profile above the canopy then corresponds to a roughness length of about $h_p/2$; with the
+vegetation terms switched off the resistance is higher still. Converged in time and grid; not resolved.
 
 ## Test-by-test documentation
 
@@ -1282,6 +1383,114 @@ $p=\cos(\pi x/L)\cos(\pi(z-d)/(H-d))$ has zero normal derivative at the side wal
 $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The masked matrix of `build_poisson_matrix`
 (gauge pin at the first wet cell, mean removal over the wet cells) reproduces it with maximum errors 5.1e-3, 1.3e-3 and
 3.2e-4 on $32\times16$, $64\times32$ and $128\times64$ cells: observed orders 1.99 and 2.00 (required: 1.8-2.2).
+
+
+### Vegetation tests (`test_vegetation.jl`, section 16)
+
+- `test_verify_rigid_patch_drag_per_unit_volume`: kernel check, $-\tfrac12C_Da\,u|u|$ per unit volume with the
+  canopy-top cell fraction and the patch-edge weights, random velocities of both signs, to round-off.
+- `test_verify_patch_stiffness_must_be_positive`: zero, negative and NaN bending stiffness of a patch are rejected.
+- `test_verify_emergent_drag_up_to_top_of_momentum_layers`: emergent rigid stem and patch with a non-flat surface, fixed
+  and variable top layer: stem force $\tfrac12\rho_0C_Db\,u^2$ times the top of the momentum layers ($n_z\Delta z$, or
+  $(n_z-1)\Delta z+h_{top}$ interpolated to the base), volume-integrated sink with the layer thicknesses equal to the stem
+  force, and $\tfrac12C_Da\,u|u|$ per unit volume in the top row of a patch, all to round-off.
+- `test_verify_stem_drag_equals_fluid_momentum_sink`: three flexible stems in a sheared profile; the momentum removed
+  from the fluid ($\rho_0\Delta x\Delta z\Delta y\sum a$) equals the sum of the stem drags to round-off; the stems bend
+  downstream and their drag stays below the rigid value.
+- `test_verify_cantilever_small_deflection_second_order`: uniform load $q=\tfrac12\rho C_Db U^2$, $Ca=0.005$; tip
+  deflection against $ql^4/(8EI)$, observed order 2.0 (errors $1.0\cdot10^{-2}$, $2.5\cdot10^{-3}$, $6.3\cdot10^{-4}$).
+- `test_validate_flexible_stem_reconfiguration`: $R=F/F_{rigid}\to1$ for $Ca=0.1$; slope of $\log R$ against
+  $\log Ca$ between $Ca=300$ and $3000$ within 0.02 of $-1/3$ (observed $-0.333$); buoyancy number $B=100$ keeps the
+  stem nearly rigid at $Ca=10$ ($R>0.95$), without buoyancy $R<0.6$.
+- `test_verify_elastica_against_independent_reference`: single stem in a uniform current against the continuous elastica
+  integrated independently from the tip (RK4, 20000 steps, shooting on the tip angle; `elastica_reference_uniform`).
+  In a uniform current the loads depend on $\theta$ only, so the tip angle is the only unknown; the physical root is the
+  first sign change of $\theta(0)$ below $\theta_{tip}=\pi/2$. Cases $(Ca,B)=(1,0),(100,0),(1000,0),(300,30)$: order
+  above 1.8 in the number of segments for $R$ and the tip position, $|R/R_{ref}-1|<3\cdot10^{-3}$ and tip error below
+  $10^{-3}l$ at 80 segments (observed $5\cdot10^{-6}$ to $1.9\cdot10^{-3}$). Over $Ca=0.1\ldots10^4$ the model with 80
+  segments agrees within 0.9 % ($B\le10$) and within 0.4 % for $B=100$ up to $Ca=3162$; beyond that the shooting
+  reference is badly conditioned. The reference gives $R\,Ca^{1/3}=0.890$ at large $Ca$.
+- `test_validate_flexible_canopy_against_coupled_reference`: flexible submerged canopy in a periodic channel
+  ($h_v=H/2$, $a=4$ 1/m, $EI=2\cdot10^{-5}$ N m², constant $\nu$) against the independent coupled 1D reference
+  `flexible_canopy_reference`: the continuous elastica in the velocity along the stem, iterated with
+  $\nu u''=\tfrac12C_Da\cos^2\theta(z)\phi(z)u|u|-G$ until posture and profile are steady (converged: doubling its
+  resolution changes $u$ by $3\cdot10^{-8}$ m/s). The model starts from the reference state and runs 1000 s (from rest it
+  needs about 6000 s; at 3000 s the error was still $2\cdot10^{-4}$ m/s). Velocity error below $10^{-4}$ m/s and tip error
+  below 1.5 mm at $n_z=20$, and both at least halved at $n_z=40$ (observed $5.4\cdot10^{-5}$ and $1.6\cdot10^{-5}$ m/s,
+  tip (0.67, 0.60) mm and (0.16, 0.13) mm; surface velocity 0.098 m/s, deflected height 0.283 m).
+- `test_verify_luhar_nepf_2011_published_postures`: the published values of Luhar & Nepf (2011) for their (and our) blade
+  model: $l_e/l=0.30$, $h/l=0.61$ at Ca = 32, B = 0 (observed 0.2995, 0.6079); the zero-stiffness solution of their
+  Eq. 12, a straight blade with $\sin\theta=(B^{-1}Ca)\cos^2\theta$ ($\theta$ = 58.9°, $l_e/l=0.138$, $h/l=0.517$ for
+  $B^{-1}Ca=3.2$; published 59°, 0.14, 0.52), approached by our model at fixed $B^{-1}Ca$ as B grows: errors fall by more
+  than 2.5 per decade of B (about $B^{-1/2}$, the stiffness boundary layer at the base), below 0.015 at $B=10^4$.
+- `test_validate_luhar_nepf_2011_blade_drag`: laboratory data. Drag of flexible model blades in uniform flow (Luhar &
+  Nepf 2011; HDPE stiffness-dominated, silicone foam buoyancy-dominated; their blade properties, C_D = 1.95, no
+  fitting); forces read from their Fig. 4. Forces of at least 5 mN of the 25 cm HDPE and the 5 cm and 25 cm foam
+  blades: median deviation below 10 % (observed 7 %), largest below 45 % (observed 39 %). The 5 cm HDPE blade, which
+  the authors' identical model also overpredicts (short-plate drag coefficient), is left out. Also checks that the
+  reconstructed parameters give Ca = 320 and B = 0.62 of their Table 1.
+- `test_validate_emergent_rigid_canopy_uniform_velocity`: periodic channel, body force $G$; $U=\sqrt{2G/(C_Da)}$ exact,
+  observed $4\cdot10^{-12}$, both modes.
+- `test_validate_submerged_rigid_canopy_profile`: $h_v=H/2$, constant $\nu$; against the 1D reference
+  `canopy_reference_profile` ($\nu u''=\tfrac12C_Da\phi u|u|-G$, 4000 cells, Newton); orders above 1.8 (observed 1.94,
+  1.98), both modes.
+- `test_verify_individual_stems_match_patch`: 25 rigid stems at random positions with the patch-equivalent lateral
+  spacing give the patch velocity and balance the body force (observed $1.4\cdot10^{-6}$).
+- `test_verify_flexible_patch_momentum_balance`: flexible submerged patch; steady total drag $=\rho_0GHL$ within
+  $10^{-4}$, the stems bend, and the velocity exceeds the rigid case.
+- `test_validate_patch_head_loss`: inflow/outflow channel, emergent patch; $g\Delta\eta=\tfrac12C_DaLU^2$ within
+  0.3 % (observed $-0.03$ %), both modes.
+- `test_verify_explicit_drag_stability_check`: $\Delta t\,K=2$ is rejected.
+- `test_validate_wave_height_decay_over_rigid_canopy`: regular linear waves ($H_0/h=0.005$, $kh=0.2$) through an
+  emergent canopy ($a=10$ 1/m) over 60 m, wavemaker at the left boundary, sponge at the right end. The wave height
+  decays as $H_0/(1+\beta x)$ of Dalrymple, Kirby & Hwang (1984),
+  $\beta=\tfrac{4}{9\pi}C_DaH_0k\,(\sinh^3k\alpha h+3\sinh k\alpha h)/((\sinh2kh+2kh)\sinh kh)$ (derived from the wave
+  energy balance with the time-averaged drag dissipation). Compared: decay with canopy divided by decay without canopy,
+  which removes the numerical damping of the fully implicit free surface ($\approx2\pi^2/N$ per period with $N$ steps per
+  period). Within 1.5 % (observed 0.25-0.70 %). At larger amplitude ($H_0/h=0.05$, Ursell number about 50) the first
+  harmonic loses energy to higher harmonics by nonlinear steepening, which the linear theory does not describe.
+- `test_validate_canopy_lock_exchange_drag_regime`: lock exchange through a dense emergent canopy ($a=80$ 1/m,
+  $H=0.2$ m, $g'=0.02$ m/s²): the front exponent decreases from the inertial value towards $x_f\propto t^{2/3}$ of the
+  quadratic-drag regime (triangular current, pressure gradient $g'H/x_f$ balancing $\tfrac12C_Dau^2$); late exponent
+  within 0.04 of 2/3 (observed 0.685).
+- `test_vegetation_damps_free_surface_wave_motion`: a rigid patch around a velocity antinode of a standing wave
+  reduces the wave energy after 10 s to below 0.8 of the case without vegetation (observed 0.69).
+- `test_vegetation_slows_lock_exchange_front`: a rigid patch in the right half delays the dense front by more than
+  1 m after 60 s.
+
+### Turbulence tests (`test_turbulence.jl`, section 17)
+
+- `test_verify_k_epsilon_decaying_homogeneous_turbulence`: no shear and no gradients; against the exact solution
+  $k=k_0(1+(C_2-1)\varepsilon_0t/k_0)^{-1/(C_2-1)}$; order above 0.9 in $\Delta t$ (observed 0.93-0.98).
+- `test_verify_implicit_vertical_diffusion_cosine_mode`: $\partial_t\phi=K\partial_z^2\phi$ with zero flux; the
+  cosine mode decays as $e^{-K(\pi/H)^2t}$; first order in $\Delta t$; column integral conserved to round-off.
+- `test_validate_k_epsilon_open_channel`: uniform flow over a rough bed (periodic channel, both modes): bed shear
+  $=gSH$, total stress at mid-depth $=gS(H-z)$ and wall-function $k_1=u_*^2/\sqrt{C_\mu}$ within $10^{-4}$ (observed
+  $1.2\cdot10^{-5}$ after 600 s), depth-mean velocity within 8 % of the log law $U/u_*=(\ln(H/z_0)-1)/\kappa$
+  (observed +6.0 %, consistent with the wake of channel flows); $\nu_t$ peaks at mid-depth ($z/H=0.53$).
+- `test_verify_k_epsilon_vegetation_balance`: homogeneous emergent canopy; $\varepsilon/P_v\to C_1C_{f\varepsilon}/C_2
+  =0.9975$ within $10^{-3}$ below the two surface rows (observed 0.9975).
+- `test_validate_k_epsilon_canopies_against_lopez_garcia`: runs 1, 9, 13, 17 of Dunn et al. (1996) (measured $C_{DB}$;
+  flexible runs as rigid canopies of the deflected height) against the computed profiles of Lopez & Garcia (1997,
+  Figs. 6.1, 6.2, 6.4, 6.5; digitized from the scan: frames and ticks located in the image, the thick k-epsilon dots
+  separated from data symbols by size and fill). Velocity within 10 % at all heights (observed 0.92-1.03), stress peak
+  within 8 % (0.97-1.05), stress below $0.8h_p$ within 40 % (0.68-1.35), depth mean 1.0-1.3 times the measured
+  (1.05-1.20).
+- `test_validate_k_epsilon_rigid_canopies_against_dunn_profiles`: laboratory data. The 12 rigid runs against the
+  measured horizontally averaged velocity profiles (Appendix C of the report). Compared is the shape in the canopy,
+  $u(z)/u(h_p)$, because the magnitudes and the stress above the canopy are affected by secondary currents: every point
+  within 25 % (observed 21 %), median below 7 % (4.8 %); depth mean 1.05-1.35 times the measured (1.09-1.29). nz = 20
+  (profiles within 3 % of nz = 40).
+- `test_validate_k_epsilon_plant_density_series_against_lopez_garcia`: their numerical experiment (Figs. 6.16, 6.18;
+  S = 0.0036, $h_p$ = 0.10 m, q = 1.12 m²/s, smooth bed), 1.6-160 stems/m², at their computed depth: bed shear ratio
+  $u_{*b}/\sqrt{gHS}$ within 8 % (observed 0.98-1.00), Manning n within 30 % (observed 0.95-1.25, growing with density;
+  see section 17), n increasing with density. The figures are labelled q = 1.21 m²/s; the text and the digitized H and n
+  give 1.12-1.13 m²/s.
+- `test_verify_turbulence_closure_selection`: default and legacy flag, state creation with the fixed top layer as the
+  automatic default, invalid choices (unknown closure, bed geometry, explicit variable top layer, nz = 1) and a change
+  of the closure across the k-epsilon boundary after construction rejected.
+- `test_verify_clear_vegetation_resets_k_epsilon_production`: the vegetation production $P_v$ is zero after
+  `clear_vegetation!`.
 
 ## Additional validation scripts and literature basis
 

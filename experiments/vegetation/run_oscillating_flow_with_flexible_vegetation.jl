@@ -3,6 +3,9 @@ using Printf
 
 include(joinpath(@__DIR__, "common.jl"))
 
+# Ported to the vegetation model of issue #8 (physical stem parameters: bending stiffness EI, lateral spacing of the
+# row of stems; no tuning factors). A quantitative reference follows in step 2 of docs/plan_issue_8_vegetation.md.
+
 cfg = ModelConfig(
     length=12.0,
     depth=2.5,
@@ -32,13 +35,10 @@ refresh_density_metadata!(model)
 stem = VegetationStem(
     base_x=0.5 * cfg.length,
     height=0.85 * cfg.depth,
-    diameter=0.03,
-    drag_coefficient=2.4,
-    stiffness=0.12,
-    damping=0.05,
-    mass_per_length=0.25,
-    sample_points=14,
-    source_strength=2.0,
+    diameter=0.03,              # m
+    drag_coefficient=1.2,       # -, circular cylinder
+    bending_stiffness=0.05,     # N m^2
+    lateral_spacing=0.2,        # m, row of stems
 )
 attach_vegetation!(model, VegetationModel(stem))
 
@@ -49,7 +49,7 @@ history, eta_prev_history, history_time, vegetation_history, eta_prev_for_plot, 
     m.config.wind_stress_x = forcing_amplitude * sin(2.0 * pi * t / period)
 end)
 
-max_tip_deflection = maximum(abs(frame.stems[1].deflection[end]) for frame in vegetation_history)
+max_tip_deflection = maximum(abs(stem_tip_deflection(frame.stems[1])) for frame in vegetation_history)
 
 tag = case_tag(cfg)
 @printf("Running vegetation oscillating-flow case | tag=%s\n", tag)

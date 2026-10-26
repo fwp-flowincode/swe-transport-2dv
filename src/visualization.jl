@@ -302,6 +302,19 @@ function _plot_vegetation!(p, vegetation; color=:forestgreen, linewidth::Real=3.
         scatter!(p, [last(x)], [last(z)]; color=:goldenrod, markershape=:diamond, markersize=4, legend=false)
     end
 
+    # Patches: outline up to the canopy height (flexible: mean deflected height of the representative stems).
+    for (ip, patch) in enumerate(vegetation.patches)
+        height = patch.stem_height
+        theta = vegetation.patch_theta[ip]
+        columns = [c for c in axes(theta, 2) if any(!iszero, @view theta[:, c])]
+        if !isempty(columns)
+            ds = patch.stem_height / size(theta, 1)
+            height = sum(ds * sum(cos, @view theta[:, c]) for c in columns) / length(columns)
+        end
+        plot!(p, [patch.x_start, patch.x_start, patch.x_end, patch.x_end], [0.0, height, height, 0.0];
+            color=color, linewidth=linewidth, linestyle=:dash, legend=false)
+    end
+
     return p
 end
 
