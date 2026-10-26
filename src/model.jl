@@ -13,7 +13,8 @@ Base.@kwdef mutable struct ModelConfig
     max_turbulent_viscosity::Float64 = 5e-4
     # Turbulence closure: "none", "mixing_length" (nu_t = l^2 |du/dz|, also selected by use_turbulence_model) or
     # "k_epsilon" (src/turbulence.jl: k-epsilon with buoyancy and vegetation terms and turbulent density diffusion;
-    # flat bed only). Evaluate with turbulence_closure(cfg).
+    # flat bed and fixed top layer only: the automatic default of variable_top_layer is false with it, an explicit
+    # variable_top_layer=true is rejected). Evaluate with turbulence_closure(cfg).
     turbulence_closure::String = "none"
     # Bed roughness length z0 (m): > 0 applies a log-law quadratic bed friction c_b u|u| on the lowest row
     # (c_b = (kappa/ln(z1/z0))^2, z1 = dz/2) and, with k-epsilon, the wall functions; 0 keeps the free-slip bed.
@@ -79,10 +80,12 @@ end
     use_variable_top_layer(cfg) -> Bool
 
 Whether `cfg` runs with the variable-thickness top layer: the explicit `cfg.variable_top_layer` if set, otherwise
-`cfg.use_hydrostatic` (automatic default). Evaluated on every use, so changing `use_hydrostatic` on a config after
-creation (as `copy_config` workflows do) keeps the default consistent.
+`cfg.use_hydrostatic` and no k-epsilon closure (automatic default; the k-epsilon closure assumes layers of equal
+thickness and rejects an explicit `variable_top_layer=true`). Evaluated on every use, so changing `use_hydrostatic` or
+the closure on a config after creation (as `copy_config` workflows do) keeps the default consistent.
 """
-use_variable_top_layer(cfg::ModelConfig) = cfg.variable_top_layer === nothing ? cfg.use_hydrostatic : cfg.variable_top_layer
+use_variable_top_layer(cfg::ModelConfig) =
+    cfg.variable_top_layer === nothing ? (cfg.use_hydrostatic && turbulence_closure(cfg) != "k_epsilon") : cfg.variable_top_layer
 
 """
     turbulence_closure(cfg) -> String
@@ -1106,7 +1109,7 @@ function step_forward!(model::Model)
             # Explicit (forward Euler) drag from the velocities of time level n, like the other explicit terms.
             # WHY explicit: an implicit factor applied here, before the free-surface solve, would make the steady state
             # depend on dt (the surface-slope correction below is not divided by it); see src/vegetation.jl.
-            vegetation_source!(ws.adv_u, model.vegetation, st.u, st.eta, model.dx, model.dz, cfg.rho0;
+            vegetation_source!(ws.adv_u, model.vegetation, st.u, model.dx, model.dz, cfg.rho0;
                 periodic_x=cfg.periodic_x, h_top_face=variable_top ? ws.h_top_face : nothing)
             drag_rate = vegetation_drag_rate(model.vegetation)
             if cfg.dt * drag_rate > VEGETATION_EXPLICIT_DRAG_LIMIT

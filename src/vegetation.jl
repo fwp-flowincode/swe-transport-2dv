@@ -361,20 +361,20 @@ function _patch_face_weight(patch::VegetationPatch, x_face::Real, dx::Real, doma
 end
 
 """
-    vegetation_source!(accel, vegetation, u, eta, dx, dz, rho0; periodic_x=false) -> accel
+    vegetation_source!(accel, vegetation, u, dx, dz, rho0; periodic_x=false, h_top_face=nothing) -> accel
 
 Horizontal acceleration (m/s², nz x (nx+1), on the u-faces) of the fluid by the vegetation drag for the face velocities
-`u` (m/s) and the surface elevation `eta` (m, per column; water level = nz dz + eta): updates the postures of all
-flexible stems and patch columns (quasi-static, warm-started) and deposits minus the stem forces. Individual stems:
-force / (rho0 dx h lateral_spacing), split linearly between the two neighbouring u-faces; patches: stem density times
-the stem force per row / (rho0 h) at every u-face, weighted by the fraction of the face control interval
-(x_face +- dx/2) inside the patch. `h` is `dz` except for the variable top layer, where `h_top_face` supplies its
-u-face thickness. Returns `accel`; `vegetation.stems[i].force_x`
-holds the stem drags.
+`u` (m/s): updates the postures of all flexible stems and patch columns (quasi-static, warm-started) and deposits minus
+the stem forces. Individual stems: force / (rho0 dx h lateral_spacing), split linearly between the two neighbouring
+u-faces; patches: stem density times the stem force per row / (rho0 h) at every u-face, weighted by the fraction of the
+face control interval (x_face +- dx/2) inside the patch. `h` is the layer thickness of the momentum equation: `dz`, and
+in the top row with the variable top layer its u-face thickness `h_top_face` (m, length nx+1).
+The water level up to which stems are loaded is the top of the momentum layers: nz dz on the fixed grid (linear free
+surface: the top layer keeps the thickness dz) and (nz-1) dz + h_top_face with the variable top layer (for individual
+stems interpolated to the base position). Returns `accel`; `vegetation.stems[i].force_x` holds the stem drags.
 """
 function vegetation_source!(accel::AbstractMatrix{<:Real}, vegetation::VegetationModel, u::AbstractMatrix{<:Real},
-    eta::AbstractVector{<:Real}, dx::Real, dz::Real, rho0::Real; periodic_x::Bool=false,
-    h_top_face::Union{Nothing,AbstractVector{<:Real}}=nothing)
+    dx::Real, dz::Real, rho0::Real; periodic_x::Bool=false, h_top_face::Union{Nothing,AbstractVector{<:Real}}=nothing)
     fill!(accel, 0.0)
     nz, nxp1 = size(u)
     h_top_face === nothing || length(h_top_face) == nxp1 ||
@@ -385,18 +385,24 @@ function vegetation_source!(accel::AbstractMatrix{<:Real}, vegetation::Vegetatio
     nx = nxp1 - 1
     domain_length = nx * dx
     pieces = _StemPieces()
-    column(x) = clamp(floor(Int, x / dx) + 1, 1, nx)     # cell column containing x
     layer_thickness(k, i) = k == nz && h_top_face !== nothing ? h_top_face[i] : dz
+    function face_weights(x)
+        xr = periodic_x ? mod(x, domain_length) : clamp(x, 0.0, domain_length)
+        pos = xr / dx + 1.0
+        i0 = clamp(floor(Int, pos), 1, nx)
+        return i0, pos - i0
+    end
+    # WHY: loads only up to the top of the momentum layers; beyond it the force would be divided by a thinner layer
+    # (on the fixed grid a surface above nz dz scaled the top-row drag by (dz + eta)/dz)
+    function top_of_layers(x)
+        h_top_face === nothing && return nz * dz
+        i0, t = face_weights(x)
+        return (nz - 1) * dz + (1.0 - t) * h_top_face[i0] + t * h_top_face[i0 + 1]
+    end
 
     for stem in vegetation.stems
         cfg = stem.config
-        water_level = nz * dz + eta[column(cfg.base_x)]
-        function face_weights(x)
-            xr = periodic_x ? mod(x, domain_length) : clamp(x, 0.0, domain_length)
-            pos = xr / dx + 1.0
-            i0 = clamp(floor(Int, pos), 1, nx)
-            return i0, pos - i0
-        end
+        water_level = top_of_layers(cfg.base_x)
         velocity(k, x) = (w = face_weights(x); (1.0 - w[2]) * u[k, w[1]] + w[2] * u[k, w[1] + 1])
         converged, fx_total, pcs = update_stem_posture!(stem.theta, velocity; length=cfg.height, base_x=cfg.base_x, base_z=cfg.base_z,
             diameter=cfg.diameter, drag_coefficient=cfg.drag_coefficient, bending_stiffness=cfg.bending_stiffness,
@@ -425,7 +431,7 @@ function vegetation_source!(accel::AbstractMatrix{<:Real}, vegetation::Vegetatio
             x_face = (i - 1) * dx
             weight = _patch_face_weight(patch, x_face, dx, domain_length, periodic_x)
             weight > 0 || continue
-            water_level = h_top_face === nothing ? nz * dz + eta[clamp(i, 1, nx)] : (nz - 1) * dz + h_top_face[i]
+            water_level = h_top_face === nothing ? nz * dz : (nz - 1) * dz + h_top_face[i]
             column_velocity(k, x) = u[k, i]
             theta = @view theta_all[:, i]
             converged, _, _ = update_stem_posture!(theta, column_velocity; length=patch.stem_height, base_x=x_face, diameter=patch.stem_diameter,

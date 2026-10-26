@@ -195,15 +195,19 @@ end
     end
 
     @testset "test_verify_turbulence_closure_selection" begin
-        # The default and the legacy flag keep their meaning; k_epsilon creates the state; invalid choices are rejected.
+        # The default and the legacy flag keep their meaning; k_epsilon creates the state (with the fixed top layer as the
+        # automatic default); invalid choices (unknown closure, bed geometry, explicit variable top layer, nz = 1) and a
+        # change of the closure across the k-epsilon boundary after construction are rejected.
         @test turbulence_closure(ModelConfig()) == "none"
         @test turbulence_closure(ModelConfig(use_turbulence_model=true)) == "mixing_length"
-        @test Model(ModelConfig(turbulence_closure="k_epsilon", variable_top_layer=false, write_plots=false)).turbulence isa KEpsilonState
+        @test Model(ModelConfig(turbulence_closure="k_epsilon", write_plots=false)).turbulence isa KEpsilonState
+        @test !use_variable_top_layer(ModelConfig(turbulence_closure="k_epsilon"))
+        @test use_variable_top_layer(ModelConfig())
         @test Model(ModelConfig()).turbulence === nothing
         @test_throws ArgumentError KEpsilonState(1, 3)
         @test_throws ArgumentError Model(ModelConfig(turbulence_closure="k_omega"))
         @test_throws ArgumentError Model(ModelConfig(turbulence_closure="k_epsilon", variable_top_layer=false, bed_level=zeros(100)))
-        @test_throws ArgumentError Model(ModelConfig(turbulence_closure="k_epsilon"))
+        @test_throws ArgumentError Model(ModelConfig(turbulence_closure="k_epsilon", variable_top_layer=true))
 
         model_ke = Model(ModelConfig(turbulence_closure="k_epsilon", variable_top_layer=false, write_plots=false))
         model_ke.config.turbulence_closure = "none"
@@ -213,7 +217,9 @@ end
         @test_throws ArgumentError step_forward!(model_none)
     end
 
-    @testset "test_clear_vegetation_resets_k_epsilon_production" begin
+    @testset "test_verify_clear_vegetation_resets_k_epsilon_production" begin
+        # After clear_vegetation! the vegetation production P_v of the k-epsilon closure is zero (it is otherwise only
+        # written while vegetation is attached).
         cfg = ModelConfig(length=1.0, depth=1.0, nx=4, nz=4, dt=1e-4, nt=1, periodic_x=true, variable_top_layer=false,
             pressure_solver_method="sparse", turbulence_closure="k_epsilon", write_plots=false, write_animation=false,
             write_pressure_buoyancy_diagnostics=false)

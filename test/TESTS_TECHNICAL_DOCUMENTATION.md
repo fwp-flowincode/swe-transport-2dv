@@ -578,7 +578,12 @@ stem density $n$ (stems/m²) and drag coefficient $C_D$ over an x-range; a repre
 carries the drag of its column, and the force per unit volume is $n$ times the stem force per unit height. The u-faces
 are weighted by the fraction of their control interval $x\pm\Delta x/2$ inside the patch. An **individual stem**
 (`VegetationStem`) stands for a row of stems with lateral spacing $\Delta y$; its force is deposited as
-$F/(\rho_0\Delta x\Delta z\Delta y)$, split linearly between the two neighbouring u-faces.
+$F/(\rho_0\Delta x\,h\,\Delta y)$, split linearly between the two neighbouring u-faces. Here $h$ is the layer thickness
+of the momentum equation: $\Delta z$, and in the top row with the variable top layer its u-face thickness. Stems are
+loaded up to the top of the momentum layers: $n_z\Delta z$ on the fixed grid (linear free surface, the top layer keeps
+$\Delta z$) and $(n_z-1)\Delta z+h_{top}$ with the variable top layer (individual stems: interpolated to the base). Earlier
+the loads reached $n_z\Delta z+\eta$ while the force was divided by $\Delta z$, which scaled the top-row drag by
+$(\Delta z+\eta)/\Delta z$.
 
 Stems are rigid ($EI=\infty$) or flexible: inextensible, clamped at the base, quasi-static (elastica; Alben et al. 2002;
 Gosselin et al. 2010; Luhar & Nepf 2011),
@@ -614,7 +619,9 @@ amplitude by about $10^{-15}$ and the lock-exchange front by less than one cell.
 
 ### 17) k-epsilon turbulence closure (`src/turbulence.jl`, issue #8)
 
-Selected with `turbulence_closure = "k_epsilon"` (flat bed only). Standard high-Reynolds-number k-epsilon (Launder &
+Selected with `turbulence_closure = "k_epsilon"` (flat bed and fixed top layer only: the closure assumes layers of
+equal thickness, so the automatic default of `variable_top_layer` is false with it and an explicit
+`variable_top_layer=true` is rejected; the closure cannot be switched on or off after the model is built). Standard high-Reynolds-number k-epsilon (Launder &
 Spalding 1974; Rodi 1993) on the cell centres:
 
 ```math
@@ -1357,6 +1364,11 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The maske
 
 - `test_verify_rigid_patch_drag_per_unit_volume`: kernel check, $-\tfrac12C_Da\,u|u|$ per unit volume with the
   canopy-top cell fraction and the patch-edge weights, random velocities of both signs, to round-off.
+- `test_verify_patch_stiffness_must_be_positive`: zero, negative and NaN bending stiffness of a patch are rejected.
+- `test_verify_emergent_drag_up_to_top_of_momentum_layers`: emergent rigid stem and patch with a non-flat surface, fixed
+  and variable top layer: stem force $\tfrac12\rho_0C_Db\,u^2$ times the top of the momentum layers ($n_z\Delta z$, or
+  $(n_z-1)\Delta z+h_{top}$ interpolated to the base), volume-integrated sink with the layer thicknesses equal to the stem
+  force, and $\tfrac12C_Da\,u|u|$ per unit volume in the top row of a patch, all to round-off.
 - `test_verify_stem_drag_equals_fluid_momentum_sink`: three flexible stems in a sheared profile; the momentum removed
   from the fluid ($\rho_0\Delta x\Delta z\Delta y\sum a$) equals the sum of the stem drags to round-off; the stems bend
   downstream and their drag stays below the rigid value.
@@ -1449,7 +1461,11 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The maske
   $u_{*b}/\sqrt{gHS}$ within 8 % (observed 0.98-1.00), Manning n within 30 % (observed 0.95-1.25, growing with density;
   see section 17), n increasing with density. The figures are labelled q = 1.21 m²/s; the text and the digitized H and n
   give 1.12-1.13 m²/s.
-- `test_verify_turbulence_closure_selection`: default and legacy flag, state creation, invalid choices rejected.
+- `test_verify_turbulence_closure_selection`: default and legacy flag, state creation with the fixed top layer as the
+  automatic default, invalid choices (unknown closure, bed geometry, explicit variable top layer, nz = 1) and a change
+  of the closure across the k-epsilon boundary after construction rejected.
+- `test_verify_clear_vegetation_resets_k_epsilon_production`: the vegetation production $P_v$ is zero after
+  `clear_vegetation!`.
 
 ## Additional validation scripts and literature basis
 

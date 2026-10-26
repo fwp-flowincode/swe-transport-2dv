@@ -22,7 +22,7 @@ vegetation_test_config(; kwargs...) = vegetation_case_config(; kwargs...)
         rng = MersenneTwister(8)
         u = 0.3 .* randn(rng, NZ, NX + 1)        # m/s, both signs
         accel = zeros(NZ, NX + 1)
-        vegetation_source!(accel, veg, u, zeros(NX), DX, DZ, VEG_RHO0)
+        vegetation_source!(accel, veg, u, DX, DZ, VEG_RHO0)
         a = patch_frontal_area(patch)
         expected = zeros(NZ, NX + 1)
         for i in 1:(NX + 1), k in 1:NZ
@@ -35,7 +35,8 @@ vegetation_test_config(; kwargs...) = vegetation_case_config(; kwargs...)
         @test accel[5, 8] ≈ 0.5 * expected[5, 8] / 0.5   # row 5 is half covered (consistency of the expectation)
     end
 
-    @testset "test_validate_patch_stiffness" begin
+    @testset "test_verify_patch_stiffness_must_be_positive" begin
+        # Argument check: a patch needs EI > 0 (Inf for rigid); zero, negative and NaN stiffness are rejected.
         for stiffness in (0.0, -1.0, NaN)
             patch = VegetationPatch(x_start=0.0, x_end=1.0, stem_height=1.0, stem_diameter=0.01,
                 stem_density=100.0, bending_stiffness=stiffness)
@@ -43,31 +44,42 @@ vegetation_test_config(; kwargs...) = vegetation_case_config(; kwargs...)
         end
     end
 
-    @testset "test_variable_top_layer_vegetation_volume" begin
-        NX, NZ, DX, DZ = 10, 20, 0.2, 0.05
-        eta = [0.15, -0.1, 0.05, 0.0, 0.1, -0.05, 0.03, 0.08, -0.02, 0.04]
+    @testset "test_verify_emergent_drag_up_to_top_of_momentum_layers" begin
+        # Emergent rigid vegetation is loaded up to the top of the momentum layers and the force is divided by their
+        # thickness h (dz below, the top-layer thickness in the top row):
+        # - fixed top layer (linear free surface): water level nz dz, top row thickness dz, whatever the surface elevation;
+        # - variable top layer: water level (nz-1) dz + h_top_face (individual stems: interpolated to the base), top row
+        #   thickness h_top_face.
+        # Checked: the stem force 1/2 rho C_D b u² (water level), the volume-integrated sink equals the stem force (Newton's
+        # third law with the layer thicknesses), and a patch removes exactly 1/2 C_D a u|u| per unit volume in the top row.
+        NX, NZ, DX, DZ = 10, 20, 0.2, 0.05      # -, -, m, m
+        U0, CD, B, SPACING = 0.2, 1.0, 0.01, 0.4  # m/s, -, m, m
+        eta = [0.015, -0.01, 0.005, 0.0, 0.01, -0.005, 0.003, 0.008, -0.002, 0.004]      # m
         h_top_face = zeros(NX + 1)
         top_layer_face_thickness!(h_top_face, eta, DZ)
-        u = fill(0.2, NZ, NX + 1)
-        stem = VegetationStem(base_x=0.63, height=1.3, diameter=0.01, lateral_spacing=0.4)
-        veg = VegetationModel(stem)
-        accel = zeros(size(u))
-        vegetation_source!(accel, veg, u, eta, DX, DZ, VEG_RHO0; h_top_face=h_top_face)
-        volume_integrated_sink = 0.0
-        for i in 1:(NX + 1), k in 1:NZ
-            h = k == NZ ? h_top_face[i] : DZ
-            volume_integrated_sink -= accel[k, i] * VEG_RHO0 * DX * h * stem.config.lateral_spacing
-        end
-        @test isapprox(volume_integrated_sink, stem.force_x; rtol=TOL_IDENTITY)
+        u = fill(U0, NZ, NX + 1)
+        for variable_top in (false, true)
+            h_faces = variable_top ? h_top_face : nothing
+            layer(k, i) = (variable_top && k == NZ) ? h_top_face[i] : DZ
+            stem = VegetationStem(base_x=0.63, height=1.3, diameter=B, drag_coefficient=CD, bending_stiffness=Inf,
+                lateral_spacing=SPACING)
+            veg = VegetationModel(stem)
+            accel = zeros(size(u))
+            vegetation_source!(accel, veg, u, DX, DZ, VEG_RHO0; h_top_face=h_faces)
+            t = 0.63 / DX - 3                   # base between faces 4 and 5
+            water_level = variable_top ? (NZ - 1) * DZ + (1 - t) * h_top_face[4] + t * h_top_face[5] : NZ * DZ
+            @test isapprox(stem.force_x, 0.5 * VEG_RHO0 * CD * B * U0^2 * water_level; rtol=TOL_IDENTITY)
+            sink = sum(-accel[k, i] * VEG_RHO0 * DX * layer(k, i) * SPACING for i in 1:(NX + 1), k in 1:NZ)
+            @test isapprox(sink, stem.force_x; rtol=TOL_IDENTITY)
 
-        patch = VegetationPatch(x_start=0.0, x_end=NX * DX, stem_height=2.0, stem_diameter=0.01,
-            stem_density=100.0, drag_coefficient=1.0)
-        patch_veg = VegetationModel(; patches=[patch])
-        vegetation_source!(accel, patch_veg, u, eta, DX, DZ, VEG_RHO0; h_top_face=h_top_face)
-        expected_top_accel = -0.5 * patch.drag_coefficient * patch_frontal_area(patch) * u[NZ, 2] * abs(u[NZ, 2])
-        @test isapprox(accel[NZ, 2], expected_top_accel; rtol=TOL_IDENTITY)
-        @test isapprox(patch_veg.drag_rate[NZ, 2], 0.5 * patch.drag_coefficient * patch_frontal_area(patch) * abs(u[NZ, 2]);
-            rtol=TOL_IDENTITY)
+            patch = VegetationPatch(x_start=0.0, x_end=NX * DX, stem_height=2.0, stem_diameter=B, stem_density=100.0,
+                drag_coefficient=CD)
+            patch_veg = VegetationModel(; patches=[patch])
+            vegetation_source!(accel, patch_veg, u, DX, DZ, VEG_RHO0; h_top_face=h_faces)
+            rate = 0.5 * CD * patch_frontal_area(patch) * U0
+            @test isapprox(accel[NZ, 2], -rate * U0; rtol=TOL_IDENTITY)
+            @test isapprox(patch_veg.drag_rate[NZ, 2], rate; rtol=TOL_IDENTITY)
+        end
     end
 
     @testset "test_verify_stem_drag_equals_fluid_momentum_sink" begin
@@ -82,7 +94,7 @@ vegetation_test_config(; kwargs...) = vegetation_case_config(; kwargs...)
         z = [(k - 0.5) * DZ for k in 1:NZ]
         u = repeat(0.4 .* (z ./ (NZ * DZ)) .^ (1 / 7), 1, NX + 1)
         accel = zeros(NZ, NX + 1)
-        vegetation_source!(accel, veg, u, zeros(NX), DX, DZ, VEG_RHO0)
+        vegetation_source!(accel, veg, u, DX, DZ, VEG_RHO0)
         momentum_sink = -sum(accel) * VEG_RHO0 * DX * DZ * SPACING     # N
         @test isapprox(momentum_sink, sum(s.force_x for s in stems); rtol=TOL_IDENTITY)
         @test all(stem_tip_deflection(s) > 0 for s in stems)                    # bent downstream
@@ -350,7 +362,7 @@ vegetation_test_config(; kwargs...) = vegetation_case_config(; kwargs...)
             for _ in 1:cfg.nt
                 step_forward!(model)
             end
-            vegetation_source!(accel, model.vegetation, model.state.u, model.state.eta, model.dx, model.dz, VEG_RHO0; periodic_x=true)
+            vegetation_source!(accel, model.vegetation, model.state.u, model.dx, model.dz, VEG_RHO0; periodic_x=true)
             # momentum balance per unit width: drag = rho G H L
             @test isapprox(-sum(accel[:, 1:end-1]) * VEG_RHO0 * model.dx * model.dz, VEG_RHO0 * G * cfg.depth * cfg.length; rtol=REL_TOL)
             means[flexible] = mean(model.state.u)
