@@ -46,7 +46,7 @@ end
         # d(phi)/dt = K d²phi/dz² with zero flux at both ends: phi = cos(pi z/H) decays as exp(-K (pi/H)² t). Backward Euler:
         # first order in dt (observed order 1.0); the column integral is conserved to round-off.
         H, K, T_END, NZ = 1.0, 1e-2, 5.0, 200        # m, m^2/s, s, -
-        TIMESTEPS = (0.4, 0.2, 0.1)
+        TIMESTEPS = (0.5, 0.25, 0.125)
         ORDER_MIN = 0.9
         dz = H / NZ
         z = [(k - 0.5) * dz for k in 1:NZ]
@@ -198,9 +198,35 @@ end
         # The default and the legacy flag keep their meaning; k_epsilon creates the state; invalid choices are rejected.
         @test turbulence_closure(ModelConfig()) == "none"
         @test turbulence_closure(ModelConfig(use_turbulence_model=true)) == "mixing_length"
-        @test Model(ModelConfig(turbulence_closure="k_epsilon", write_plots=false)).turbulence isa KEpsilonState
+        @test Model(ModelConfig(turbulence_closure="k_epsilon", variable_top_layer=false, write_plots=false)).turbulence isa KEpsilonState
         @test Model(ModelConfig()).turbulence === nothing
+        @test_throws ArgumentError KEpsilonState(1, 3)
         @test_throws ArgumentError Model(ModelConfig(turbulence_closure="k_omega"))
-        @test_throws ArgumentError Model(ModelConfig(turbulence_closure="k_epsilon", bed_level=zeros(100)))
+        @test_throws ArgumentError Model(ModelConfig(turbulence_closure="k_epsilon", variable_top_layer=false, bed_level=zeros(100)))
+        @test_throws ArgumentError Model(ModelConfig(turbulence_closure="k_epsilon"))
+
+        model_ke = Model(ModelConfig(turbulence_closure="k_epsilon", variable_top_layer=false, write_plots=false))
+        model_ke.config.turbulence_closure = "none"
+        @test_throws ArgumentError step_forward!(model_ke)
+        model_none = Model(ModelConfig(variable_top_layer=false, write_plots=false))
+        model_none.config.turbulence_closure = "k_epsilon"
+        @test_throws ArgumentError step_forward!(model_none)
+    end
+
+    @testset "test_clear_vegetation_resets_k_epsilon_production" begin
+        cfg = ModelConfig(length=1.0, depth=1.0, nx=4, nz=4, dt=1e-4, nt=1, periodic_x=true, variable_top_layer=false,
+            pressure_solver_method="sparse", turbulence_closure="k_epsilon", write_plots=false, write_animation=false,
+            write_pressure_buoyancy_diagnostics=false)
+        model = Model(cfg)
+        fill!(model.state.rho, TURB_RHO0)
+        refresh_density_metadata!(model)
+        fill!(model.state.u, 0.1)
+        attach_vegetation!(model, VegetationModel(; patches=[VegetationPatch(x_start=0.0, x_end=cfg.length,
+            stem_height=0.8, stem_diameter=0.01, stem_density=100.0)]))
+        step_forward!(model)
+        @test maximum(model.turbulence.veg_work) > 0.0
+        clear_vegetation!(model)
+        step_forward!(model)
+        @test all(iszero, model.turbulence.veg_work)
     end
 end

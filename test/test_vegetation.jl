@@ -35,6 +35,41 @@ vegetation_test_config(; kwargs...) = vegetation_case_config(; kwargs...)
         @test accel[5, 8] ≈ 0.5 * expected[5, 8] / 0.5   # row 5 is half covered (consistency of the expectation)
     end
 
+    @testset "test_validate_patch_stiffness" begin
+        for stiffness in (0.0, -1.0, NaN)
+            patch = VegetationPatch(x_start=0.0, x_end=1.0, stem_height=1.0, stem_diameter=0.01,
+                stem_density=100.0, bending_stiffness=stiffness)
+            @test_throws ArgumentError VegetationModel(; patches=[patch])
+        end
+    end
+
+    @testset "test_variable_top_layer_vegetation_volume" begin
+        NX, NZ, DX, DZ = 10, 20, 0.2, 0.05
+        eta = [0.15, -0.1, 0.05, 0.0, 0.1, -0.05, 0.03, 0.08, -0.02, 0.04]
+        h_top_face = zeros(NX + 1)
+        top_layer_face_thickness!(h_top_face, eta, DZ)
+        u = fill(0.2, NZ, NX + 1)
+        stem = VegetationStem(base_x=0.63, height=1.3, diameter=0.01, lateral_spacing=0.4)
+        veg = VegetationModel(stem)
+        accel = zeros(size(u))
+        vegetation_source!(accel, veg, u, eta, DX, DZ, VEG_RHO0; h_top_face=h_top_face)
+        volume_integrated_sink = 0.0
+        for i in 1:(NX + 1), k in 1:NZ
+            h = k == NZ ? h_top_face[i] : DZ
+            volume_integrated_sink -= accel[k, i] * VEG_RHO0 * DX * h * stem.config.lateral_spacing
+        end
+        @test isapprox(volume_integrated_sink, stem.force_x; rtol=TOL_IDENTITY)
+
+        patch = VegetationPatch(x_start=0.0, x_end=NX * DX, stem_height=2.0, stem_diameter=0.01,
+            stem_density=100.0, drag_coefficient=1.0)
+        patch_veg = VegetationModel(; patches=[patch])
+        vegetation_source!(accel, patch_veg, u, eta, DX, DZ, VEG_RHO0; h_top_face=h_top_face)
+        expected_top_accel = -0.5 * patch.drag_coefficient * patch_frontal_area(patch) * u[NZ, 2] * abs(u[NZ, 2])
+        @test isapprox(accel[NZ, 2], expected_top_accel; rtol=TOL_IDENTITY)
+        @test isapprox(patch_veg.drag_rate[NZ, 2], 0.5 * patch.drag_coefficient * patch_frontal_area(patch) * abs(u[NZ, 2]);
+            rtol=TOL_IDENTITY)
+    end
+
     @testset "test_verify_stem_drag_equals_fluid_momentum_sink" begin
         # Newton's third law for individual flexible stems in a sheared flow: the momentum removed from the fluid (per
         # metre width, over the lateral spacing) equals the stem drag.

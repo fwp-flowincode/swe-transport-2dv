@@ -126,6 +126,7 @@ function VegetationModel(stems::VegetationStem...; patches::AbstractVector{Veget
     for p in patches
         p.x_end > p.x_start || throw(ArgumentError("patch x_end must exceed x_start"))
         p.stem_height > 0 && p.stem_diameter > 0 && p.stem_density > 0 || throw(ArgumentError("patch stem height, diameter and density must be positive"))
+        p.bending_stiffness > 0 || throw(ArgumentError("patch bending_stiffness must be positive (Inf for rigid)"))
         p.n_segments >= 2 || throw(ArgumentError("patch n_segments must be at least 2"))
     end
     return VegetationModel(collect(VegetationStem, stems), collect(VegetationPatch, patches), [zeros(p.n_segments, 0) for p in patches],
@@ -365,15 +366,19 @@ end
 Horizontal acceleration (m/s², nz x (nx+1), on the u-faces) of the fluid by the vegetation drag for the face velocities
 `u` (m/s) and the surface elevation `eta` (m, per column; water level = nz dz + eta): updates the postures of all
 flexible stems and patch columns (quasi-static, warm-started) and deposits minus the stem forces. Individual stems:
-force / (rho0 dx dz lateral_spacing), split linearly between the two neighbouring u-faces. Patches: stem density times
-the stem force per row / (rho0 dz) at every u-face, weighted by the fraction of the face control interval
-(x_face +- dx/2) inside the patch. Returns `accel`; `vegetation.stems[i].force_x`
+force / (rho0 dx h lateral_spacing), split linearly between the two neighbouring u-faces; patches: stem density times
+the stem force per row / (rho0 h) at every u-face, weighted by the fraction of the face control interval
+(x_face +- dx/2) inside the patch. `h` is `dz` except for the variable top layer, where `h_top_face` supplies its
+u-face thickness. Returns `accel`; `vegetation.stems[i].force_x`
 holds the stem drags.
 """
 function vegetation_source!(accel::AbstractMatrix{<:Real}, vegetation::VegetationModel, u::AbstractMatrix{<:Real},
-    eta::AbstractVector{<:Real}, dx::Real, dz::Real, rho0::Real; periodic_x::Bool=false)
+    eta::AbstractVector{<:Real}, dx::Real, dz::Real, rho0::Real; periodic_x::Bool=false,
+    h_top_face::Union{Nothing,AbstractVector{<:Real}}=nothing)
     fill!(accel, 0.0)
     nz, nxp1 = size(u)
+    h_top_face === nothing || length(h_top_face) == nxp1 ||
+        throw(ArgumentError("h_top_face must have length nx + 1"))
     size(vegetation.drag_rate) == size(u) || (vegetation.drag_rate = zeros(size(u)))
     rate = vegetation.drag_rate
     fill!(rate, 0.0)
@@ -381,6 +386,7 @@ function vegetation_source!(accel::AbstractMatrix{<:Real}, vegetation::Vegetatio
     domain_length = nx * dx
     pieces = _StemPieces()
     column(x) = clamp(floor(Int, x / dx) + 1, 1, nx)     # cell column containing x
+    layer_thickness(k, i) = k == nz && h_top_face !== nothing ? h_top_face[i] : dz
 
     for stem in vegetation.stems
         cfg = stem.config
@@ -397,14 +403,15 @@ function vegetation_source!(accel::AbstractMatrix{<:Real}, vegetation::Vegetatio
             net_buoyancy=cfg.net_buoyancy, rho0=rho0, dz=dz, nz=nz, water_level=water_level, pieces=pieces)
         stem.force_x = fx_total
         converged || (vegetation.posture_failures += 1)
-        scale = 1.0 / (rho0 * dx * dz * cfg.lateral_spacing)
         @inbounds for p in 1:pcs.n
             i0, t = face_weights(pcs.x[p])
             k = pcs.row[p]
-            accel[k, i0] -= (1.0 - t) * pcs.fx[p] * scale
-            accel[k, i0 + 1] -= t * pcs.fx[p] * scale
-            rate[k, i0] += (1.0 - t) * pcs.coef[p] * scale
-            rate[k, i0 + 1] += t * pcs.coef[p] * scale
+            scale_l = 1.0 / (rho0 * dx * layer_thickness(k, i0) * cfg.lateral_spacing)
+            scale_r = 1.0 / (rho0 * dx * layer_thickness(k, i0 + 1) * cfg.lateral_spacing)
+            accel[k, i0] -= (1.0 - t) * pcs.fx[p] * scale_l
+            accel[k, i0 + 1] -= t * pcs.fx[p] * scale_r
+            rate[k, i0] += (1.0 - t) * pcs.coef[p] * scale_l
+            rate[k, i0 + 1] += t * pcs.coef[p] * scale_r
         end
     end
 
@@ -418,17 +425,18 @@ function vegetation_source!(accel::AbstractMatrix{<:Real}, vegetation::Vegetatio
             x_face = (i - 1) * dx
             weight = _patch_face_weight(patch, x_face, dx, domain_length, periodic_x)
             weight > 0 || continue
-            water_level = nz * dz + eta[clamp(i, 1, nx)]
+            water_level = h_top_face === nothing ? nz * dz + eta[clamp(i, 1, nx)] : (nz - 1) * dz + h_top_face[i]
             column_velocity(k, x) = u[k, i]
             theta = @view theta_all[:, i]
             converged, _, _ = update_stem_posture!(theta, column_velocity; length=patch.stem_height, base_x=x_face, diameter=patch.stem_diameter,
                 drag_coefficient=patch.drag_coefficient, bending_stiffness=patch.bending_stiffness, net_buoyancy=patch.net_buoyancy,
                 rho0=rho0, dz=dz, nz=nz, water_level=water_level, pieces=pieces)
             converged || (vegetation.posture_failures += 1)
-            scale = weight * patch.stem_density / (rho0 * dz)
             @inbounds for p in 1:pieces.n
-                accel[pieces.row[p], i] -= pieces.fx[p] * scale
-                rate[pieces.row[p], i] += pieces.coef[p] * scale
+                k = pieces.row[p]
+                scale = weight * patch.stem_density / (rho0 * layer_thickness(k, i))
+                accel[k, i] -= pieces.fx[p] * scale
+                rate[k, i] += pieces.coef[p] * scale
             end
         end
     end

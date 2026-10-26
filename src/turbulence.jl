@@ -69,6 +69,7 @@ mutable struct KEpsilonState{T<:Real}
 end
 
 function KEpsilonState(nz::Int, nx::Int; T::Type{<:Real}=Float64, cfk::Real=KE_VEG_CFK, cfe::Real=KE_VEG_CFE, surface_condition::Symbol=:rodi)
+    nz >= 2 || throw(ArgumentError("k-epsilon requires nz >= 2"))
     surface_condition in (:zero_flux, :rodi) || throw(ArgumentError("surface_condition must be :zero_flux or :rodi"))
     k = fill(T(KE_K_INIT), nz, nx)
     eps = fill(T(KE_C_MU * KE_K_INIT^2 / KE_NU_T_INIT), nz, nx)

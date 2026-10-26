@@ -753,6 +753,9 @@ function _check_model_config(cfg::ModelConfig)
     if !(cfg.turbulence_closure in ("none", "mixing_length", "k_epsilon"))
         throw(ArgumentError("turbulence_closure must be \"none\", \"mixing_length\" or \"k_epsilon\", got \"$(cfg.turbulence_closure)\""))
     end
+    if turbulence_closure(cfg) == "k_epsilon" && use_variable_top_layer(cfg)
+        throw(ArgumentError("turbulence_closure=\"k_epsilon\" does not support variable_top_layer=true"))
+    end
     if cfg.bed_roughness_length < 0.0 || cfg.bed_roughness_length >= 0.5 * cfg.depth / cfg.nz
         throw(ArgumentError("bed_roughness_length must be in [0, dz/2)"))
     end
@@ -997,6 +1000,9 @@ function step_forward!(model::Model)
     ws = model.ws
 
     _check_model_config(cfg)   # the flags are mutable after construction
+    if (model.turbulence !== nothing) != (turbulence_closure(cfg) == "k_epsilon")
+        throw(ArgumentError("turbulence_closure cannot be changed across the k_epsilon boundary after Model construction"))
+    end
     if cfg.periodic_x != model.pressure_correction_solver.periodic_x
         throw(ArgumentError("periodic_x cannot be changed after Model construction"))
     end
@@ -1100,7 +1106,8 @@ function step_forward!(model::Model)
             # Explicit (forward Euler) drag from the velocities of time level n, like the other explicit terms.
             # WHY explicit: an implicit factor applied here, before the free-surface solve, would make the steady state
             # depend on dt (the surface-slope correction below is not divided by it); see src/vegetation.jl.
-            vegetation_source!(ws.adv_u, model.vegetation, st.u, st.eta, model.dx, model.dz, cfg.rho0; periodic_x=cfg.periodic_x)
+            vegetation_source!(ws.adv_u, model.vegetation, st.u, st.eta, model.dx, model.dz, cfg.rho0;
+                periodic_x=cfg.periodic_x, h_top_face=variable_top ? ws.h_top_face : nothing)
             drag_rate = vegetation_drag_rate(model.vegetation)
             if cfg.dt * drag_rate > VEGETATION_EXPLICIT_DRAG_LIMIT
                 throw(ArgumentError("vegetation drag too stiff for the explicit step: dt * |a/u| = $(cfg.dt * drag_rate) > $(VEGETATION_EXPLICIT_DRAG_LIMIT); reduce dt"))
@@ -1316,6 +1323,7 @@ function step_forward!(model::Model)
     end
 
     if model.turbulence !== nothing
+        model.vegetation === nothing && fill!(model.turbulence.veg_work, 0.0)
         @timeit model.timers "step/k_epsilon" k_epsilon_step!(model.turbulence, st.u, st.w, st.rho, cfg.dt, model.dx, model.dz, cfg.nu,
             cfg.g, cfg.rho0; periodic_x=cfg.periodic_x, bed_roughness=cfg.bed_roughness_length)
     end
