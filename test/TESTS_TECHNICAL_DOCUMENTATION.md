@@ -592,7 +592,10 @@ $N$ straight segments, angles at the segment midpoints, curvature at the nodes (
 $\theta_m=\theta_{m-1}+\kappa_{m-1}\Delta s$, second order). The segments are split at the cell boundaries; a piece in row
 $k$ uses the velocity of that row, and the same pieces load the stem and, with the opposite sign, the fluid (exact
 momentum exchange; a rigid patch gives exactly $\tfrac12C_Da\,u|u|$ per unit volume, $a=nb$). The posture is solved
-with Newton's method (finite-difference Jacobian, backtracking), warm-started every step. Stem parts above the free
+with Newton's method (finite-difference Jacobian, backtracking), warm-started every step. If Newton fails (e.g. from an
+upright stem at $Ca\gtrsim3000$), the load is applied in stages (velocity times $\sqrt{\lambda}$, $\lambda=1/n\ldots1$, with
+$n=8, 32, 128$) from the start posture; postures that still do not converge are counted in
+`VegetationModel.posture_failures`. Stem parts above the free
 surface carry no load; the vertical drag component is not applied to $w$.
 
 The drag enters the u predictor explicitly, from the velocities of time level n. It is monotone for
@@ -1308,6 +1311,22 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The maske
 - `test_validate_flexible_stem_reconfiguration`: $R=F/F_{rigid}\to1$ for $Ca=0.1$; slope of $\log R$ against
   $\log Ca$ between $Ca=300$ and $3000$ within 0.02 of $-1/3$ (observed $-0.333$); buoyancy number $B=100$ keeps the
   stem nearly rigid at $Ca=10$ ($R>0.95$), without buoyancy $R<0.6$.
+- `test_verify_elastica_against_independent_reference`: single stem in a uniform current against the continuous elastica
+  integrated independently from the tip (RK4, 20000 steps, shooting on the tip angle; `elastica_reference_uniform`).
+  In a uniform current the loads depend on $\theta$ only, so the tip angle is the only unknown; the physical root is the
+  first sign change of $\theta(0)$ below $\theta_{tip}=\pi/2$. Cases $(Ca,B)=(1,0),(100,0),(1000,0),(300,30)$: order
+  above 1.8 in the number of segments for $R$ and the tip position, $|R/R_{ref}-1|<3\cdot10^{-3}$ and tip error below
+  $10^{-3}l$ at 80 segments (observed $5\cdot10^{-6}$ to $1.9\cdot10^{-3}$). Over $Ca=0.1\ldots10^4$ the model with 80
+  segments agrees within 0.9 % ($B\le10$) and within 0.4 % for $B=100$ up to $Ca=3162$; beyond that the shooting
+  reference is badly conditioned. The reference gives $R\,Ca^{1/3}=0.890$ at large $Ca$.
+- `test_validate_flexible_canopy_against_coupled_reference`: flexible submerged canopy in a periodic channel
+  ($h_v=H/2$, $a=4$ 1/m, $EI=2\cdot10^{-5}$ N m², constant $\nu$) against the independent coupled 1D reference
+  `flexible_canopy_reference`: the continuous elastica in the velocity along the stem, iterated with
+  $\nu u''=\tfrac12C_Da\cos^2\theta(z)\phi(z)u|u|-G$ until posture and profile are steady (converged: doubling its
+  resolution changes $u$ by $3\cdot10^{-8}$ m/s). The model starts from the reference state and runs 1000 s (from rest it
+  needs about 6000 s; at 3000 s the error was still $2\cdot10^{-4}$ m/s). Velocity error below $10^{-4}$ m/s and tip error
+  below 1.5 mm at $n_z=20$, and both at least halved at $n_z=40$ (observed $5.4\cdot10^{-5}$ and $1.6\cdot10^{-5}$ m/s,
+  tip (0.67, 0.60) mm and (0.16, 0.13) mm; surface velocity 0.098 m/s, deflected height 0.283 m).
 - `test_validate_emergent_rigid_canopy_uniform_velocity`: periodic channel, body force $G$; $U=\sqrt{2G/(C_Da)}$ exact,
   observed $4\cdot10^{-12}$, both modes.
 - `test_validate_submerged_rigid_canopy_profile`: $h_v=H/2$, constant $\nu$; against the 1D reference

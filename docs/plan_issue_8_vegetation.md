@@ -203,6 +203,10 @@ turbulence model allows).
   - R9 lock exchange through emergent canopies: triangular currents and the approach to x_f proportional to t^(2/3).
     The exponent law is derived here; the toe velocity and regime criteria of Tanino, Nepf & Kulis (2005) are still
     to be compared (the author manuscript could not be downloaded).
+- **Flexible stems validated** against independent references: the continuous elastica integrated from the tip (single
+  stem, Ca = 0.1-10⁴, with buoyancy; second order, within 0.9 % at 80 segments) and a coupled 1D reference for a
+  flexible canopy in channel flow (velocity within 0.017 %, tip within 0.1 mm). Load continuation added to the posture
+  solver (Newton alone failed from an upright stem at Ca >~ 3000).
 - **Open:** dynamic flexible stems (waves, oscillating flow); vegetation turbulence (Nepf 1999); comparison with the
   flume data of Dunn et al. (1996) once the report is available; Luhar & Nepf (2011) coefficient check; the fully
   implicit free surface damps waves by about 2 pi²/N per period (a theta scheme would need time-averaged transports in

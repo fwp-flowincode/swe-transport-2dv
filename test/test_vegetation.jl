@@ -102,6 +102,74 @@ vegetation_test_config(; kwargs...) = vegetation_case_config(; kwargs...)
         @test reconfiguration(10.0) < 0.6
     end
 
+    @testset "test_verify_elastica_against_independent_reference" begin
+        # Single stem in a uniform current: the model's discrete elastica (segments, Newton) against the continuous
+        # elastica integrated independently from the tip (RK4, 20000 steps; elastica_reference_uniform in
+        # experiments/vegetation/cases.jl). Observed: second order in the number of segments for R and the tip position at
+        # all Cauchy numbers; relative R errors at 80 segments 5e-6 (Ca = 1), 4.2e-4 (100), 1.9e-3 (1000), 7.4e-4
+        # (Ca = 300, B = 30). The reference gives R Ca^(1/3) = 0.890 at large Ca.
+        CASES = ((1.0, 0.0), (100.0, 0.0), (1000.0, 0.0), (300.0, 30.0))    # (Ca, B)
+        SEGMENTS = (40, 80)
+        ORDER_MIN = 1.8
+        R_RTOL = 3e-3                       # -, at 80 segments
+        TIP_TOL = 1e-3                      # stem lengths, at 80 segments
+        for (cauchy, buoyancy) in CASES
+            ref = elastica_reference_uniform(cauchy; buoyancy_number=buoyancy)
+            errors_r = Float64[]; errors_x = Float64[]
+            for nseg in SEGMENTS
+                r, theta = reconfiguration_number(cauchy; n_segments=nseg, buoyancy_number=buoyancy)
+                push!(errors_r, abs(r / ref.R - 1))
+                push!(errors_x, abs(sum(sin, theta) / nseg - ref.tip_x))
+            end
+            @test log2(errors_r[1] / errors_r[2]) > ORDER_MIN
+            @test log2(errors_x[1] / errors_x[2]) > ORDER_MIN
+            @test errors_r[end] < R_RTOL
+            @test errors_x[end] < TIP_TOL
+        end
+    end
+
+    @testset "test_validate_flexible_canopy_against_coupled_reference" begin
+        # Flexible submerged canopy in a periodic channel (stem length H/2, a = 4 1/m, EI = 2e-5 N m^2, constant nu):
+        # steady velocity profile and stem posture against the independent coupled 1D reference
+        # (flexible_canopy_reference: continuous elastica in the velocity along the stem, iterated with the 1D momentum
+        # equation). The model starts from the reference state and runs 1000 s (from rest the flexible canopy needs about
+        # 6000 s to become steady). Observed: max velocity errors 5.4e-5 and 1.6e-5 m/s, tip errors (x, z) (0.67, 0.60) mm
+        # and (0.16, 0.13) mm for nz = 20 and 40 (surface velocity 0.098 m/s, deflected height 0.283 m).
+        H, HV, CD, B, N, G, NU, EI = 1.0, 0.5, 1.0, 0.01, 400.0, 2e-4, 1e-3, 2e-5
+        U_TOL = 1e-4                        # m/s, nz = 20
+        TIP_TOL = 1.5e-3                    # m, nz = 20
+        REDUCTION_MIN = 2.0                 # -, error ratio nz = 20 / nz = 40
+        T_RUN = 1000.0                      # s
+        ref = flexible_canopy_reference(; H=H, stem_length=HV, a=N * B, b=B, cd=CD, ei=EI, G=G, nu=NU, M=500, steps=1000)
+        s_ref = collect(range(0, HV, length=length(ref.theta)))
+        errors = Dict{Int,NTuple{3,Float64}}()
+        for nz in (20, 40)
+            cfg = vegetation_test_config(length=4.0, depth=H, nx=8, nz=nz, dt=0.1, nt=round(Int, T_RUN / 0.1), use_hydrostatic=true,
+                periodic_x=true, variable_top_layer=false, pressure_solver_method="sparse", nu=NU, body_force_x=G)
+            model = uniform_density_model(cfg)
+            vegetation = VegetationModel(; patches=[VegetationPatch(x_start=0.0, x_end=cfg.length, stem_height=HV, stem_diameter=B,
+                stem_density=N, drag_coefficient=CD, bending_stiffness=EI, n_segments=nz)])
+            attach_vegetation!(model, vegetation)
+            z = [(k - 0.5) * model.dz for k in 1:nz]
+            for i in 1:(cfg.nx + 1), k in 1:nz
+                model.state.u[k, i] = linear_interpolation(z[k], ref.z, ref.u)
+            end
+            s_mid = [(j - 0.5) * HV / nz for j in 1:nz]
+            vegetation.patch_theta[1] = repeat([linear_interpolation(s, s_ref, ref.theta) for s in s_mid], 1, cfg.nx + 1)
+            for _ in 1:cfg.nt
+                step_forward!(model)
+            end
+            u = vec(mean(model.state.u[:, 1:end-1]; dims=2))
+            theta = vegetation.patch_theta[1][:, 1]
+            ds = HV / nz
+            errors[nz] = (maximum(abs, u .- linear_interpolation.(z, Ref(ref.z), Ref(ref.u))), abs(ds * sum(sin, theta) - ref.tip_x),
+                abs(ds * sum(cos, theta) - ref.tip_z))
+        end
+        @test errors[20][1] < U_TOL
+        @test errors[20][2] < TIP_TOL && errors[20][3] < TIP_TOL
+        @test all(errors[20][j] / errors[40][j] > REDUCTION_MIN for j in 1:3)
+    end
+
     @testset "test_validate_emergent_rigid_canopy_uniform_velocity" begin
         # Periodic channel, body force G, emergent rigid patch over the whole channel, free-slip bed: the steady velocity
         # is uniform with 1/2 C_D a U^2 = G (exact). Observed relative error 4e-12 in both modes.

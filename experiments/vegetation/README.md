@@ -48,6 +48,14 @@ Ca = ρ C_D b U² l³ / (2 EI) and the buoyancy number B = B_l l³ / EI.
   2010). The slope between Ca = 300 and 3000 is −0.333, and R Ca^(1/3) = 0.89. This is consistent with the asymptotic
   effective length of about 0.9 Ca^(−1/3) in Luhar & Nepf (2011); the coefficient is still to be checked against the
   paper.
+- **Independent reference** (points and dotted shapes in the figure): the continuous elastica, integrated from the free
+  tip with RK4 and shooting on the tip angle (`elastica_reference_uniform` in `cases.jl`). This is a different method
+  from the model's discrete segments and Newton solve. The model converges to it at second order in the number of
+  segments for the drag and the tip position. With 80 segments it agrees within 0.9 % over Ca = 0.1-10⁴ (B ≤ 10), and
+  within 0.4 % for B = 100 up to Ca = 3162; beyond that the shooting reference is badly conditioned. The reference gives
+  R Ca^(1/3) = 0.890 at large Ca.
+- **Robustness:** from an upright stem at Ca ≳ 3000 Newton alone did not converge. The posture solver now applies the
+  load in stages when Newton fails, and counts postures that still fail (`VegetationModel.posture_failures`).
 - **Buoyancy:** it keeps the stem upright until Ca exceeds roughly B and leaves the large-Ca asymptote unchanged, as
   described by Luhar & Nepf (2011).
 
@@ -69,6 +77,14 @@ Ca = ρ C_D b U² l³ / (2 EI) and the buoyancy number B = B_l l³ / EI.
   0.28 m of their 0.50 m length. The canopy offers less drag, so the depth-mean velocity is 0.067 m/s instead of
   0.027 m/s for the rigid canopy. In the steady state the total drag of a flexible patch balances the driving force
   (test `test_verify_flexible_patch_momentum_balance`: to 10⁻⁶ after 1400 s).
+- **Flexible canopy against an independent coupled reference** (`flexible_canopy_reference` in `cases.jl`): the
+  continuous elastica in the velocity along the stem, iterated with the 1D momentum equation, whose canopy drag is
+  1/2 C_D a cos²θ(z) u|u| below the tip height, until posture and profile are steady. Run from rest to the steady
+  state (7000 s; the posture-flow feedback makes the flexible canopy adjust about twice as slowly as the rigid one),
+  the model matches it in both modes: velocity within 1.7·10⁻⁵ m/s (0.017 % of the surface velocity), stem tip at
+  (0.3770, 0.2824) m against (0.3769, 0.2825) m. Started from the reference state, the errors converge with the grid:
+  5.4·10⁻⁵ and 1.6·10⁻⁵ m/s, tip (0.67, 0.60) mm and (0.16, 0.13) mm for nz = 20 and 40
+  (test `test_validate_flexible_canopy_against_coupled_reference`).
 - **Individual stems vs. patch:** 25 rigid stems at random positions, with the lateral spacing of the patch density,
   give the patch velocity to 10⁻⁶ (test `test_verify_individual_stems_match_patch`).
 
@@ -203,14 +219,17 @@ Scripts
 -------
 
 - `plot_vegetation_reconfiguration.jl`: single flexible stem, R(Ca); a few seconds.
-- `plot_vegetation_channel.jl`: periodic channel references and grid convergence; about 3 min.
+- `plot_vegetation_channel.jl`: periodic channel references (rigid and flexible) and grid convergence; about 12 min.
 - `plot_vegetation_patch.jl`: head loss and the flexible-patch animation; about 1 min.
 - `plot_vegetation_waves.jl`: wave damping against Dalrymple et al. (1984); about 20 min.
 - `plot_vegetation_lock_exchange.jl`: lock exchange through canopies over the whole tank, front scaling; about 10 min.
 - `plot_vegetation_lock_exchange_canopies.jl`: lock exchange into vegetation in the right half, patches and individual
   rigid and flexible stems, vegetation drawn; about 35 min.
-- `cases.jl`: shared settings and references: the 1D canopy profile, the reconfiguration helper, the wave flume with
-  Dalrymple's decay coefficient, the canopy lock exchange (also used by the tests).
+- `cases.jl`: shared settings and references (also used by the tests):
+  - the rigid 1D canopy profile and the coupled flexible canopy reference;
+  - the reconfiguration helper and the independent elastica reference;
+  - the wave flume with Dalrymple's decay coefficient;
+  - the canopy lock exchange.
 - `run_oscillating_flow_with_flexible_vegetation.jl`: ported to the new model; qualitative (no reference).
 
 Output goes to `output_barotropic/vegetation_figures/`; the figures here are copies, the GIF reduced to every second

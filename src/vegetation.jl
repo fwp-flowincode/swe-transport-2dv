@@ -33,6 +33,7 @@ const VEGETATION_EXPLICIT_DRAG_LIMIT = 1.0     # -, max dt * |a_drag / u| of the
 const VEGETATION_POSTURE_TOL = 1e-10           # rad, Newton convergence of the segment angles
 const VEGETATION_POSTURE_MAX_ITER = 60         # -, Newton iterations per posture update
 const VEGETATION_POSTURE_FD_STEP = 1e-7        # rad, finite-difference step of the Newton Jacobian
+const VEGETATION_CONTINUATION_STAGES = (8, 32, 128)   # -, load-continuation stages tried when Newton fails
 const VEGETATION_MAX_ANGLE = 0.5 * pi - 1e-3   # rad, angles are limited to just below horizontal
 
 """
@@ -118,6 +119,7 @@ mutable struct VegetationModel
     patches::Vector{VegetationPatch}
     patch_theta::Vector{Matrix{Float64}}
     drag_rate::Matrix{Float64}      # 1/s, linearised drag rate per u-face at the last update (stability check)
+    posture_failures::Int           # -, posture solves that did not converge (also after load continuation)
 end
 
 function VegetationModel(stems::VegetationStem...; patches::AbstractVector{VegetationPatch}=VegetationPatch[])
@@ -127,7 +129,7 @@ function VegetationModel(stems::VegetationStem...; patches::AbstractVector{Veget
         p.n_segments >= 2 || throw(ArgumentError("patch n_segments must be at least 2"))
     end
     return VegetationModel(collect(VegetationStem, stems), collect(VegetationPatch, patches), [zeros(p.n_segments, 0) for p in patches],
-        zeros(0, 0))
+        zeros(0, 0), 0)
 end
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -283,7 +285,19 @@ function update_stem_posture!(theta::AbstractVector{<:Real}, velocity; length::R
     s = _StemSetup(length, base_x, base_z, diameter, drag_coefficient, bending_stiffness, net_buoyancy, rho0, dz, nz, water_level)
     converged = true
     if isfinite(bending_stiffness)
+        theta_start = copy(theta)
         converged = _solve_posture!(theta, s, velocity, pieces)
+        # WHY load continuation: from a posture far from the solution (e.g. upright stem, Ca >~ 3000) Newton can fail;
+        # ramping the load (velocity times sqrt(lambda), lambda = 1/n ... 1) and solving each stage from the previous
+        # one follows the solution branch from the start posture.
+        for stages in VEGETATION_CONTINUATION_STAGES
+            converged && break
+            copyto!(theta, theta_start)
+            for j in 1:stages
+                factor = sqrt(j / stages)
+                converged = _solve_posture!(theta, s, (k, x) -> factor * velocity(k, x), pieces)
+            end
+        end
     else
         fill!(theta, 0.0)
     end
@@ -325,7 +339,7 @@ stem_deflected_height(stem::VegetationStem) = (z = last(vegetation_path(stem)); 
 
 copy_vegetation(stem::VegetationStem) = VegetationStem(stem.config, copy(stem.theta), stem.force_x)
 copy_vegetation(vegetation::VegetationModel) = VegetationModel([copy_vegetation(s) for s in vegetation.stems],
-    copy(vegetation.patches), [copy(t) for t in vegetation.patch_theta], copy(vegetation.drag_rate))
+    copy(vegetation.patches), [copy(t) for t in vegetation.patch_theta], copy(vegetation.drag_rate), vegetation.posture_failures)
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Coupling to the flow
@@ -378,10 +392,11 @@ function vegetation_source!(accel::AbstractMatrix{<:Real}, vegetation::Vegetatio
             return i0, pos - i0
         end
         velocity(k, x) = (w = face_weights(x); (1.0 - w[2]) * u[k, w[1]] + w[2] * u[k, w[1] + 1])
-        _, fx_total, pcs = update_stem_posture!(stem.theta, velocity; length=cfg.height, base_x=cfg.base_x, base_z=cfg.base_z,
+        converged, fx_total, pcs = update_stem_posture!(stem.theta, velocity; length=cfg.height, base_x=cfg.base_x, base_z=cfg.base_z,
             diameter=cfg.diameter, drag_coefficient=cfg.drag_coefficient, bending_stiffness=cfg.bending_stiffness,
             net_buoyancy=cfg.net_buoyancy, rho0=rho0, dz=dz, nz=nz, water_level=water_level, pieces=pieces)
         stem.force_x = fx_total
+        converged || (vegetation.posture_failures += 1)
         scale = 1.0 / (rho0 * dx * dz * cfg.lateral_spacing)
         @inbounds for p in 1:pcs.n
             i0, t = face_weights(pcs.x[p])
@@ -406,9 +421,10 @@ function vegetation_source!(accel::AbstractMatrix{<:Real}, vegetation::Vegetatio
             water_level = nz * dz + eta[clamp(i, 1, nx)]
             column_velocity(k, x) = u[k, i]
             theta = @view theta_all[:, i]
-            update_stem_posture!(theta, column_velocity; length=patch.stem_height, base_x=x_face, diameter=patch.stem_diameter,
+            converged, _, _ = update_stem_posture!(theta, column_velocity; length=patch.stem_height, base_x=x_face, diameter=patch.stem_diameter,
                 drag_coefficient=patch.drag_coefficient, bending_stiffness=patch.bending_stiffness, net_buoyancy=patch.net_buoyancy,
                 rho0=rho0, dz=dz, nz=nz, water_level=water_level, pieces=pieces)
+            converged || (vegetation.posture_failures += 1)
             scale = weight * patch.stem_density / (rho0 * dz)
             @inbounds for p in 1:pieces.n
                 accel[pieces.row[p], i] -= pieces.fx[p] * scale

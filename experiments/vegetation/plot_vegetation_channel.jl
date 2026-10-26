@@ -9,7 +9,7 @@
 # The figures in figures/ are copies.
 #
 # Usage: julia --project=<path to the repository> experiments/vegetation/plot_vegetation_channel.jl
-# Run time: about 5 min.
+# Run time: about 12 min.
 
 # WHY: batch run without a display; same GR workstation choice as src/visualization.jl.
 get!(ENV, "GKSwstype", "100")
@@ -36,6 +36,7 @@ const EI_FLEXIBLE = 2e-5        # N m^2, bending stiffness of the flexible canop
 const NZ = 40                   # -, cells over the depth of the profile runs
 const CONVERGENCE_GRIDS = (10, 20, 40, 80)
 const T_END = 3000.0            # s, three viscous times H^2/nu
+const T_END_FLEXIBLE = 7000.0   # s, the flexible canopy needs about 6000 s to become steady (posture-flow feedback)
 const FIGURE_SIZE_PX = (1200, 460)
 const CONVERGENCE_SIZE_PX = (560, 440)
 const FIGURE_MARGIN_MM = 5Plots.mm
@@ -52,7 +53,8 @@ profile (m/s) and the model.
 """
 function channel_run(; use_hydrostatic, nz, G, stem_height, bending_stiffness=Inf)
     dt = nz >= 80 ? 0.025 : 0.1      # s, explicit viscous limit 2 nu dt / dz^2 <= 0.32
-    cfg = vegetation_case_config(length=L, depth=H, nx=NX, nz=nz, dt=dt, nt=round(Int, T_END / dt), use_hydrostatic=use_hydrostatic,
+    t_end = isfinite(bending_stiffness) ? T_END_FLEXIBLE : T_END
+    cfg = vegetation_case_config(length=L, depth=H, nx=NX, nz=nz, dt=dt, nt=round(Int, t_end / dt), use_hydrostatic=use_hydrostatic,
         periodic_x=true, variable_top_layer=false, pressure_solver_method="sparse", nu=NU, body_force_x=G)
     model = uniform_density_model(cfg)
     attach_vegetation!(model, VegetationModel(; patches=[VegetationPatch(x_start=0.0, x_end=L, stem_height=stem_height, stem_diameter=B,
@@ -96,6 +98,15 @@ u_top = linear_interpolation(HV, flexible[true][1], flexible[true][2])
 cauchy = VEG_RHO0 * CD * B * u_top^2 * HV^3 / (2EI_FLEXIBLE)
 @printf("  deflected height %.3f m of %.2f m, tip angle %.2f rad, Ca (canopy-top velocity) = %.1f; depth-mean u flexible %.4f vs rigid %.4f m/s\n",
     zs[end], HV, theta[end], cauchy, mean(flexible[true][2]), mean(submerged[true][2]))
+flex_ref = flexible_canopy_reference(; H=H, stem_length=HV, a=a, b=B, cd=CD, ei=EI_FLEXIBLE, G=G_SUBMERGED, nu=NU)
+for m in (true, false)
+    zf, uf, mf = flexible[m]
+    th = mf.vegetation.patch_theta[1][:, 1]
+    dsf = HV / length(th)
+    err = maximum(abs, uf .- linear_interpolation.(zf, Ref(flex_ref.z), Ref(flex_ref.u)))
+    @printf("  %s vs coupled reference: max |u - u_ref| = %.2e m/s (%.3f %% of the surface velocity), tip (%.4f, %.4f) m vs (%.4f, %.4f) m\n",
+        MODE_TITLE[m], err, 100 * err / flex_ref.u[end], dsf * sum(sin, th), dsf * sum(cos, th), flex_ref.tip_x, flex_ref.tip_z)
+end
 
 # Figures
 p1 = plot(xlabel="u (m/s)", ylabel="z (m)", title="Emergent rigid", legend=:bottomright, ylims=(0, H), xlims=(0.0, 0.04))
@@ -111,11 +122,15 @@ end
 hline!(p2, [HV]; color=:forestgreen, linestyle=:dot, label="stem height")
 p3 = plot(xlabel="u (m/s)", ylabel="z (m)", title="Submerged flexible vs. rigid", legend=:bottomright, ylims=(0, H))
 plot!(p3, submerged[true][2], submerged[true][1]; color=:gray, linewidth=2, label="rigid")
+plot!(p3, flex_ref.u, flex_ref.z; color=:black, linewidth=3, alpha=0.4, label="coupled 1D reference")
 for m in (true, false)
     plot!(p3, flexible[m][2], flexible[m][1]; color=MODE_COLOR[m], linestyle=MODE_STYLE[m], linewidth=2, label="flexible, $(MODE_TITLE[m])")
 end
 xscale = 0.6 * maximum(flexible[true][2]) / max(xs[end], eps())
 plot!(p3, xscale .* xs, zs; color=:forestgreen, linewidth=3, label="stem shape (x not to scale)")
+ds_ref = HV / (length(flex_ref.theta) - 1)
+plot!(p3, xscale .* [0.0; cumsum(ds_ref .* sin.(flex_ref.theta[1:end-1]))], [0.0; cumsum(ds_ref .* cos.(flex_ref.theta[1:end-1]))];
+    color=:black, linestyle=:dot, linewidth=2, label="reference stem shape")
 savefig(plot(p1, p2, p3; layout=(1, 3), size=FIGURE_SIZE_PX, left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM),
     joinpath(OUTPUT_DIR, "vegetation_channel_profiles.png"))
 

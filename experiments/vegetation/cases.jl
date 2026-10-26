@@ -245,3 +245,181 @@ function power_law_exponent(t::AbstractVector{<:Real}, x::AbstractVector{<:Real}
     lt, lx = log.(t[s]), log.(x[s])
     return sum((lt .- sum(lt) / length(lt)) .* (lx .- sum(lx) / length(lx))) / sum((lt .- sum(lt) / length(lt)) .^ 2)
 end
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Independent references for flexible stems (shooting on the continuous elastica equations)
+# ---------------------------------------------------------------------------------------------------------------------
+#
+# Continuous elastica of an inextensible stem (arc length s from the base, angle θ from the vertical, positive
+# downstream), clamped at the base and free at the tip, under the horizontal drag per unit length
+# f_x = 1/2 rho C_D b u|u| cos³θ and the vertical load per unit length f_z = -f_x tan θ + B_l (normal drag and net
+# buoyancy):
+#     θ' = T / EI,   T' = -cos θ F_x + sin θ F_z,   F_x' = -f_x,   F_z' = -f_z,   x' = sin θ,   z' = cos θ,
+# with T the moment and (F_x, F_z) the resultant of the loads beyond s, and θ(0) = 0, T(l) = F_x(l) = F_z(l) = 0. The
+# equations are integrated from the tip to the base with classical Runge-Kutta (4th order). This is a different method
+# from the model (src/vegetation.jl: discrete segments, cell-split loads, Newton on the segment angles); it serves as an
+# independent reference.
+
+# One RK4 integration from the tip (s = l) to the base: state (θ, T, F_x, F_z, z); returns θ and z at the base, and the
+# path (s, θ) on the integration grid. `u_of_z(z)` gives the horizontal velocity (m/s) at the height z above the base.
+function _elastica_from_tip(theta_tip, z_tip; length, b, cd, ei, buoyancy, rho, u_of_z, steps)
+    h = -length / steps
+    function rhs(y)
+        th, tq, fx, fz, z = y
+        u = u_of_z(z)
+        c, s = cos(th), sin(th)
+        load_x = 0.5 * rho * cd * b * u * abs(u) * c^3
+        load_z = -load_x * (c > 0 ? s / c : 0.0) + buoyancy
+        return (tq / ei, -c * fx + s * fz, -load_x, -load_z, c)
+    end
+    y = (theta_tip, 0.0, 0.0, 0.0, z_tip)
+    thetas = Vector{Float64}(undef, steps + 1)
+    thetas[1] = theta_tip
+    for i in 1:steps
+        k1 = rhs(y)
+        k2 = rhs(y .+ (h / 2) .* k1)
+        k3 = rhs(y .+ (h / 2) .* k2)
+        k4 = rhs(y .+ h .* k3)
+        y = y .+ (h / 6) .* (k1 .+ 2 .* k2 .+ 2 .* k3 .+ k4)
+        thetas[i + 1] = y[1]
+    end
+    return y, reverse(thetas)          # base state; θ from base to tip
+end
+
+"""
+    elastica_reference_uniform(cauchy; buoyancy_number=0.0, steps=20000) -> NamedTuple (R, tip_x, tip_z, theta)
+
+Independent reference for a stem of unit length in a uniform current at the Cauchy number Ca = rho C_D b U² l³/(2 EI)
+and the buoyancy number B = B_l l³ / EI (both dimensionless): reconfiguration number R = F / (1/2 rho C_D b l U²), tip
+position (tip_x, tip_z) relative to the base in units of l, and θ(s) on `steps` + 1 points from the base to the tip. In a
+uniform current the loads depend on θ only, so the equations are integrated from the tip with the tip angle as the only
+unknown, found by a downward scan from pi/2 and bisection on θ(0) = 0.
+"""
+function elastica_reference_uniform(cauchy::Real; buoyancy_number::Real=0.0, steps::Int=20000)
+    b, cd, l, ei, rho = 0.01, 1.0, 1.0, 1.0, VEG_RHO0
+    u = sqrt(2cauchy * ei / (rho * cd * b * l^3))
+    base(theta_tip) = first(first(_elastica_from_tip(theta_tip, 0.0; length=l, b=b, cd=cd, ei=ei, buoyancy=buoyancy_number * ei / l^3,
+        rho=rho, u_of_z=z -> u, steps=steps)))
+    # WHY the downward scan: θ(0) as a function of θ_tip has further, unphysical roots at smaller tip angles, where the
+    # integrated angle winds past -pi/2. The physical posture is the first root below θ_tip = pi/2, where θ(0) is
+    # positive. Range: checked against the model (second-order convergence) for Ca <= 10^4 at B <= 10 and Ca <= 3162 at
+    # B = 100. At large Ca with strong buoyancy the shooting from the tip becomes badly conditioned (θ(0) jumps by about
+    # 8 rad within 0.02 rad of the tip angle at Ca = 10^4, B = 100) and the scan finds an unphysical root.
+    hi = 0.5pi - 1e-9
+    lo = hi
+    f_lo = base(lo)
+    for j in 1:2000
+        lo = hi * (1 - j / 2000)
+        f_lo = base(lo)
+        f_lo < 0 && break
+    end
+    for _ in 1:100
+        mid = (lo + hi) / 2
+        f_mid = base(mid)
+        if sign(f_mid) == sign(f_lo)
+            lo, f_lo = mid, f_mid
+        else
+            hi = mid
+        end
+        hi - lo < 1e-14 && break
+    end
+    y, theta = _elastica_from_tip((lo + hi) / 2, 0.0; length=l, b=b, cd=cd, ei=ei, buoyancy=buoyancy_number * ei / l^3, rho=rho,
+        u_of_z=z -> u, steps=steps)
+    ds = l / steps
+    # tip position relative to the base (trapezoidal rule on the RK4 grid, error O(ds^2))
+    tip_x = ds * (sum(sin, theta) - 0.5 * (sin(theta[1]) + sin(theta[end])))
+    tip_z = ds * (sum(cos, theta) - 0.5 * (cos(theta[1]) + cos(theta[end])))
+    return (R=y[3] / (0.5 * rho * cd * b * l * u^2), tip_x=tip_x, tip_z=tip_z, theta=theta)
+end
+
+"""
+    flexible_canopy_reference(; H, stem_length, a, b, cd, ei, buoyancy=0.0, G, nu, M=2000, steps=4000, tol=1e-12)
+        -> NamedTuple (z, u, theta, s_z, tip_x, tip_z)
+
+Independent steady 1D reference of a flexible canopy (stem length `stem_length`, frontal area a = n b, stem width b,
+C_D, bending stiffness EI, net buoyancy per length) in a periodic channel of depth H driven by the body force G, with
+constant viscosity nu, free-slip bed and stress-free surface:
+
+    nu u'' = 1/2 C_D a cos²θ(z) phi(z) u|u| - G,
+
+with θ(z) the stem angle at the height z and phi the fraction of the cell below the tip height. The stem posture is the
+continuous elastica above (RK4 from the tip, `steps` steps) in the velocity along the stem u(z(s)); the outer iteration
+alternates posture (with z(s) from the previous iterate, so that the shooting keeps one unknown, the tip angle) and the
+velocity profile (Newton on M cells) until both change by less than `tol`. Returns the cell centres z (m), u (m/s), θ(s)
+from the base to the tip and the heights z(s) (m), and the tip position (m).
+"""
+function flexible_canopy_reference(; H, stem_length, a, b, cd, ei, buoyancy=0.0, G, nu, M=2000, steps=4000, tol=1e-12)
+    dz = H / M
+    zc = [(k - 0.5) * dz for k in 1:M]
+    ds = stem_length / steps
+    s_grid = [(j - 1) * ds for j in 1:(steps + 1)]
+    z_of_s = copy(s_grid)                          # start: upright stem
+    theta = zeros(steps + 1)
+    _, u = canopy_reference_profile(; H=H, hv=stem_length, a=a, cd=cd, G=G, nu=nu, M=M)   # rigid start
+    theta_tip_prev = 0.0
+    for outer in 1:200
+        # posture in the velocity u(z(s)) of the previous iterate (θ_tip by downward scan + bisection, as above)
+        u_along(s) = (z = linear_interpolation(s, s_grid, z_of_s); linear_interpolation(clamp(z, zc[1], zc[end]), zc, u))
+        function base_theta(theta_tip)
+            h = -ds
+            y = (theta_tip, 0.0, 0.0, 0.0)
+            path = Vector{Float64}(undef, steps + 1); path[steps + 1] = theta_tip
+            rhs(y, s) = (c = cos(y[1]); sn = sin(y[1]); v = u_along(s); lx = 0.5 * VEG_RHO0 * cd * b * v * abs(v) * c^3;
+                lz = -lx * (c > 0 ? sn / c : 0.0) + buoyancy; (y[2] / ei, -c * y[3] + sn * y[4], -lx, -lz))
+            for i in steps:-1:1
+                s = s_grid[i + 1]
+                k1 = rhs(y, s); k2 = rhs(y .+ (h / 2) .* k1, s + h / 2); k3 = rhs(y .+ (h / 2) .* k2, s + h / 2); k4 = rhs(y .+ h .* k3, s + h)
+                y = y .+ (h / 6) .* (k1 .+ 2 .* k2 .+ 2 .* k3 .+ k4)
+                path[i] = y[1]
+            end
+            return y[1], path
+        end
+        # WHY the start just above the previous tip angle: the posture changes little between outer iterations, and
+        # scanning from pi/2 in every iteration dominated the cost; the full scan is the fallback.
+        hi = 0.5pi - 1e-9
+        if outer > 1 && first(base_theta(min(theta_tip_prev + 0.02, hi))) > 0
+            hi = min(theta_tip_prev + 0.02, hi)
+        end
+        lo = hi; f_lo = first(base_theta(lo))
+        for j in 1:4000
+            lo = max(hi - j * 5e-4, 0.0); f_lo = first(base_theta(lo)); (f_lo < 0 || lo == 0.0) && break
+        end
+        for _ in 1:100
+            mid = (lo + hi) / 2; f_mid = first(base_theta(mid))
+            if sign(f_mid) == sign(f_lo); lo, f_lo = mid, f_mid; else hi = mid; end
+            hi - lo < 1e-15 && break
+        end
+        theta_tip_prev = (lo + hi) / 2
+        theta_new = last(base_theta(theta_tip_prev))
+        z_new = [0.0; cumsum(ds .* (cos.(theta_new[1:end-1]) .+ cos.(theta_new[2:end])) ./ 2)]
+        # canopy drag coefficient per cell: 1/2 C_D a <cos²θ> over the part of the cell below the tip
+        coef = zeros(M)
+        for k in 1:M
+            lo_z, hi_z = (k - 1) * dz, min(k * dz, z_new[end])
+            hi_z > lo_z || continue
+            zm = (lo_z + hi_z) / 2
+            th = linear_interpolation(linear_interpolation(zm, z_new, s_grid), s_grid, theta_new)
+            coef[k] = 0.5 * cd * a * cos(th)^2 * (hi_z - lo_z) / dz
+        end
+        # velocity profile for this drag (Newton, tridiagonal)
+        u_new = copy(u)
+        for _ in 1:100
+            diag = zeros(M); lower = zeros(M - 1); upper = zeros(M - 1); r = zeros(M)
+            for k in 1:M
+                if k > 1; r[k] += nu * (u_new[k - 1] - u_new[k]) / dz^2; lower[k - 1] = nu / dz^2; diag[k] -= nu / dz^2; end
+                if k < M; r[k] += nu * (u_new[k + 1] - u_new[k]) / dz^2; upper[k] = nu / dz^2; diag[k] -= nu / dz^2; end
+                r[k] += G - coef[k] * u_new[k] * abs(u_new[k])
+                diag[k] -= 2 * coef[k] * abs(u_new[k])
+            end
+            du = -(Tridiagonal(lower, diag, upper) \ r)
+            u_new .+= du
+            maximum(abs, du) < 1e-14 && break
+        end
+        change = max(maximum(abs, u_new .- u), maximum(abs, theta_new .- theta))
+        u .= 0.5 .* (u .+ u_new)                 # WHY under-relaxation: the posture-velocity iteration can overshoot
+        theta .= theta_new; z_of_s .= z_new
+        change < tol && break
+    end
+    tip_x = ds * (sum(sin, theta) - 0.5 * (sin(theta[1]) + sin(theta[end])))
+    return (z=zc, u=u, theta=theta, s_z=z_of_s, tip_x=tip_x, tip_z=z_of_s[end])
+end
