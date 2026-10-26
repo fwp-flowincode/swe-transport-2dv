@@ -11,6 +11,13 @@ Base.@kwdef mutable struct ModelConfig
     use_turbulence_model::Bool = false
     turbulence_mixing_length::Float64 = 0.0
     max_turbulent_viscosity::Float64 = 5e-4
+    # Turbulence closure: "none", "mixing_length" (nu_t = l^2 |du/dz|, also selected by use_turbulence_model) or
+    # "k_epsilon" (src/turbulence.jl: k-epsilon with buoyancy and vegetation terms and turbulent density diffusion;
+    # flat bed only). Evaluate with turbulence_closure(cfg).
+    turbulence_closure::String = "none"
+    # Bed roughness length z0 (m): > 0 applies a log-law quadratic bed friction c_b u|u| on the lowest row
+    # (c_b = (kappa/ln(z1/z0))^2, z1 = dz/2) and, with k-epsilon, the wall functions; 0 keeps the free-slip bed.
+    bed_roughness_length::Float64 = 0.0
     dt::Float64 = 0.0025
     nt::Int = 40000
     rayleigh_damping::Float64 = 0.01
@@ -78,6 +85,14 @@ creation (as `copy_config` workflows do) keeps the default consistent.
 use_variable_top_layer(cfg::ModelConfig) = cfg.variable_top_layer === nothing ? cfg.use_hydrostatic : cfg.variable_top_layer
 
 """
+    turbulence_closure(cfg) -> String
+
+Effective turbulence closure: `cfg.turbulence_closure` if set, otherwise "mixing_length" when the legacy flag
+`use_turbulence_model` is set, else "none".
+"""
+turbulence_closure(cfg::ModelConfig) = cfg.turbulence_closure != "none" ? cfg.turbulence_closure : (cfg.use_turbulence_model ? "mixing_length" : "none")
+
+"""
     output_case_tag(cfg) -> String
 
 Case tag used in the names of the tagged output files written by `run!`, e.g.
@@ -117,6 +132,8 @@ function copy_config(cfg::ModelConfig)
         use_turbulence_model=cfg.use_turbulence_model,
         turbulence_mixing_length=cfg.turbulence_mixing_length,
         max_turbulent_viscosity=cfg.max_turbulent_viscosity,
+        turbulence_closure=cfg.turbulence_closure,
+        bed_roughness_length=cfg.bed_roughness_length,
         dt=cfg.dt,
         nt=cfg.nt,
         rayleigh_damping=cfg.rayleigh_damping,
@@ -247,6 +264,7 @@ mutable struct Model{T<:Real}
     x_boundary_u_right_open::Bool
     x_boundary_u_right_profile::Any
     geometry::BedGeometry   # staircase bed masks (all cells wet for the flat bed)
+    turbulence::Any         # KEpsilonState with turbulence_closure = "k_epsilon", else nothing
 end
 
 function _linspace(start::Real, stop::Real, n::Int)
@@ -694,6 +712,7 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
         false,
         nothing,
         geometry,
+        turbulence_closure(cfg) == "k_epsilon" ? KEpsilonState(cfg.nz, cfg.nx; T=T) : nothing,
     )
 
     initialize_lock_exchange!(model; rho_left=cfg.rho_left, rho_right=cfg.rho_right)
@@ -730,6 +749,15 @@ function _check_model_config(cfg::ModelConfig)
     end
     if !(0.0 < cfg.top_layer_min_fraction < 1.0)
         throw(ArgumentError("top_layer_min_fraction must be in (0, 1)"))
+    end
+    if !(cfg.turbulence_closure in ("none", "mixing_length", "k_epsilon"))
+        throw(ArgumentError("turbulence_closure must be \"none\", \"mixing_length\" or \"k_epsilon\", got \"$(cfg.turbulence_closure)\""))
+    end
+    if cfg.bed_roughness_length < 0.0 || cfg.bed_roughness_length >= 0.5 * cfg.depth / cfg.nz
+        throw(ArgumentError("bed_roughness_length must be in [0, dz/2)"))
+    end
+    if (turbulence_closure(cfg) == "k_epsilon" || cfg.bed_roughness_length > 0.0) && cfg.bed_level !== nothing
+        throw(ArgumentError("turbulence_closure=\"k_epsilon\" and bed_roughness_length are implemented for the flat bed only (bed_level=nothing)"))
     end
     if !(cfg.transport_advection_scheme in ("upwind1", "tvd2"))
         throw(ArgumentError("transport_advection_scheme must be \"upwind1\" or \"tvd2\", got \"$(cfg.transport_advection_scheme)\""))
@@ -933,7 +961,14 @@ function _compute_effective_viscosity_u!(nu_eff_u::AbstractMatrix{<:Real}, model
 
     fill!(nu_eff_u, cfg.nu)
 
-    if cfg.use_turbulence_model && cfg.turbulence_mixing_length > 0.0
+    if model.turbulence !== nothing
+        # WHY no cap (max_turbulent_viscosity belongs to the mixing-length model): k-epsilon sets nu_t itself
+        turbulent_viscosity_u!(nu_eff_u, model.turbulence; periodic_x=cfg.periodic_x)
+        @. nu_eff_u += cfg.nu
+        return nu_eff_u
+    end
+
+    if turbulence_closure(cfg) == "mixing_length" && cfg.turbulence_mixing_length > 0.0
         ml2 = cfg.turbulence_mixing_length * cfg.turbulence_mixing_length
         # WHY rows 1 and nz (one-sided shear): the flux-form diffusion_term! couples the top and bottom rows to their
         # neighbours with the face viscosity 0.5*(nu[k] + nu[k +- 1]); without a turbulent value there, the coupling of
@@ -1025,6 +1060,15 @@ function step_forward!(model::Model)
             damp = max(0.0, 1.0 - cfg.rayleigh_damping * cfg.dt)
             @. ws.u_hat = ws.u_hat * damp
         end
+        if cfg.bed_roughness_length > 0.0
+            # Log-law bed friction on the lowest row (explicit): du/dt = -c_b |u1| u1 / dz.
+            cb = bed_friction_coefficient(cfg.bed_roughness_length, 0.5 * model.dz)
+            @inbounds for i in 1:nxp1
+                rate = cb * abs(st.u[1, i]) / model.dz
+                cfg.dt * rate > 1.0 && throw(ArgumentError("bed friction too stiff for the explicit step: dt * c_b |u| / dz = $(cfg.dt * rate) > 1"))
+                ws.u_hat[1, i] -= cfg.dt * rate * st.u[1, i]
+            end
+        end
         if cfg.sponge_length > 0.0 && cfg.sponge_rate > 0.0
             # WHY quadratic ramp and implicit factor: a smooth increase of the damping over a layer of one or more
             # wavelengths absorbs waves with little reflection; 1/(1 + dt*rate) is stable for any rate.
@@ -1060,6 +1104,13 @@ function step_forward!(model::Model)
             drag_rate = vegetation_drag_rate(model.vegetation)
             if cfg.dt * drag_rate > VEGETATION_EXPLICIT_DRAG_LIMIT
                 throw(ArgumentError("vegetation drag too stiff for the explicit step: dt * |a/u| = $(cfg.dt * drag_rate) > $(VEGETATION_EXPLICIT_DRAG_LIMIT); reduce dt"))
+            end
+            if model.turbulence !== nothing
+                # vegetation production P_v = work of the drag per unit mass (m^2/s^3), averaged from the u-faces to the cells
+                work = model.turbulence.veg_work
+                @inbounds for i in 1:cfg.nx, k in 1:cfg.nz
+                    work[k, i] = max(0.0, -0.5 * (ws.adv_u[k, i] * st.u[k, i] + ws.adv_u[k, i + 1] * st.u[k, i + 1]))
+                end
             end
             @. ws.u_hat = ws.u_hat + cfg.dt * ws.adv_u
         end
@@ -1254,8 +1305,19 @@ function step_forward!(model::Model)
             advect_density!(ws.rho_new, st.rho, st.u, st.w, cfg.dt, model.dx, model.dz, ws.density_ws; scheme=cfg.transport_advection_scheme, top_row_advective_form=true, periodic_x=cfg.periodic_x, active=masked ? geo.wet_cell : nothing, rho_min=model.rho_min_init, rho_max=model.rho_max_init)
         end
         _apply_wind_surface_density_mixing!(ws.rho_new, cfg, model.dz)
+        if model.turbulence !== nothing
+            # turbulent density diffusion K = nu_t / sigma_rho at the w-faces (implicit, conservative; top layer dz + eta)
+            ke = model.turbulence
+            implicit_vertical_diffusion!(ws.rho_new, (k, i) -> 0.5 * (ke.nu_t[k, i] + ke.nu_t[k + 1, i]) / KE_SIGMA_RHO,
+                (k, i) -> (variable_top && k == cfg.nz) ? model.dz + st.eta[i] : model.dz, cfg.dt, model.dz, ke)
+        end
         copyto!(st.rho, ws.rho_new)
         _correct_constituent_mass!(model)
+    end
+
+    if model.turbulence !== nothing
+        @timeit model.timers "step/k_epsilon" k_epsilon_step!(model.turbulence, st.u, st.w, st.rho, cfg.dt, model.dx, model.dz, cfg.nu,
+            cfg.g, cfg.rho0; periodic_x=cfg.periodic_x, bed_roughness=cfg.bed_roughness_length)
     end
 
     @timeit model.timers "step/final_pressure" begin

@@ -231,8 +231,8 @@ median deviation 7 %, largest 39 %.
 
 **Dunn, López & García (1996)** (flume runs with submerged rigid and flexible cylinders). The run data are transcribed
 in `cases.jl` (`DUNN1996_RIGID`, `DUNN1996_FLEXIBLE`, `dunn1996_run`): conditions, depths, frontal areas, canopy
-heights, bulk drag coefficients and, for the flexible runs, deflection angles and heights. A run-by-run comparison is
-not part of this experiment yet, for two reasons:
+heights, bulk drag coefficients and, for the flexible runs, deflection angles and heights. A run-by-run comparison with the
+constant mixing length is not meaningful, for two reasons:
 - **Turbulence model:** the depth-averaged velocity of a submerged canopy is set by the turbulent momentum exchange
   above and within the canopy, and our constant mixing length is not a canopy turbulence model. For rigid run 1, mixing
   lengths of 2, 4 and 8 cm give 0.78, 0.61 and 0.52 m/s against the measured 0.589 m/s. A comparison would test the
@@ -240,6 +240,24 @@ not part of this experiment yet, for two reasons:
 - **Flexible straws:** they bend at a corrugated hinge near the bed, their flexural rigidity was not measured, and
   according to the report they softened over the runs and swayed strongly. That is outside a quasi-static beam model
   with a known stiffness.
+
+**Dunn et al. (1996) with the k-epsilon closure** (`turbulence_closure = "k_epsilon"`, section 17 of the test
+documentation). The model is a standard k-epsilon closure with vegetation production. The vegetation weights
+C_fk = 1.0 and C_fε = 1.33 are attributed to López & García (2001) in the secondary literature, not checked against the
+paper. It reproduces open-channel flow (momentum balance exact, log law within 6 %). For the 12 rigid runs, with bed
+roughness from the flume's Manning n = 0.011, the depth-mean velocity comes out too low:
+
+| Drag coefficient | Mean model/measured | Mean deviation | Largest deviation |
+|---|---|---|---|
+| C_D = 1 | 0.93 | 8 % | 17 % |
+| measured C_DB per run | 0.89 | 12 % | 21 % |
+
+Grid and run length are converged. The result is very sensitive to C_fε: for six runs, 1.33 gives −9 % and 1.92
+gives +24 %.
+
+With C_fε = 1.33 the k-epsilon vegetation model has no bounded state in a homogeneous emergent canopy: k grows without
+limit. With C_fε = C_2 = 1.92 the turbulence level is undetermined. This is an open question; a run-by-run validation
+waits for the original formulation of López & García (2001), or for a wake-scale extension.
 
 Tests
 -----

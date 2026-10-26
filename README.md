@@ -29,7 +29,8 @@ Model
   obstacles; the non-hydrostatic projection then uses the sparse solver on the wet cells.
 - Optional extras:
   - molecular viscosity;
-  - mixing-length turbulence;
+  - mixing-length turbulence, or a k-epsilon closure with buoyancy and vegetation terms (`turbulence_closure`);
+  - log-law bed friction with wall functions (`bed_roughness_length`);
   - wind stress and wind-induced mixing;
   - Rayleigh damping and a Froude limiter for numerical stabilisation;
   - vegetation: canopy patches and individual stems, rigid or flexible (quasi-static elastica);

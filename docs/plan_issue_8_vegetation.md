@@ -212,6 +212,11 @@ turbulence model allows).
   (1996) run data transcribed; a comparison needs a canopy turbulence model (constant mixing length: depth-mean
   velocity of run 1 between 0.52 and 0.78 m/s for l = 2-8 cm, measured 0.589 m/s); the flexible straws (hinge,
   unmeasured stiffness, swaying) are outside the quasi-static beam model.
+- **k-epsilon closure** implemented (`turbulence_closure = "k_epsilon"`, bed wall functions, turbulent density
+  diffusion; verified: decaying turbulence, implicit diffusion, open-channel momentum balance and log law). Vegetation
+  terms after Lopez & Garcia (2001) (C_fk = 1.0, C_fe = 1.33, unverified): Dunn rigid runs 8 % too slow on average
+  (C_D = 1), very sensitive to C_fe; with C_fe = 1.33 k grows without bound in a homogeneous emergent canopy. Needs the
+  original paper or a wake-scale formulation before a validation test.
 - **Open:** dynamic flexible stems (waves, oscillating flow); vegetation turbulence (Nepf 1999); comparison with the
   flume data of Dunn et al. (1996) once the report is available; Luhar & Nepf (2011) coefficient check; the fully
   implicit free surface damps waves by about 2 pi²/N per period (a theta scheme would need time-averaged transports in
