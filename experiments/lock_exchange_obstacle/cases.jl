@@ -123,6 +123,24 @@ function leo_front_position(model::Model, drho::Real)
 end
 
 """
+    leo_energy(model) -> NamedTuple
+
+Cell-centred kinetic energy and gravitational potential energy of the density anomaly (J/m), summed over wet cells.
+The released potential energy is its initial value minus its current value (issue #5).
+"""
+function leo_energy(model::Model)
+    cfg, st, geo = model.config, model.state, model.geometry
+    kinetic, potential = 0.0, 0.0
+    @inbounds for i in 1:cfg.nx, k in geo.k_bed[i]:cfg.nz
+        uc = 0.5 * (st.u[k, i] + st.u[k, i + 1])
+        wc = 0.5 * (st.w[k, i] + st.w[k + 1, i])
+        kinetic += 0.5 * cfg.rho0 * (uc^2 + wc^2)
+        potential += cfg.g * (st.rho[k, i] - cfg.rho0) * (k - 0.5) * model.dz
+    end
+    return (kinetic=kinetic * model.dx * model.dz, potential=potential * model.dx * model.dz)
+end
+
+"""
     leo_obstacle_force(model) -> Float64
 
 Horizontal pressure force on the obstacle per unit width (N/m): sum over the obstacle rows of

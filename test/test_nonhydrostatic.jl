@@ -42,6 +42,34 @@ include(joinpath(@__DIR__, "test_common.jl"))
     NH_KINEMATIC_TOL = 1e-9        # round-off-level kinematic/continuity residual after the reordering fix
     NH_PERIOD_REL_TOL = 5e-3       # relative tolerance for the (still shallow-water) surface-wave period match
 
+    @testset "test_verify_nonhydrostatic_wall_return_closes_surface_budget" begin
+        # Issue #5: a circulation rising at the right wall and turning along the surface must not introduce
+        # predictor transport through the walls into the free-surface solve.
+        for method in ("spectral", "sparse"), masked in (false, true)
+            nx, nz = 24, 16
+            cfg = ModelConfig(nx=nx, nz=nz, length=1.5, depth=1.0, dt=0.002,
+                use_hydrostatic=false, pressure_solver_method=method,
+                rho_left=1000.0, rho_right=1000.0, nu=1e-6,
+                rayleigh_damping=0.0, apply_froude_limiter=false,
+                bed_level=masked ? zeros(nx) : nothing)
+            model = Model(cfg)
+            dx, dz = model.dx, model.dz
+            psi = [0.02 * sinpi(i / nx) * sinpi(k / nz) for k in 0:nz, i in 0:nx]
+            model.state.u .= (psi[2:end, :] .- psi[1:end-1, :]) ./ dz
+            model.state.w .= .-(psi[:, 2:end] .- psi[:, 1:end-1]) ./ dx
+            volume0 = compute_diagnostics(model)["water_volume"]
+
+            for _ in 1:20
+                step_forward!(model)
+                @test maximum(abs, model.ws.u_hat[:, [1, end]]) < TOL_IDENTITY
+                @test model.last_kinematic_mismatch < NH_KINEMATIC_TOL
+                div = div_x_u(model.state.u, dx) .+ div_z_w(model.state.w, dz)
+                @test maximum(abs, div) < NH_KINEMATIC_TOL
+            end
+            @test isapprox(compute_diagnostics(model)["water_volume"], volume0; atol=TOL_IDENTITY, rtol=0)
+        end
+    end
+
     @testset "test_verify_nonhydrostatic_free_surface_responds_to_internal_forcing" begin
         # WHY: before the section-14 reordering fix, the barotropic solve used the non-hydrostatic projection's
         # (exactly divergence-free) u_hat; summed over depth that forced the free-surface transport divergence to

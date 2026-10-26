@@ -18,12 +18,11 @@ using Printf
 
 include(joinpath(@__DIR__, "cases.jl"))
 
-# WHY 7: from t* ~ 7.5 the splash at the right wall drives a spurious thin jet along the free surface (top cell of the
-# fixed grid in the non-hydrostatic mode; see README, Limitations, and issue #5). All runs are clean up to t* = 7.
-const T_END_STAR = 7.0                      # -, simulated time in units of sqrt(a/g')
+# Continue through the wall splash and return flow; the energy samples guard against the surface jet of issue #5.
+const T_END_STAR = 12.0                     # -, simulated time in units of sqrt(a/g')
 const SAMPLE_INTERVAL_STAR = 0.05           # -, sampling interval of front position and force
 const ANIMATION_INTERVAL_STAR = 0.1         # -, time between animation frames
-const SNAPSHOT_TIMES_STAR = (0.0, 1.0, 2.0, 3.0, 5.0, 7.0)    # -
+const SNAPSHOT_TIMES_STAR = (0.0, 1.0, 3.0, 5.0, 9.0, 12.0)   # -
 const SWEEP_DRHO = (1.0, 10.0, 50.0)        # kg/m^3
 const SWEEP_N = 292                         # -, cells per direction (2 mm)
 const DOCUMENTED_DRHO = 10.0                # kg/m^3
@@ -63,8 +62,8 @@ end
 """
     run_case(n, drho; frames=false, snapshots=false) -> NamedTuple
 
-Run drho (kg/m^3) on n x n cells up to T_END_STAR; returns the series of t*, front position (m) and obstacle force
-(N/m), the max CFL number, and optionally the animation and snapshot heatmaps.
+Run drho (kg/m^3) on n x n cells up to T_END_STAR; returns the series of t*, front position (m), obstacle force
+(N/m), kinetic and released potential energy (J/m), the max CFL number, and optionally animation and snapshot heatmaps.
 """
 function run_case(n::Int, drho::Real; frames::Bool=false, snapshots::Bool=false)
     cfg = lock_exchange_obstacle_config(; n=n, drho=drho, t_end_star=T_END_STAR, write_plots=false, write_animation=false,
@@ -82,6 +81,9 @@ function run_case(n::Int, drho::Real; frames::Bool=false, snapshots::Bool=false)
     t_star = [0.0]
     front = [leo_front_position(model, drho)]       # m
     force = [leo_obstacle_force(model)]             # N/m
+    initial_energy = leo_energy(model)
+    kinetic = [initial_energy.kinetic]              # J/m
+    released_potential = [0.0]                     # J/m
     anim = frames ? Animation() : nothing
     frames && frame(anim, density_heatmap(model, drho; title="t* = 0.0", size=FRAME_SIZE_PX))
     panels = Dict{Float64,Any}()
@@ -94,10 +96,13 @@ function run_case(n::Int, drho::Real; frames::Bool=false, snapshots::Bool=false)
         # PERF: two scans of u and w against a sparse Poisson solve per step.
         max_cfl = max(max_cfl, maximum(abs, model.state.u) * cfg.dt / model.dx + maximum(abs, @view(model.state.w[2:end-1, :])) * cfg.dt / model.dz)
         ts = step * cfg.dt / tscale
-        if step % sample_stride == 0
+        if step % sample_stride == 0 || step == cfg.nt
             push!(t_star, ts)
             push!(front, leo_front_position(model, drho))
             push!(force, leo_obstacle_force(model))
+            energy = leo_energy(model)
+            push!(kinetic, energy.kinetic)
+            push!(released_potential, initial_energy.potential - energy.potential)
         end
         if frames && step % frame_stride == 0
             frame(anim, density_heatmap(model, drho; title=@sprintf("t* = %.1f", ts), size=FRAME_SIZE_PX))
@@ -105,16 +110,20 @@ function run_case(n::Int, drho::Real; frames::Bool=false, snapshots::Bool=false)
         if snapshots && haskey(snapshot_steps, step)
             panels[snapshot_steps[step]] = density_heatmap(model, drho; title=@sprintf("t* = %g", snapshot_steps[step]), colorbar=false)
         end
-        if step % progress_stride == 0
-            @printf("t* = %5.1f | front x/a = %.2f | max|u| = %.3f m/s | max CFL so far = %.3f | wall %.0f s\n",
-                ts, front[end] / LEO_A, maximum(abs, model.state.u), max_cfl, time() - t0)
+        if step % progress_stride == 0 || step == cfg.nt
+            energy = leo_energy(model)
+            released = initial_energy.potential - energy.potential
+            energy_ratio = released > 0.0 ? energy.kinetic / released : NaN
+            @printf("t* = %5.1f | front x/a = %.2f | max|u| = %.3f m/s | K/released PE = %.3f | max CFL so far = %.3f | wall %.0f s\n",
+                ts, front[end] / LEO_A, maximum(abs, model.state.u), energy_ratio, max_cfl, time() - t0)
         end
     end
     wet_rho = model.state.rho[model.geometry.wet_cell]
     @printf("CASE=lock_exchange_obstacle_drho%g_n%d FULL_WALL_SECONDS=%.1f | max CFL %.3f (tvd2 limit %.1f) | density [%.4f, %.4f]\n",
         drho, n, time() - t0, max_cfl, TVD2_CFL_LIMIT, minimum(wet_rho), maximum(wet_rho))
     max_cfl >= TVD2_CFL_LIMIT && @warn "CFL number reached the tvd2 monotonicity limit; reduce dt" max_cfl
-    return (t_star=t_star, front=front, force=force, max_cfl=max_cfl, anim=anim, panels=panels, model=model)
+    return (t_star=t_star, front=front, force=force, kinetic=kinetic, released_potential=released_potential,
+        max_cfl=max_cfl, anim=anim, panels=panels, model=model)
 end
 
 mkpath(OUTPUT_DIR)
@@ -125,7 +134,8 @@ if MODE == "sweep"
         local r = run_case(SWEEP_N, drho)
         results[drho] = r
         npzwrite(joinpath(OUTPUT_DIR, @sprintf("sweep_drho%g_n%d.npz", drho, SWEEP_N)),
-            Dict("t_star" => r.t_star, "front_m" => r.front, "force_N_per_m" => r.force, "rho_final" => copy(r.model.state.rho)))
+            Dict("t_star" => r.t_star, "front_m" => r.front, "force_N_per_m" => r.force, "rho_final" => copy(r.model.state.rho),
+                "kinetic_J_per_m" => r.kinetic, "released_potential_J_per_m" => r.released_potential))
     end
     # Boussinesq scaling: front x/a and force F / (rho0 g' a^2) against t* should collapse for all drho
     fig_front = plot(xlabel="t* = t sqrt(g'/a) (-)", ylabel="front position x/a (-)", legend=:bottomright, size=LINE_SIZE_PX,
@@ -145,7 +155,8 @@ if MODE == "sweep"
 elseif MODE == "documented"
     r = run_case(DOCUMENTED_N, DOCUMENTED_DRHO; frames=true, snapshots=true)
     stem = joinpath(OUTPUT_DIR, @sprintf("lock_exchange_obstacle_drho%g_n%d", DOCUMENTED_DRHO, DOCUMENTED_N))
-    npzwrite(stem * ".npz", Dict("t_star" => r.t_star, "front_m" => r.front, "force_N_per_m" => r.force, "rho_final" => copy(r.model.state.rho)))
+    npzwrite(stem * ".npz", Dict("t_star" => r.t_star, "front_m" => r.front, "force_N_per_m" => r.force, "rho_final" => copy(r.model.state.rho),
+        "kinetic_J_per_m" => r.kinetic, "released_potential_J_per_m" => r.released_potential))
     gif(r.anim, stem * ".gif"; fps=ANIMATION_FPS)
     savefig(plot([r.panels[ts] for ts in SNAPSHOT_TIMES_STAR]...; layout=(2, 3), size=SNAPSHOT_SIZE_PX,
         left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM), stem * "_snapshots.png")

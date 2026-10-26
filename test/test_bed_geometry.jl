@@ -288,6 +288,54 @@ include(joinpath(@__DIR__, "../experiments/lock_exchange_obstacle/cases.jl"))
         @test_throws ArgumentError step_forward!(Model(bed_test_config(use_hydrostatic=false, bed_level=bed)))
     end
 
+    @testset "test_verify_obstacle_energy_uses_wet_cells" begin
+        cfg = lock_exchange_obstacle_config(n=73, drho=10.0, t_end_star=0.0)
+        model = Model(cfg)
+        fill!(model.state.u, 1.0)
+        fill!(model.state.w, 2.0)
+        fill!(model.state.rho, cfg.rho0 + 10.0)
+        model.state.rho[.!model.geometry.wet_cell] .= 1e6   # unused solid-cell density must not enter the energy
+        energy = leo_energy(model)
+        wet_area = cfg.length * cfg.depth - sum(model.geometry.bed_level) * model.dx
+        expected_potential = cfg.g * 10.0 * model.dx * sum(0.5 .* (cfg.depth^2 .- model.geometry.bed_level .^ 2))
+        @test isapprox(energy.kinetic, 0.5 * cfg.rho0 * 5.0 * wet_area; rtol=TOL_IDENTITY)
+        @test isapprox(energy.potential, expected_potential; rtol=TOL_IDENTITY)
+    end
+
+    @testset "test_verify_nonhydrostatic_lock_exchange_wall_splash_energy" begin
+        # Issue #5 appears only after wall impact and can be hidden by coarse-grid numerical diffusion.
+        ENERGY_RELEASE_RATIO_MAX = 1.05
+        for obstacle in (false, true)
+            cfg = lock_exchange_obstacle_config(n=146, drho=10.0, t_end_star=12.0)
+            obstacle || (cfg.bed_level = nothing)
+            model = Model(cfg)
+            initialize_lock_exchange_obstacle!(model, 10.0)
+            initial = compute_diagnostics(model)
+            potential0 = leo_energy(model).potential
+            velocity_scale = sqrt(2 * leo_reduced_gravity(10.0) * 2LEO_A)
+            max_energy_ratio, max_top_speed = 0.0, 0.0
+            for step in 1:cfg.nt
+                step_forward!(model)
+                if step % 100 == 0 || step == cfg.nt
+                    energy = leo_energy(model)
+                    released = potential0 - energy.potential
+                    @test released > 0.0
+                    max_energy_ratio = max(max_energy_ratio, energy.kinetic / released)
+                    max_top_speed = max(max_top_speed, maximum(abs, @view(model.state.u[end, :])))
+                    @test model.last_kinematic_mismatch < TOL_MODEL_IDENTITY
+                end
+            end
+            final = compute_diagnostics(model)
+            @test max_energy_ratio < ENERGY_RELEASE_RATIO_MAX
+            @test max_top_speed < velocity_scale
+            @test abs(final["water_volume"] - initial["water_volume"]) < BED_VOLUME_TOL
+            @test isapprox(final["constituent_mass"], initial["constituent_mass"]; rtol=TOL_MODEL_IDENTITY)
+            @test final["div_max"] < TOL_MODEL_IDENTITY
+            @test final["rho_min"] >= cfg.rho0
+            @test final["rho_max"] <= cfg.rho0 + 10.0
+        end
+    end
+
     @testset "test_verify_masked_poisson_manufactured_solution" begin
         # Manufactured solution on the wet cells above a raised flat bed of height d: p = cos(pi x/L) cos(pi (z-d)/(H-d))
         # has zero normal derivative at the side walls, the bed and the top, and Laplacian

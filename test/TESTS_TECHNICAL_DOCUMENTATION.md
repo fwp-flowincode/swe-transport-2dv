@@ -990,6 +990,14 @@ Validation section: non-zero differences in velocity and free-surface states.
 
 ### Non-hydrostatic free surface (section 14)
 
+### test_verify_nonhydrostatic_wall_return_closes_surface_budget
+
+Issue #5 regression: initialize a discrete streamfunction circulation that rises at the right wall and turns along the
+surface. For both pressure solvers, with and without the explicit flat-bed mask, check that the predictor wall velocities
+stay zero, water volume is conserved, and the final velocities close continuity and the surface kinematic condition.
+Imposing wall velocities only after the barotropic solve and pressure projection fails these checks: the solves must
+see the same boundary transport as the final velocity.
+
 ### test_verify_nonhydrostatic_free_surface_responds_to_internal_forcing
 
 Purpose: regression guard for the rigid-lid coupling fix (section 14). A lock exchange run in non-hydrostatic mode (purely
@@ -1249,6 +1257,23 @@ and m after 400 steps; measured about 4e-11). (2) Lock exchange over the obstacl
 velocities $(\hat u,\hat w)$ are divergence-free in every wet cell (below 1e-10 1/s against a velocity scale
 $u/\Delta x\approx0.1$ 1/s; measured 8e-13), volume and mass are conserved, u is zero on all closed faces. (3) The
 spectral solver raises `ArgumentError` with solid cells.
+
+### test_verify_obstacle_energy_uses_wet_cells
+
+Check `leo_energy` against uniform analytical kinetic energy and the exact integral of a constant density anomaly's
+potential energy above the staircase bed. An arbitrary solid-cell density must not contribute. Velocities are averaged
+to cell centres, matching the issue #5 diagnostic, not a staggered-face energy norm.
+
+### test_verify_nonhydrostatic_lock_exchange_wall_splash_energy
+
+Run the obstacle experiment and the same tank without the obstacle to t* = 12 on a 4 mm grid, with TVD2 momentum and
+density transport, physical viscosity, no Rayleigh damping and no Froude limiter. Require kinetic energy below 1.05 times
+released anomaly potential energy at every sample, top speed below sqrt(2 g' 2a), conserved volume and constituent mass,
+bounded density, and round-off continuity and kinematic residuals. This covers the previously undocumented wall-return
+phase; the 2 mm experiment sweep supplies the finer-grid check.
+
+The wall-predictor enforcement added in PR #7 is essential: reversing just that ordering reproduces the reported
+surface jet and artificial energy growth at 2 mm. The fixed top-cell geometry was not the cause of that defect.
 
 ### test_verify_masked_poisson_manufactured_solution
 
