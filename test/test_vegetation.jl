@@ -128,6 +128,37 @@ vegetation_test_config(; kwargs...) = vegetation_case_config(; kwargs...)
         end
     end
 
+    @testset "test_verify_luhar_nepf_2011_published_postures" begin
+        # Luhar & Nepf (2011) use the same blade model (drag on the velocity normal to the blade, cos²θ per unit length,
+        # buoyancy, elastica). Published values (p. 2006-2007, Fig. 2):
+        # (a) neutrally buoyant blade at Ca = 32: effective length l_e/l = 0.30, deflected height h/l = 0.61 (observed
+        #     0.2995 and 0.6079 at 80 segments);
+        # (b) zero stiffness at B⁻¹Ca = 3.2: the blade stays straight at the angle of their Eq. 12, sinθ = (B⁻¹Ca) cos²θ,
+        #     i.e. cos²θ = (sqrt(1 + 4r²) - 1)/(2r²): θ = 58.9°, l_e/l = cos³θ = 0.138, h/l = cosθ = 0.517 (published 59°,
+        #     0.14, 0.52). Our model needs EI > 0; at fixed B⁻¹Ca it approaches the limit as B grows, the error falling
+        #     about as B^(-1/2) (stiffness boundary layer of thickness ~ l B^(-1/2) at the base): h/l errors 0.079, 0.028,
+        #     0.009 for B = 1e2, 1e3, 1e4 (160 segments).
+        PUBLISHED_TOL = 0.005               # -, the published values are rounded to two digits
+        RATIO = 3.2
+        BUOYANCY_NUMBERS = (1e2, 1e3, 1e4)
+        REDUCTION_MIN = 2.5                 # -, error reduction per decade of B (B^(-1/2): 3.2)
+        LIMIT_TOL = 0.015                   # -, at B = 1e4
+        r, theta = reconfiguration_number(32.0; n_segments=80)
+        @test abs(r - 0.30) < PUBLISHED_TOL
+        @test abs(sum(cos, theta) / 80 - 0.61) < PUBLISHED_TOL
+        c = sqrt((sqrt(1 + 4RATIO^2) - 1) / (2RATIO^2))       # cos θ of the straight blade
+        @test abs(rad2deg(acos(c)) - 59) < 0.5 && abs(c^3 - 0.14) < PUBLISHED_TOL && abs(c - 0.52) < PUBLISHED_TOL
+        errors_h = Float64[]; errors_le = Float64[]
+        for bn in BUOYANCY_NUMBERS
+            r, theta = reconfiguration_number(RATIO * bn; n_segments=160, buoyancy_number=bn)
+            push!(errors_h, abs(sum(cos, theta) / 160 - c))
+            push!(errors_le, abs(r - c^3))
+        end
+        @test all(errors_h[1:end-1] ./ errors_h[2:end] .> REDUCTION_MIN)
+        @test all(errors_le[1:end-1] ./ errors_le[2:end] .> REDUCTION_MIN)
+        @test errors_h[end] < LIMIT_TOL && errors_le[end] < LIMIT_TOL
+    end
+
     @testset "test_validate_flexible_canopy_against_coupled_reference" begin
         # Flexible submerged canopy in a periodic channel (stem length H/2, a = 4 1/m, EI = 2e-5 N m^2, constant nu):
         # steady velocity profile and stem posture against the independent coupled 1D reference

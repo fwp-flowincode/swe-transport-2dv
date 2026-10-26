@@ -216,8 +216,12 @@ turbulence model allows).
   diffusion; verified: decaying turbulence, implicit diffusion, open-channel momentum balance and log law). Vegetation
   terms after Lopez & Garcia (1997, Eqs. 26-27; C_fk = 1.0, C_fe = 1.33, C1 on the eps vegetation term) and their
   free-surface eps condition. Homogeneous canopy balance eps/P_v = 0.9975 (test). Dunn rigid runs overpredicted by 19 %
-  (measured C_DB) to 24 % (C_D = 1) on average, as Lopez & Garcia's own model does (secondary currents in the flume);
-  run-1 profile within 10 % of their computed profile above the canopy (test).
+  (measured C_DB) to 24 % (C_D = 1) on average, as Lopez & Garcia's own model does (secondary currents in the flume).
+- **Further comparisons from the provided reports** (tests): Luhar & Nepf (2011) published postures (exact to the printed
+  digits, zero-stiffness limit approached as B^(-1/2)); Dunn Appendix C profiles (rigid runs: shape in the canopy, median
+  deviation 5 %); Lopez & Garcia computed profiles of runs 1, 9, 13, 17 (velocity 0.92-1.03, stress peak 0.97-1.05);
+  their plant-density series (bed shear within a few per cent; Manning n up to 1.5 times theirs over dense canopies in
+  deep water, not resolved).
 - **Open:** dynamic flexible stems (waves, oscillating flow); vegetation turbulence (Nepf 1999); comparison with the
   flume data of Dunn et al. (1996) once the report is available; Luhar & Nepf (2011) coefficient check; the fully
   implicit free surface damps waves by about 2 pi²/N per period (a theta scheme would need time-averaged transports in

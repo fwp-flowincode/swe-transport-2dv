@@ -227,12 +227,16 @@ accurate to 10 % and resolving 1 mN).
   blade bends close to the base; the buoyant foam blade stays nearly straight at a nearly constant angle.
 
 The test `test_validate_luhar_nepf_2011_blade_drag` checks the forces of at least 5 mN, except the 5 cm HDPE blade:
-median deviation 7 %, largest 39 %.
+median deviation 7 %, largest 39 %. Their blade model is the same as ours, and `test_verify_luhar_nepf_2011_published_postures`
+reproduces the values printed in the paper: l_e/l = 0.30 and h/l = 0.61 at Ca = 32 (ours 0.2995, 0.6079), and the
+zero-stiffness solution (a straight blade at 59° for B⁻¹Ca = 3.2), which our model approaches as B grows (error about
+B^(-1/2), 0.009 in h/l at B = 10⁴).
 
 **Dunn, López & García (1996)** (flume runs with submerged rigid and flexible cylinders). The run data are transcribed
 in `cases.jl` (`DUNN1996_RIGID`, `DUNN1996_FLEXIBLE`, `dunn1996_run`): conditions, depths, frontal areas, canopy
-heights, bulk drag coefficients and, for the flexible runs, deflection angles and heights. A run-by-run comparison with the
-constant mixing length is not meaningful, for two reasons:
+heights, bulk drag coefficients, for the flexible runs deflection angles and heights, and the measured profiles of
+velocity, Reynolds stress and local drag coefficient of all 18 runs (Appendix C, `DUNN1996_PROFILES`). A run-by-run
+comparison with the constant mixing length is not meaningful, for two reasons:
 - **Turbulence model:** the depth-averaged velocity of a submerged canopy is set by the turbulent momentum exchange
   above and within the canopy, and our constant mixing length is not a canopy turbulence model. For rigid run 1, mixing
   lengths of 2, 4 and 8 cm give 0.78, 0.61 and 0.52 m/s against the measured 0.589 m/s. A comparison would test the
@@ -241,24 +245,53 @@ constant mixing length is not meaningful, for two reasons:
   according to the report they softened over the runs and swayed strongly. That is outside a quasi-static beam model
   with a known stiffness.
 
-**Dunn et al. (1996) with the k-epsilon closure** (`turbulence_closure = "k_epsilon"`, section 17 of the test
-documentation). The vegetation terms and the free-surface condition for ε follow López & García (1997, WES Technical
-Report WRP-CP-10, Eqs. 26-27): C_fk = 1.0, C_fε = 1.33, with C_1 multiplying the vegetation term in the ε equation. The
-closure reproduces open-channel flow (momentum balance exact, log law within 6 %). Run with `run_dunn_k_epsilon.jl`
-(about 4 min). For the 12 rigid runs, with bed roughness from the flume's Manning n = 0.011, the depth-mean velocity
-comes out too high:
+**Dunn et al. (1996) with the k-epsilon closure** (`plot_vegetation_dunn_k_epsilon.jl`; `turbulence_closure =
+"k_epsilon"`, section 17 of the test documentation). The vegetation terms and the free-surface condition for ε follow
+López & García (1997, WES Technical Report WRP-CP-10, Eqs. 26-27): C_fk = 1.0, C_fε = 1.33, with C_1 multiplying the
+vegetation term in the ε equation (without C_1, as the formula is often quoted, k grows without bound in an emergent
+canopy). The closure reproduces open-channel flow (momentum balance exact, log law within 6 %). Each run is a periodic
+channel with the measured bulk drag coefficient C_DB and a smooth bed (z0 = 5e-6 m from the flume's Manning
+n = 0.011). The flexible runs are computed as rigid canopies of the measured deflected height, as López & García did.
 
-| Drag coefficient | Mean model/measured | Range |
-|---|---|---|
-| C_D = 1 | 1.24 | 1.17-1.31 |
-| measured C_DB per run | 1.19 | 1.09-1.28 |
+![Velocity profiles of the 18 runs: model, measurements, López & García](figures/vegetation_dunn_velocity.png)
 
-Grid and run length are converged. López & García's own k-epsilon model overpredicts these runs in the same way; they
-attribute it to secondary currents in the 0.91 m wide flume, which a 2DV model cannot represent. For run 1 our velocity
-profile lies within 10 % of their computed profile from the canopy top upwards (0.90-1.03 of theirs; inside the canopy
-0.98 at z = 0.10 m and 0.68 near the bed, where ours is closer to the measurement). Both are tested in
-`test_turbulence.jl`. A version without the factor C_1 (as the formula is often quoted) gives unbounded k in an emergent
-canopy.
+![Reynolds-stress profiles of the 18 runs](figures/vegetation_dunn_stress.png)
+
+- **Against the k-epsilon results of López & García** (their Figs. 6.1, 6.2, 6.4, 6.5, runs 1, 9, 13, 17; digitized
+  from the scanned report, `LG1997_PROFILES`): our velocity is 0.92-1.03 of theirs at every height (about 5 % lower above
+  the canopy), the stress peak at the canopy top 0.97-1.05 of theirs, the stress in the lower canopy 0.68-1.35 (ours
+  lower near the bed, higher in the middle of the canopy).
+- **Against the measurements:** both 2D models overpredict the velocities. Depth mean against the measured Q/(b H):
+
+  | Runs | Drag coefficient | Mean model/measured | Range |
+  |---|---|---|---|
+  | rigid 1-12 | C_D = 1 | 1.24 | 1.17-1.31 |
+  | rigid 1-12 | measured C_DB | 1.19 | 1.09-1.28 |
+  | flexible 13-18 | measured C_DB | 1.25 | 1.05-1.55 |
+
+  The measured Reynolds stress at the canopy top is only 0.12-0.83 of the 2D momentum balance g S (H − h_p), which both
+  models satisfy. López & García attribute both to secondary currents in the 0.91 m wide flume, which a 2DV model cannot
+  represent. The shape of the velocity profile in the canopy, u(z)/u(h_p), agrees with the measurements in the rigid
+  runs (median deviation 5 %, largest 21 %, in the sparse runs 6, 7, 12). The flexible runs scatter more (runs 14, 16:
+  strongly bent straws, 51° and 65°).
+
+**Flow resistance against plant density** (`plot_vegetation_manning.jl`): the numerical experiment of López & García
+(1997, Figs. 6.16-6.18; S = 0.0036, h_p = 0.10 m, D = 6.4 mm, smooth bed, 0.16-1581 stems/m²), run at their computed
+depths. The figures are labelled q = 1.21 m²/s; the text gives 1.12 m²/s, and so does n = H^(5/3) S^(1/2)/q with their
+digitized H and n (1.13 ± 0.03 m²/s).
+
+![Bed shear, Manning n and discharge against plant density](figures/vegetation_manning.png)
+
+- The momentum transfer to the bed, u*_bed/sqrt(g H S), agrees with their Fig. 6.16 within a few per cent over three
+  decades of H a.
+- Manning's n: at low density ours follows the smooth-bed log law (0.0093 at their depth), theirs is 0.011. Above
+  about 40 stems/m² ours is higher, up to 1.27 times theirs at 158 stems/m² and 1.5 times at 800-1600 stems/m². Over
+  these dense canopies in deep water (H/h_p = 6-9) our velocity profile above the canopy corresponds to a roughness
+  length of about h_p/2, theirs to about h_p/10. The difference is converged in time and grid and insensitive to C_D;
+  switching off the vegetation terms increases the resistance further. Not resolved.
+
+Tested in `test_turbulence.jl`: the four runs against López & García, the rigid-run profile shapes against the
+measurements, and the bed shear and n of the density series (1.6-160 stems/m²).
 
 Tests
 -----
@@ -282,11 +315,15 @@ Details: section 16 of `test/TESTS_TECHNICAL_DOCUMENTATION.md`.
 Published data
 --------------
 
-The standard laboratory data sets for submerged rigid and flexible canopies are not available here in machine-readable
-form. These are Dunn, López & García (1996), University of Illinois Hydraulic Engineering Series 51, and the
-compilation used by Huthoff, Augustijn & Hulscher (2007). Their repositories block automated downloads. With the PDFs
-in `docs/` (gitignored), the run tables can be digitised and compared (bulk velocity; profiles as far as the
-turbulence model allows).
+Transcribed or digitized in `cases.jl` from the PDFs in `docs/` (gitignored, not part of the repository):
+- Dunn, López & García (1996), University of Illinois Hydraulic Engineering Series 51: run conditions (Tables 4.1,
+  5.1-5.5) and the horizontally averaged profiles of all 18 runs (Appendix C);
+- López & García (1997), WES Technical Report WRP-CP-10: model constants and boundary conditions, the computed
+  k-epsilon profiles of runs 1, 9, 13, 17 (Figs. 6.1, 6.2, 6.4, 6.5) and the plant-density series (Figs. 6.16, 6.18),
+  digitized from the scan;
+- Luhar & Nepf (2011): blade parameters (Table 1), forces (Fig. 4) and the published model values.
+
+The compilation of Huthoff, Augustijn & Hulscher (2007) is not available here.
 
 Scripts
 -------
@@ -296,6 +333,9 @@ Scripts
 - `plot_vegetation_patch.jl`: head loss and the flexible-patch animation; about 1 min.
 - `plot_vegetation_waves.jl`: wave damping against Dalrymple et al. (1984); about 20 min.
 - `plot_vegetation_luhar_nepf.jl`: flexible blades against the laboratory data of Luhar & Nepf (2011); a few seconds.
+- `plot_vegetation_dunn_k_epsilon.jl`: the 18 runs of Dunn et al. (1996) with k-epsilon against the measured profiles and
+  the results of López & García (1997); about 6 min.
+- `plot_vegetation_manning.jl`: flow resistance against plant density, after López & García (1997); about 8 min.
 - `plot_vegetation_lock_exchange.jl`: lock exchange through canopies over the whole tank, front scaling; about 10 min.
 - `plot_vegetation_lock_exchange_canopies.jl`: lock exchange into vegetation in the right half, patches and individual
   rigid and flexible stems, vegetation drawn; about 35 min.
@@ -315,6 +355,8 @@ frame and 640 px width.
     julia --project=. experiments/vegetation/plot_vegetation_patch.jl
     julia --project=. experiments/vegetation/plot_vegetation_waves.jl
     julia --project=. experiments/vegetation/plot_vegetation_luhar_nepf.jl
+    julia --project=. experiments/vegetation/plot_vegetation_dunn_k_epsilon.jl
+    julia --project=. experiments/vegetation/plot_vegetation_manning.jl
     julia --project=. experiments/vegetation/plot_vegetation_lock_exchange.jl
     julia --project=. experiments/vegetation/plot_vegetation_lock_exchange_canopies.jl
 

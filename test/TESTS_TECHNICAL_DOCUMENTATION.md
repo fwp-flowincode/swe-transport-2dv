@@ -650,10 +650,20 @@ In a homogeneous canopy without shear the k equation then drives $\varepsilon\to
 equation $\varepsilon\to(C_1C_{f\varepsilon}/C_2)P_v$; with $C_{f\varepsilon}=(C_2/C_1)C_{fk}$ (their p. 24, after Burke
 1982) both agree, and $C_{f\varepsilon}=1.33$ gives $0.9975$ (test). The level of k is neutral, so it drifts slowly in an
 emergent canopy; a wake length scale would fix it. An earlier version without $C_1$ gave $\varepsilon/P_v=0.693$ and
-unbounded k. Against the 12 rigid runs of Dunn et al. (1996) the model overpredicts the measured depth-mean velocity by
-24 % ($C_D=1$) or 19 % (measured $C_{DB}$) on average (`experiments/vegetation/run_dunn_k_epsilon.jl`). Lopez & Garcia's
-own k-epsilon model overpredicts in the same way; they attribute it to secondary currents in the flume, which a 2DV model
-cannot resolve. Our run-1 profile lies within 10 % of their computed profile from the canopy top upwards (test).
+unbounded k.
+
+**Comparison with Lopez & Garcia (1997) and Dunn et al. (1996)** (`experiments/vegetation/plot_vegetation_dunn_k_epsilon.jl`,
+`plot_vegetation_manning.jl`). Flexible runs are computed as rigid canopies of the deflected height, as Lopez & Garcia
+did. Against their computed k-epsilon profiles (runs 1, 9, 13, 17, digitized from Figs. 6.1, 6.2, 6.4, 6.5): velocity
+0.92-1.03 of theirs, stress peak 0.97-1.05, stress in the lower canopy 0.68-1.35. Against the measurements: the depth-mean
+velocity is 1.09-1.29 times the measured Q/(bH) (rigid runs, measured $C_{DB}$; 1.17-1.31 with $C_D=1$), and the measured
+stress at the canopy top is only 0.12-0.83 of the 2D momentum balance $gS(H-h_p)$. Lopez & Garcia's model overpredicts
+in the same way; they attribute both to secondary currents in the 0.91 m wide flume. The shape of the velocity profile in
+the canopy, $u/u(h_p)$, agrees with the measurements (median deviation 4.8 %, largest 21 %). In their plant-density
+series (Figs. 6.16, 6.18) the momentum transfer to the bed agrees within a few per cent, but over dense canopies in deep
+water (H/h_p = 6-9) our model gives more resistance: Manning n up to 1.25 (160 stems/m²) and 1.53 (1581 stems/m²) times
+theirs at their depth. Our profile above the canopy then corresponds to a roughness length of about $h_p/2$; with the
+vegetation terms switched off the resistance is higher still. Converged in time and grid; not resolved.
 
 ## Test-by-test documentation
 
@@ -1371,6 +1381,11 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The maske
   needs about 6000 s; at 3000 s the error was still $2\cdot10^{-4}$ m/s). Velocity error below $10^{-4}$ m/s and tip error
   below 1.5 mm at $n_z=20$, and both at least halved at $n_z=40$ (observed $5.4\cdot10^{-5}$ and $1.6\cdot10^{-5}$ m/s,
   tip (0.67, 0.60) mm and (0.16, 0.13) mm; surface velocity 0.098 m/s, deflected height 0.283 m).
+- `test_verify_luhar_nepf_2011_published_postures`: the published values of Luhar & Nepf (2011) for their (and our) blade
+  model: $l_e/l=0.30$, $h/l=0.61$ at Ca = 32, B = 0 (observed 0.2995, 0.6079); the zero-stiffness solution of their
+  Eq. 12, a straight blade with $\sin\theta=(B^{-1}Ca)\cos^2\theta$ ($\theta$ = 58.9°, $l_e/l=0.138$, $h/l=0.517$ for
+  $B^{-1}Ca=3.2$; published 59°, 0.14, 0.52), approached by our model at fixed $B^{-1}Ca$ as B grows: errors fall by more
+  than 2.5 per decade of B (about $B^{-1/2}$, the stiffness boundary layer at the base), below 0.015 at $B=10^4$.
 - `test_validate_luhar_nepf_2011_blade_drag`: laboratory data. Drag of flexible model blades in uniform flow (Luhar &
   Nepf 2011; HDPE stiffness-dominated, silicone foam buoyancy-dominated; their blade properties, C_D = 1.95, no
   fitting); forces read from their Fig. 4. Forces of at least 5 mN of the 25 cm HDPE and the 5 cm and 25 cm foam
@@ -1418,9 +1433,22 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The maske
   (observed +6.0 %, consistent with the wake of channel flows); $\nu_t$ peaks at mid-depth ($z/H=0.53$).
 - `test_verify_k_epsilon_vegetation_balance`: homogeneous emergent canopy; $\varepsilon/P_v\to C_1C_{f\varepsilon}/C_2
   =0.9975$ within $10^{-3}$ below the two surface rows (observed 0.9975).
-- `test_validate_k_epsilon_dunn_run1_against_lopez_garcia`: run 1 of Dunn et al. (1996) with the measured $C_{DB}$;
-  profile within 12 % of the computed k-epsilon profile of Lopez & Garcia (1997, Fig. 6.1, read from the figure) for
-  $z\ge0.10$ m (observed 0.90-1.03); depth-mean velocity 1.1-1.3 times the measured value (observed 1.20).
+- `test_validate_k_epsilon_canopies_against_lopez_garcia`: runs 1, 9, 13, 17 of Dunn et al. (1996) (measured $C_{DB}$;
+  flexible runs as rigid canopies of the deflected height) against the computed profiles of Lopez & Garcia (1997,
+  Figs. 6.1, 6.2, 6.4, 6.5; digitized from the scan: frames and ticks located in the image, the thick k-epsilon dots
+  separated from data symbols by size and fill). Velocity within 10 % at all heights (observed 0.92-1.03), stress peak
+  within 8 % (0.97-1.05), stress below $0.8h_p$ within 40 % (0.68-1.35), depth mean 1.0-1.3 times the measured
+  (1.05-1.20).
+- `test_validate_k_epsilon_rigid_canopies_against_dunn_profiles`: laboratory data. The 12 rigid runs against the
+  measured horizontally averaged velocity profiles (Appendix C of the report). Compared is the shape in the canopy,
+  $u(z)/u(h_p)$, because the magnitudes and the stress above the canopy are affected by secondary currents: every point
+  within 25 % (observed 21 %), median below 7 % (4.8 %); depth mean 1.05-1.35 times the measured (1.09-1.29). nz = 20
+  (profiles within 3 % of nz = 40).
+- `test_validate_k_epsilon_plant_density_series_against_lopez_garcia`: their numerical experiment (Figs. 6.16, 6.18;
+  S = 0.0036, $h_p$ = 0.10 m, q = 1.12 m²/s, smooth bed), 1.6-160 stems/m², at their computed depth: bed shear ratio
+  $u_{*b}/\sqrt{gHS}$ within 8 % (observed 0.98-1.00), Manning n within 30 % (observed 0.95-1.25, growing with density;
+  see section 17), n increasing with density. The figures are labelled q = 1.21 m²/s; the text and the digitized H and n
+  give 1.12-1.13 m²/s.
 - `test_verify_turbulence_closure_selection`: default and legacy flag, state creation, invalid choices rejected.
 
 ## Additional validation scripts and literature basis

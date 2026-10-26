@@ -2,7 +2,7 @@
 # Run with the full suite (runtests.jl) or on its own: julia --project=. test/test_turbulence.jl
 
 include(joinpath(@__DIR__, "test_common.jl"))
-# Dunn et al. (1996) run data and the Lopez & Garcia (1997) reference profile.
+# Dunn et al. (1996) run data and profiles, the Lopez & Garcia (1997) reference profiles and the canopy channel helper.
 include(joinpath(@__DIR__, "..", "experiments", "vegetation", "cases.jl"))
 
 const TURB_RHO0 = 1000.0        # kg/m^3
@@ -118,34 +118,80 @@ end
         @test isapprox(mean(ke.eps[INTERIOR_ROWS, :]) / mean(ke.veg_work[INTERIOR_ROWS, :]), ke.cfe * KE_C1_VALUE / KE_C2_VALUE; atol=RATIO_TOL)
     end
 
-    @testset "test_validate_k_epsilon_dunn_run1_against_lopez_garcia" begin
-        # Submerged rigid canopy, run 1 of Dunn et al. (1996) (H = 0.335 m, h_p = 0.117 m, a = 1.09 1/m, S = 0.0036), k-epsilon
-        # with the vegetation terms of Lopez & Garcia (1997), measured C_DB = 1.01, smooth bed (z0 = 5e-6 m). Reference: their
-        # computed k-epsilon profile (Fig. 6.1, read from the figure, LG1997_RUN1 in experiments/vegetation/cases.jl). From the
-        # canopy top upwards our profile lies within 12 % of theirs (observed 0.90-1.03). Both 2D models overpredict the
-        # measured depth-mean velocity Q/(bH) (ours 1.20 times; theirs about 1.3 times from their figure), which Lopez &
-        # Garcia attribute to secondary currents in the flume.
-        PROFILE_RTOL = 0.12
-        OVERPREDICTION_RANGE = (1.1, 1.3)
-        d = dunn1996_run(1)
-        nz = 40
-        dz = d.H / nz
-        dt = min(0.01, 0.2 * dz^2 / 5e-3)
-        cfg = vegetation_case_config(length=1.0, depth=d.H, nx=4, nz=nz, dt=dt, nt=round(Int, 400 / dt), use_hydrostatic=true, periodic_x=true,
-            variable_top_layer=false, pressure_solver_method="sparse", nu=1e-6, body_force_x=9.81 * d.S, turbulence_closure="k_epsilon",
-            bed_roughness_length=5e-6)
-        model = uniform_density_model(cfg)
-        attach_vegetation!(model, VegetationModel(; patches=[VegetationPatch(x_start=0.0, x_end=1.0, stem_height=d.hp, stem_diameter=DUNN1996_D,
-            stem_density=d.a / DUNN1996_D, drag_coefficient=d.cdb)]))
-        for _ in 1:cfg.nt
-            step_forward!(model)
+    @testset "test_validate_k_epsilon_canopies_against_lopez_garcia" begin
+        # Submerged canopies of Dunn et al. (1996), runs 1, 9 (rigid) and 13, 17 (flexible, as rigid canopies of the deflected
+        # height), measured C_DB, smooth bed (dunn1996_k_epsilon in experiments/vegetation/cases.jl). Reference: the computed
+        # k-epsilon profiles of Lopez & Garcia (1997), same model equations and constants (Figs. 6.1, 6.2, 6.4, 6.5,
+        # digitized, LG1997_PROFILES). Observed (nz = 40): velocity 0.92-1.03 of theirs at all heights (about 5 % lower
+        # above the canopy); stress peak at the canopy top 0.97-1.05 of theirs (their peaks are partly hidden by the canopy
+        # line); stress below 0.8 h_p 0.68-1.35 of theirs (ours lower near the bed, higher in the middle of the canopy).
+        # Both models overpredict the measured mean velocity Q/(bH), ours by 1.05-1.20 for these runs; Lopez & Garcia
+        # attribute this to secondary currents in the flume, which reduce the measured stress above the canopy.
+        VELOCITY_RTOL = 0.10
+        PEAK_RTOL = 0.08
+        CANOPY_STRESS_RTOL = 0.40
+        OVERPREDICTION_RANGE = (1.0, 1.3)
+        for run in (1, 9, 13, 17)
+            r = dunn1996_k_epsilon(run)
+            g = LG1997_PROFILES[run]
+            ours_u = linear_interpolation.(g.uz, Ref(r.z), Ref(r.u))
+            @test all(abs.(ours_u ./ g.u .- 1) .< VELOCITY_RTOL)
+            @test isapprox(maximum(r.tau), maximum(g.tau); rtol=PEAK_RTOL)
+            low = g.tz .< 0.8 * r.run.hp
+            ours_tau = linear_interpolation.(g.tz[low], Ref(r.zf), Ref(r.tau))
+            @test all(abs.(ours_tau ./ g.tau[low] .- 1) .< CANOPY_STRESS_RTOL)
+            @test OVERPREDICTION_RANGE[1] < mean(r.u) / r.run.U < OVERPREDICTION_RANGE[2]
         end
-        u = vec(mean(model.state.u[:, 1:end-1]; dims=2))
-        z = [(k - 0.5) * dz for k in 1:nz]
-        above = LG1997_RUN1_Z .>= 0.10
-        ours = linear_interpolation.(LG1997_RUN1_Z[above], Ref(z), Ref(u))
-        @test all(abs.(ours ./ LG1997_RUN1_U[above] .- 1) .< PROFILE_RTOL)
-        @test OVERPREDICTION_RANGE[1] < mean(u) / d.U < OVERPREDICTION_RANGE[2]
+    end
+
+    @testset "test_validate_k_epsilon_rigid_canopies_against_dunn_profiles" begin
+        # Laboratory data: the 12 rigid runs of Dunn et al. (1996), horizontally averaged velocity profiles (Appendix C,
+        # DUNN1996_PROFILES). The measured velocities are lower than any 2D model gives (depth mean: observed 1.09-1.29 times
+        # the measured Q/(bH)), and the measured stress at the canopy top is only 0.12-0.83 of the 2D momentum balance
+        # g S (H - h_p) that the model satisfies (secondary currents, Lopez & Garcia 1997, p. 58). The shape inside the
+        # canopy is compared instead: u(z)/u(h_p) of the model against the measured u(z)/u(h_p) (h_p: measured point
+        # nearest the canopy top). Observed (nz = 20, which changes the profiles by at most 3 % against nz = 40): 79 points,
+        # median deviation 4.8 %, largest 21 % (sparse runs 6, 7, 12, where the model's velocity drops more in the canopy).
+        SHAPE_MAX = 0.25
+        SHAPE_MEDIAN = 0.07
+        OVERPREDICTION_RANGE = (1.05, 1.35)
+        deviations = Float64[]
+        for run in 1:12
+            r = dunn1996_k_epsilon(run; nz=20)
+            p = DUNN1996_PROFILES[run]
+            _, itop = findmin(abs.(p.z .- r.run.hp))
+            ours = linear_interpolation.(p.z, Ref(r.z), Ref(r.u))
+            inside = findall((p.z .< r.run.hp) .& (eachindex(p.z) .!= itop))
+            append!(deviations, abs.((ours[inside] ./ ours[itop]) ./ (p.u[inside] ./ p.u[itop]) .- 1))
+            @test OVERPREDICTION_RANGE[1] < mean(r.u) / r.run.U < OVERPREDICTION_RANGE[2]
+        end
+        @test maximum(deviations) < SHAPE_MAX
+        @test median(deviations) < SHAPE_MEDIAN
+    end
+
+    @testset "test_validate_k_epsilon_plant_density_series_against_lopez_garcia" begin
+        # Numerical experiment of Lopez & Garcia (1997), Figs. 6.16 and 6.18: S = 0.0036, h_p = 0.10 m, D = 6.4 mm,
+        # q = 1.12 m²/s, smooth bed (their wall functions, E = 9), stem densities 1.6-160 stems/m² (cases 3, 5, 7, 9 of
+        # lg1997_manning_case), run at their computed depth H. Reference values are theirs (digitized, LG1997_* in
+        # experiments/vegetation/cases.jl).
+        # - Momentum transfer to the bed u*_bed/sqrt(g H S) (Fig. 6.16): observed 0.98-1.00 of theirs (dz = 0.02 m; with
+        #   dz = 0.01 m 1.00-1.08, the wall function depends on the first cell).
+        # - Manning n = H^(5/3) S^(1/2) / q at their depth (Fig. 6.18): observed 0.95, 1.04, 1.14, 1.25 of theirs; the
+        #   difference grows with density (1.53 at 1581 stems/m²): over dense canopies in deep water our profile above the
+        #   canopy is rougher (effective z0 about h_p/2). At low density our n follows the smooth-bed log law (0.0092 at
+        #   their depth), theirs is 0.011. Not resolved; the bound documents the present agreement.
+        CASES = (3, 5, 7, 9)
+        DZ = 0.02                   # m
+        BED_SHEAR_RTOL = 0.08
+        MANNING_RTOL = 0.30
+        n_values = Float64[]
+        for i in CASES
+            r = lg1997_manning_case(i; dz=DZ)
+            @test isapprox(r.bed_shear, LG1997_BED_SHEAR[i]; rtol=BED_SHEAR_RTOL)
+            @test isapprox(r.n, LG1997_MANNING_N[i]; rtol=MANNING_RTOL)
+            push!(n_values, r.n)
+        end
+        @test issorted(n_values)
     end
 
     @testset "test_verify_turbulence_closure_selection" begin
