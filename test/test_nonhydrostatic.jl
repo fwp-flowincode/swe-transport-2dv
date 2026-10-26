@@ -4,7 +4,7 @@
 include(joinpath(@__DIR__, "test_common.jl"))
 
 @testset "Non-hydrostatic" begin
-    @testset "test_nonhydrostatic_branch_produces_pressure_correction" begin
+    @testset "test_verify_nonhydrostatic_branch_produces_pressure_correction" begin
         cfg = ModelConfig(nx=40, nz=12, dt=5e-4, nt=1, use_hydrostatic=false, momentum_advection_scheme="tvd2")
         model = Model(cfg)
         for _ in 1:30
@@ -16,7 +16,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test isfinite(d["nonhydro_pcorr_max"])
     end
 
-    @testset "test_nonhydrostatic_solution_differs_from_hydrostatic" begin
+    @testset "test_verify_nonhydrostatic_solution_differs_from_hydrostatic" begin
         base = ModelConfig(nx=40, nz=12, dt=5e-4, nt=1, momentum_advection_scheme="tvd2", rayleigh_damping=0.01)
         cfg_h = copy_config(base)
         cfg_h.use_hydrostatic = true
@@ -91,7 +91,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test maximum(abs, div) < NH_KINEMATIC_TOL
     end
 
-    @testset "test_nonhydrostatic_surface_wave_period_matches_shallow_water_not_full_dispersion" begin
+    @testset "test_verify_nonhydrostatic_surface_wave_period_matches_shallow_water_not_full_dispersion" begin
         # WHY: this is a documented CURRENT LIMITATION, not a physics validation (contrast the test_verify_* /
         # test_validate_* naming convention). The reordering fix above lets eta respond to internal (baroclinic)
         # forcing, but a pure free-surface gravity wave (uniform density, so no baroclinic pressure gradient at all)
@@ -189,7 +189,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
     end
 
     @testset "test_validate_nonhydrostatic_dirichlet_surface_wave_matches_full_dispersion" begin
-        # Companion to test_nonhydrostatic_surface_wave_period_matches_shallow_water_not_full_dispersion above (same
+        # Companion to test_verify_nonhydrostatic_surface_wave_period_matches_shallow_water_not_full_dispersion above (same
         # domain and setup, k*H~1.57 so the two relations differ by >25%): with nonhydro_surface_dirichlet=true (docs
         # section 15) the SAME kind of pure free-surface gravity wave becomes genuinely dispersive, converging to the
         # full relation omega^2=g*k*tanh(k*H) instead of the shallow-water one.

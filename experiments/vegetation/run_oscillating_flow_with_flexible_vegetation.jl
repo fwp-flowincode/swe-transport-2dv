@@ -4,7 +4,8 @@ using Printf
 include(joinpath(@__DIR__, "common.jl"))
 
 # Ported to the vegetation model of issue #8 (physical stem parameters: bending stiffness EI, lateral spacing of the
-# row of stems; no tuning factors). A quantitative reference follows in step 2 of docs/plan_issue_8_vegetation.md.
+# row of stems; no tuning factors). Qualitative only: the stems are quasi-static (no mass, added mass or damping); the
+# dynamic stem model and a quantitative reference are step 3 of docs/plan_issue_8_vegetation.md (separate issue).
 
 cfg = ModelConfig(
     length=12.0,

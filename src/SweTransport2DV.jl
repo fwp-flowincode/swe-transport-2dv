@@ -25,7 +25,7 @@ export water_volume, constituent_mass, boundary_normal_flux, cfl_numbers
 export reduced_gravity, internal_wave_speed, froude_number
 export grad_x_c, grad_x_c!, grad_z_c, grad_z_c!, div_x_u, div_x_u!, div_z_w, div_z_w!
 export advection_term_u, advection_term_u!, advection_term_w, advection_term_w!
-export advection_term_rho, advection_term_rho!, advect_density_upwind, advect_density_upwind!, advect_density, advect_density!
+export advection_term_rho, advection_term_rho!, advect_density, advect_density!
 export buoyancy, diffusion_term, diffusion_term!
 export solve_hydrostatic_pressure, solve_hydrostatic_pressure!
 export build_poisson_matrix, solve_nonhydrostatic_pressure, PressureCorrectionSolver
@@ -33,7 +33,7 @@ export solve!
 export QUIVER_STRIDE, QUIVER_TARGET_COUNT_X, QUIVER_TARGET_COUNT_Z, QUIVER_TARGET_LENGTH_FACTOR
 export plot_state, create_animation, plot_pressure_buoyancy_diagnostics
 export ModelConfig, Model, BarotropicSolver, solve_variable_thickness!, BedGeometry
-export top_layer_face_thickness!, advect_density_upwind_top_layer!, advect_density_top_layer!, use_variable_top_layer
+export top_layer_face_thickness!, advect_density_top_layer!, use_variable_top_layer
 export VegetationStemConfig, VegetationStem, VegetationModel, VegetationPatch, patch_frontal_area
 export KEpsilonState, k_epsilon_step!, turbulent_viscosity_u!, implicit_vertical_diffusion!, bed_friction_coefficient, turbulence_closure
 export KE_C_MU_VALUE, KE_C1_VALUE, KE_C2_VALUE

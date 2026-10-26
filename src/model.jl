@@ -1318,10 +1318,11 @@ function step_forward!(model::Model)
         end
         _apply_wind_surface_density_mixing!(ws.rho_new, cfg, model.dz)
         if model.turbulence !== nothing
-            # turbulent density diffusion K = nu_t / sigma_rho at the w-faces (implicit, conservative; top layer dz + eta)
+            # turbulent density diffusion K = nu_t / sigma_rho at the w-faces (implicit, conservative; k-epsilon runs on the
+            # fixed grid only, so every layer has the thickness dz)
             ke = model.turbulence
             implicit_vertical_diffusion!(ws.rho_new, (k, i) -> 0.5 * (ke.nu_t[k, i] + ke.nu_t[k + 1, i]) / KE_SIGMA_RHO,
-                (k, i) -> (variable_top && k == cfg.nz) ? model.dz + st.eta[i] : model.dz, cfg.dt, model.dz, ke)
+                (k, i) -> model.dz, cfg.dt, model.dz, ke)
         end
         copyto!(st.rho, ws.rho_new)
         _correct_constituent_mass!(model)

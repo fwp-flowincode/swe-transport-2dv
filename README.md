@@ -87,7 +87,7 @@ Folder layout
 - `test/`: test suite (`runtests.jl`, which includes one `test_*.jl` file per functional area) and technical
   documentation (`TESTS_TECHNICAL_DOCUMENTATION.md`).
 - `experiments/`: one folder per experiment (scripts, README, `figures/`), plus `validation/`,
-  `benchmarks/`, `common/` and `maintenance/`.
+  `benchmarks/` and `common/`.
 - `analysis/`: Python evaluation tools, e.g. `analysis/lock_exchange/` (bulk reference values and
   evaluation of model runs, see its README).
 
@@ -186,19 +186,6 @@ spectral one cannot represent a Dirichlet condition) and is implemented for the 
 a full spectral-method step's total cost. Details, the physical derivation, and a second defect found and fixed while validating
 this (a "trivial" reference-density pressure contribution that otherwise dominates the correction's magnitude): section 15 of
 `test/TESTS_TECHNICAL_DOCUMENTATION.md`.
-
-Archive legacy root outputs (safe cleanup)
-------------------------------------------
-
-To keep only per-case subfolders in output_barotropic and archive old root-level files
-without deleting them:
-
-```pwsh
-julia --project=. experiments/maintenance/archive_legacy_root_outputs.jl
-```
-
-This moves root-level files into a timestamped folder:
-- output_barotropic/_legacy_root_archive/<timestamp>/
 
 Plotting backend note
 ---------------------

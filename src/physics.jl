@@ -857,39 +857,6 @@ function advect_density(
 end
 
 """
-    advect_density_upwind!(rho_new, rho, u, w, dt, dx, dz, ws; rho_min, rho_max)
-
-First-order upwind transport step; equivalent to `advect_density!(...; scheme="upwind1")`.
-"""
-function advect_density_upwind!(
-    rho_new::AbstractMatrix{<:Real},
-    rho::AbstractMatrix{<:Real},
-    u::AbstractMatrix{<:Real},
-    w::AbstractMatrix{<:Real},
-    dt::Real,
-    dx::Real,
-    dz::Real,
-    ws::DensityWorkspace;
-    rho_min=nothing,
-    rho_max=nothing,
-)
-    return advect_density!(rho_new, rho, u, w, dt, dx, dz, ws; scheme="upwind1", rho_min=rho_min, rho_max=rho_max)
-end
-
-function advect_density_upwind(
-    rho::AbstractMatrix{<:Real},
-    u::AbstractMatrix{<:Real},
-    w::AbstractMatrix{<:Real},
-    dt::Real,
-    dx::Real,
-    dz::Real;
-    rho_min=nothing,
-    rho_max=nothing,
-)
-    return advect_density(rho, u, w, dt, dx, dz; scheme="upwind1", rho_min=rho_min, rho_max=rho_max)
-end
-
-"""
     top_layer_face_thickness!(h_face, eta, dz)
 
 Fill `h_face` (length `nx + 1`, m) with the top-layer thickness at the u-faces, `dz + eta_face`, where `eta_face` is
@@ -922,7 +889,7 @@ step use), `w_bot = w[nz, :]` the vertical velocity at the lower face of the top
 
 WHY: if `h_new - h_old = dt * (w_bot - div(h_face*u))` holds exactly (it does when `eta_new` comes from the
 barotropic solve and `w` from the top-layer continuity), a uniform density stays uniform and the total mass
-`sum(rho*h)*dx` is conserved to round-off. The legacy kernel `advect_density_upwind!` sets the top-face flux to zero
+`sum(rho*h)*dx` is conserved to round-off. The fixed-grid flux form (`advect_density!`, `top_row_advective_form=false`) sets the top-face flux to zero
 although the discrete velocity there is `d eta/dt`; with rho ~ 1000 kg/m^3 that acts as a spurious source of
 rho*eta_t*dt/dz per step in the top row.
 Source: free-surface z-layer budget as in Casulli & Walters (2000), Int. J. Numer. Methods Fluids 32, 331-348, and the
@@ -974,29 +941,6 @@ function advect_density_top_layer!(
     end
 
     return rho_new
-end
-
-"""
-    advect_density_upwind_top_layer!(rho_new, rho, u, w, dt, dx, dz, ws, h_top_face, eta_old, eta_new; rho_min, rho_max)
-
-First-order upwind variable-top-layer transport; equivalent to `advect_density_top_layer!(...; scheme="upwind1")`.
-"""
-function advect_density_upwind_top_layer!(
-    rho_new::AbstractMatrix{<:Real},
-    rho::AbstractMatrix{<:Real},
-    u::AbstractMatrix{<:Real},
-    w::AbstractMatrix{<:Real},
-    dt::Real,
-    dx::Real,
-    dz::Real,
-    ws::DensityWorkspace,
-    h_top_face::AbstractVector{<:Real},
-    eta_old::AbstractVector{<:Real},
-    eta_new::AbstractVector{<:Real};
-    rho_min=nothing,
-    rho_max=nothing,
-)
-    return advect_density_top_layer!(rho_new, rho, u, w, dt, dx, dz, ws, h_top_face, eta_old, eta_new; scheme="upwind1", rho_min=rho_min, rho_max=rho_max)
 end
 
 function buoyancy!(out::AbstractArray{<:Real}, rho::AbstractArray{<:Real}, rho_0::AbstractArray{<:Real})

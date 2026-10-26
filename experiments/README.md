@@ -32,8 +32,3 @@ Validation scripts currently available
 - validation/validate_wind_shear_transport_mixing.jl
 - validation/audit_hydrostatic_continuity_free_surface.jl
 - validation/smoke_all_new_cases.jl
-
-Backward compatibility
-----------------------
-Legacy top-level scripts are kept and now include the corresponding new script,
-so previous commands still work.

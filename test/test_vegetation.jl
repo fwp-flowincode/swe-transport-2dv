@@ -428,7 +428,7 @@ vegetation_test_config(; kwargs...) = vegetation_case_config(; kwargs...)
         end
     end
 
-    @testset "test_vegetation_damps_free_surface_wave_motion" begin
+    @testset "test_validate_vegetation_damps_free_surface_wave_motion" begin
         # Replaces the old single-stem test, whose stem changed the wave amplitude by about 1e-15 (old model: relaxation
         # factor 0.35 on the force and no stem density). An emergent rigid patch around a velocity antinode of the
         # standing wave (node of eta at x = 5 m) removes wave energy: after 10 s (about two wave periods 2L/sqrt(gH)) the total wave energy (potential + kinetic) is
@@ -467,7 +467,7 @@ vegetation_test_config(; kwargs...) = vegetation_case_config(; kwargs...)
         @test abs(late - EXPONENT_DRAG) < EXPONENT_TOL
     end
 
-    @testset "test_vegetation_slows_lock_exchange_front" begin
+    @testset "test_validate_vegetation_slows_lock_exchange_front" begin
         # Replaces the old single-stem test (front position unchanged to the printed digits in the old model). An
         # emergent rigid patch in the right half delays the dense front (after 60 s, when the current has entered it).
         cfg = vegetation_test_config(length=30.0, depth=4.0, nx=100, nz=20, dt=5e-3, nt=1, use_hydrostatic=false, rayleigh_damping=0.0)

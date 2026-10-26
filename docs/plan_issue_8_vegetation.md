@@ -222,10 +222,11 @@ turbulence model allows).
   deviation 5 %); Lopez & Garcia computed profiles of runs 1, 9, 13, 17 (velocity 0.92-1.03, stress peak 0.97-1.05);
   their plant-density series (bed shear within a few per cent; Manning n up to 1.5 times theirs over dense canopies in
   deep water, not resolved).
-- **Open:** dynamic flexible stems (waves, oscillating flow); vegetation turbulence (Nepf 1999); comparison with the
-  flume data of Dunn et al. (1996) once the report is available; Luhar & Nepf (2011) coefficient check; the fully
-  implicit free surface damps waves by about 2 pi²/N per period (a theta scheme would need time-averaged transports in
-  continuity, density transport and the projection).
+- **Open (separate issues):** dynamic flexible stems under waves and oscillating flow (step 3); the k-epsilon
+  resistance over dense canopies in deep water (Manning n up to 1.5 times Lopez & Garcia's); the k-epsilon restrictions
+  (flat bed, fixed top layer, first order in time, explicit momentum diffusion); the fully implicit free surface damps
+  waves by about 2 pi²/N per period (a theta scheme would need time-averaged transports in continuity, density
+  transport and the projection).
 
 References
 ----------
