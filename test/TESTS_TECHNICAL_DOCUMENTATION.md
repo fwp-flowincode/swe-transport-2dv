@@ -620,7 +620,7 @@ Spalding 1974; Rodi 1993) on the cell centres:
 ```math
 \frac{Dk}{Dt}=\partial_z\!\left(\Big(\nu+\frac{\nu_t}{\sigma_k}\Big)\partial_z k\right)+P+G+C_{fk}P_v-\varepsilon,\qquad
 \frac{D\varepsilon}{Dt}=\partial_z\!\left(\Big(\nu+\frac{\nu_t}{\sigma_\varepsilon}\Big)\partial_z\varepsilon\right)
-+\frac{\varepsilon}{k}\left(C_1P+C_3\max(G,0)+C_{f\varepsilon}P_v-C_2\varepsilon\right),\qquad \nu_t=C_\mu\frac{k^2}{\varepsilon},
++\frac{\varepsilon}{k}\left(C_1(P+C_{f\varepsilon}P_v)+C_3\max(G,0)-C_2\varepsilon\right),\qquad \nu_t=C_\mu\frac{k^2}{\varepsilon},
 ```
 
 with $P=\nu_t[(\partial_zu+\partial_xw)^2+2(\partial_xu)^2+2(\partial_zw)^2]$, the buoyancy term
@@ -628,8 +628,7 @@ $G=-(\nu_t/\sigma_\rho)N^2$, $N^2=-(g/\rho_0)\partial_z\rho$ ($C_3=0$ stable, 1 
 production $P_v$, the work of the drag per unit mass (from the u-face accelerations of `vegetation_source!` times $u$,
 averaged to the cells; $\tfrac12C_Da|u|^3$ for a rigid canopy). Constants: $C_\mu=0.09$, $C_1=1.44$, $C_2=1.92$,
 $\sigma_k=1.0$, $\sigma_\varepsilon=1.3$, $\sigma_\rho=0.7$; vegetation weights $C_{fk}=1.0$, $C_{f\varepsilon}=1.33$
-(attributed to Lopez & Garcia 2001 in the secondary literature; not yet checked against the paper; adjustable per
-`KEpsilonState`).
+(Lopez & Garcia 1997, WES Technical Report WRP-CP-10, Eqs. 26-27 and p. 58; adjustable per `KEpsilonState`).
 
 Numerics after each flow and density update: explicit first-order upwind advection (conservative, closed walls,
 periodic or zero-gradient inflow), then per column a backward-Euler vertical diffusion with the sinks linearised
@@ -637,23 +636,24 @@ implicitly (Patankar: $\varepsilon/k^\ast\,k$, $C_2\varepsilon^\ast/k^\ast\,\var
 any $\Delta t$, first order in time. Bed: with `bed_roughness_length` $z_0>0$ a log-law quadratic friction
 $c_b|u_1|u_1$ on the lowest row, $c_b=(\kappa/\ln(z_1/z_0))^2$, $z_1=\Delta z/2$, and the wall functions
 $k_1=u_*^2/\sqrt{C_\mu}$, $\varepsilon_1=u_*^3/(\kappa z_1)$ (Rodi 1993); otherwise free slip and zero flux. Surface:
-zero flux for $k$; for $\varepsilon$ zero flux (default) or $\varepsilon_s=C_\mu^{3/4}k_s^{3/2}/(\kappa\,0.07H)$ (Rodi 1993).
+zero flux for $k$; for $\varepsilon$ the value $\varepsilon_s=C_\mu^{3/4}k_s^{3/2}/(\kappa\,0.07H)$ (Rodi 1993; default, as
+in Lopez & Garcia 1997) or zero flux.
 The momentum equation uses $\nu+\nu_t$ (u-faces: mean of the neighbouring cells; the mixing-length cap does not apply).
 Density gets the turbulent diffusivity $\nu_t/\sigma_\rho$ (implicit, conservative with the layer thicknesses, top layer
 $\Delta z+\eta$).
 
-Known limitations: the zero-flux surface condition lets $\nu_t$ peak at the surface instead of mid-depth; first order in
-time; vegetation terms (below).
+Known limitations: first order in time; in a homogeneous emergent canopy the level of k is not fixed by the
+vegetation terms (below).
 
-**Vegetation terms, open question.** In a homogeneous emergent canopy without shear the k equation drives
-$\varepsilon\to C_{fk}P_v$ and the epsilon equation drives $\varepsilon\to(C_{f\varepsilon}/C_2)P_v$. These agree only
-for $C_{f\varepsilon}=C_2C_{fk}$. With $C_{f\varepsilon}=1.33$, k grows without bound (in a test case $\nu_t$ reached
-0.43 m²/s after 1200 s, with $\varepsilon/P_v=0.693=1.33/1.92$ as predicted). With $C_{f\varepsilon}=1.92$ the level of
-k is undetermined (it keeps its value at the time the balance is reached). A well-posed canopy model needs a wake length
-scale (stem diameter, spacing). In submerged canopies the growth is limited by diffusion out of the canopy; against the
-12 rigid runs of Dunn et al. (1996) the depth-mean velocity is 8 % too low on average ($C_D=1$; 12 % with the measured
-$C_{DB}$), and highly sensitive to $C_{f\varepsilon}$ (1.33: $-9$ %, 1.92: $+24$ % for six runs). Grid- and run-length
-converged.
+**Vegetation terms.** $C_1$ multiplies the vegetation term in the $\varepsilon$ equation (Lopez & Garcia 1997, Eq. 27).
+In a homogeneous canopy without shear the k equation then drives $\varepsilon\to C_{fk}P_v$ and the $\varepsilon$
+equation $\varepsilon\to(C_1C_{f\varepsilon}/C_2)P_v$; with $C_{f\varepsilon}=(C_2/C_1)C_{fk}$ (their p. 24, after Burke
+1982) both agree, and $C_{f\varepsilon}=1.33$ gives $0.9975$ (test). The level of k is neutral, so it drifts slowly in an
+emergent canopy; a wake length scale would fix it. An earlier version without $C_1$ gave $\varepsilon/P_v=0.693$ and
+unbounded k. Against the 12 rigid runs of Dunn et al. (1996) the model overpredicts the measured depth-mean velocity by
+24 % ($C_D=1$) or 19 % (measured $C_{DB}$) on average (`experiments/vegetation/run_dunn_k_epsilon.jl`). Lopez & Garcia's
+own k-epsilon model overpredicts in the same way; they attribute it to secondary currents in the flume, which a 2DV model
+cannot resolve. Our run-1 profile lies within 10 % of their computed profile from the canopy top upwards (test).
 
 ## Test-by-test documentation
 
@@ -1415,7 +1415,12 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The maske
 - `test_validate_k_epsilon_open_channel`: uniform flow over a rough bed (periodic channel, both modes): bed shear
   $=gSH$, total stress at mid-depth $=gS(H-z)$ and wall-function $k_1=u_*^2/\sqrt{C_\mu}$ within $10^{-4}$ (observed
   $1.2\cdot10^{-5}$ after 600 s), depth-mean velocity within 8 % of the log law $U/u_*=(\ln(H/z_0)-1)/\kappa$
-  (observed +5.6 %, consistent with the wake of channel flows).
+  (observed +6.0 %, consistent with the wake of channel flows); $\nu_t$ peaks at mid-depth ($z/H=0.53$).
+- `test_verify_k_epsilon_vegetation_balance`: homogeneous emergent canopy; $\varepsilon/P_v\to C_1C_{f\varepsilon}/C_2
+  =0.9975$ within $10^{-3}$ below the two surface rows (observed 0.9975).
+- `test_validate_k_epsilon_dunn_run1_against_lopez_garcia`: run 1 of Dunn et al. (1996) with the measured $C_{DB}$;
+  profile within 12 % of the computed k-epsilon profile of Lopez & Garcia (1997, Fig. 6.1, read from the figure) for
+  $z\ge0.10$ m (observed 0.90-1.03); depth-mean velocity 1.1-1.3 times the measured value (observed 1.20).
 - `test_verify_turbulence_closure_selection`: default and legacy flag, state creation, invalid choices rejected.
 
 ## Additional validation scripts and literature basis

@@ -36,7 +36,7 @@ export ModelConfig, Model, BarotropicSolver, solve_variable_thickness!, BedGeome
 export top_layer_face_thickness!, advect_density_upwind_top_layer!, advect_density_top_layer!, use_variable_top_layer
 export VegetationStemConfig, VegetationStem, VegetationModel, VegetationPatch, patch_frontal_area
 export KEpsilonState, k_epsilon_step!, turbulent_viscosity_u!, implicit_vertical_diffusion!, bed_friction_coefficient, turbulence_closure
-export KE_C_MU_VALUE, KE_C2_VALUE
+export KE_C_MU_VALUE, KE_C1_VALUE, KE_C2_VALUE
 export update_stem_posture!, vegetation_drag_rate, stem_tip_deflection, stem_deflected_height, VEGETATION_EXPLICIT_DRAG_LIMIT
 export attach_vegetation!, clear_vegetation!, vegetation_source!, copy_vegetation, vegetation_path, set_x_inflow_outflow!, clear_x_inflow_outflow!
 export initialize_lock_exchange!, initialize_rayleigh_taylor!

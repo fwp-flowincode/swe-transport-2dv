@@ -242,22 +242,23 @@ constant mixing length is not meaningful, for two reasons:
   with a known stiffness.
 
 **Dunn et al. (1996) with the k-epsilon closure** (`turbulence_closure = "k_epsilon"`, section 17 of the test
-documentation). The model is a standard k-epsilon closure with vegetation production. The vegetation weights
-C_fk = 1.0 and C_fε = 1.33 are attributed to López & García (2001) in the secondary literature, not checked against the
-paper. It reproduces open-channel flow (momentum balance exact, log law within 6 %). For the 12 rigid runs, with bed
-roughness from the flume's Manning n = 0.011, the depth-mean velocity comes out too low:
+documentation). The vegetation terms and the free-surface condition for ε follow López & García (1997, WES Technical
+Report WRP-CP-10, Eqs. 26-27): C_fk = 1.0, C_fε = 1.33, with C_1 multiplying the vegetation term in the ε equation. The
+closure reproduces open-channel flow (momentum balance exact, log law within 6 %). Run with `run_dunn_k_epsilon.jl`
+(about 4 min). For the 12 rigid runs, with bed roughness from the flume's Manning n = 0.011, the depth-mean velocity
+comes out too high:
 
-| Drag coefficient | Mean model/measured | Mean deviation | Largest deviation |
-|---|---|---|---|
-| C_D = 1 | 0.93 | 8 % | 17 % |
-| measured C_DB per run | 0.89 | 12 % | 21 % |
+| Drag coefficient | Mean model/measured | Range |
+|---|---|---|
+| C_D = 1 | 1.24 | 1.17-1.31 |
+| measured C_DB per run | 1.19 | 1.09-1.28 |
 
-Grid and run length are converged. The result is very sensitive to C_fε: for six runs, 1.33 gives −9 % and 1.92
-gives +24 %.
-
-With C_fε = 1.33 the k-epsilon vegetation model has no bounded state in a homogeneous emergent canopy: k grows without
-limit. With C_fε = C_2 = 1.92 the turbulence level is undetermined. This is an open question; a run-by-run validation
-waits for the original formulation of López & García (2001), or for a wake-scale extension.
+Grid and run length are converged. López & García's own k-epsilon model overpredicts these runs in the same way; they
+attribute it to secondary currents in the 0.91 m wide flume, which a 2DV model cannot represent. For run 1 our velocity
+profile lies within 10 % of their computed profile from the canopy top upwards (0.90-1.03 of theirs; inside the canopy
+0.98 at z = 0.10 m and 0.68 near the bed, where ours is closer to the measurement). Both are tested in
+`test_turbulence.jl`. A version without the factor C_1 (as the formula is often quoted) gives unbounded k in an emergent
+canopy.
 
 Tests
 -----

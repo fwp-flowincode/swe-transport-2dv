@@ -1,8 +1,9 @@
 # Dunn, Lopez & Garcia (1996) rigid runs 1-12 with the k-epsilon closure (src/turbulence.jl): depth-mean velocity of the
 # model against the measured U = Q / (0.91 m H), for C_D = 1 and for the measured bulk drag coefficient of each run.
 # Periodic channel per run (depth, slope, canopy height and frontal area from the report, see DUNN1996_RIGID in
-# cases.jl), smooth flume bed (Manning n = 0.011, roughness length z0 = 5e-6 m). Status: see README (vegetation terms of
-# the k-epsilon model are an open question).
+# cases.jl), smooth flume bed (Manning n = 0.011, roughness length z0 = 5e-6 m). Vegetation terms and surface condition
+# after Lopez & Garcia (1997). Like their model, ours overpredicts the measured velocities (they attribute this to
+# secondary currents in the flume); results in the README.
 #
 # Usage: julia --project=<path to the repository> experiments/vegetation/run_dunn_k_epsilon.jl
 # Run time: about 4 min.

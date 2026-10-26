@@ -3,13 +3,15 @@
 #
 # Transport equations (standard high-Reynolds-number k-epsilon; Launder & Spalding 1974, Rodi 1993), per unit mass:
 #     dk/dt + div(u k) = d/dz((nu + nu_t/sigma_k) dk/dz) + d/dx((nu + nu_t/sigma_k) dk/dx) + P + G + C_fk P_v - eps,
-#     deps/dt + div(u eps) = (same diffusion with sigma_eps) + eps/k (C1 P + C3 max(G, 0) + C_fe P_v - C2 eps),
+#     deps/dt + div(u eps) = (same diffusion with sigma_eps) + eps/k (C1 (P + C_fe P_v) + C3 max(G, 0) - C2 eps),
 #     nu_t = C_mu k² / eps,
 # with the shear production P = nu_t [(du/dz + dw/dx)² + 2 (du/dx)² + 2 (dw/dz)²], the buoyancy term
 # G = -(nu_t / sigma_rho) N², N² = -(g/rho0) d(rho)/dz (Rodi 1987; C3 = 0 in stable, 1 in unstable stratification),
 # and the vegetation production P_v = work of the drag force per unit mass, -a_veg u (m²/s³), i.e. 1/2 C_D a |u|³ for a
-# rigid canopy, with the weights C_fk and C_fe of the k-epsilon vegetation model of Lopez & Garcia (2001), who calibrated
-# it on the flume data of Dunn, Lopez & Garcia (1996).
+# rigid canopy, with the weights C_fk = 1.0 and C_fe = 1.33 of the k-epsilon vegetation model of Lopez & Garcia (1997,
+# Eqs. 26-27 and p. 58; WES Technical Report WRP-CP-10), who tested it on the flume data of Dunn, Lopez & Garcia (1996).
+# C1 multiplies the vegetation term in the eps equation; C_fe = (C2/C1) C_fk keeps a homogeneous canopy in balance
+# (Lopez & Garcia 1997, p. 24, after Burke 1982): eps = C_fk P_v from both equations.
 #
 # Numerics per time step (after the flow and density update): explicit first-order upwind advection (conservative,
 # closed walls, periodic or zero-gradient inflow), then per column an implicit (backward Euler) vertical diffusion with
@@ -17,21 +19,23 @@
 # negative buoyancy term in the k equation; the sources are explicit. This keeps k and eps positive for any dt. Bed: with
 # a bed roughness length z0 > 0 the lowest cell takes the log-law wall functions k = u*²/sqrt(C_mu), eps = u*³/(kappa z1)
 # (Rodi 1993), u*² = c_b u1², c_b = (kappa / ln(z1/z0))², z1 = dz/2; otherwise zero flux. Surface: zero flux for k;
-# for eps zero flux (default) or the Dirichlet value eps_s = C_mu^(3/4) k_s^(3/2) / (kappa 0.07 H) (Rodi 1993).
+# for eps the Dirichlet value eps_s = C_mu^(3/4) k_s^(3/2) / (kappa 0.07 H) (Rodi 1993; default, as in Lopez & Garcia
+# 1997) or zero flux.
 # Density: implicit vertical diffusion with K = nu_t / sigma_rho at the w-faces (conservative, layer thicknesses).
 
 const KE_C_MU = 0.09            # -, Launder & Spalding (1974)
 const KE_C1 = 1.44              # -
 const KE_C2 = 1.92              # -
 const KE_C_MU_VALUE = KE_C_MU     # exported aliases for tests and scripts
+const KE_C1_VALUE = KE_C1
 const KE_C2_VALUE = KE_C2
 const KE_SIGMA_K = 1.0          # -
 const KE_SIGMA_EPS = 1.3        # -
 const KE_SIGMA_RHO = 0.7        # -, turbulent Schmidt number of density (Rodi 1993)
 const KE_C3_STABLE = 0.0        # -, Rodi (1987)
 const KE_C3_UNSTABLE = 1.0      # -
-const KE_VEG_CFK = 1.0          # -, Lopez & Garcia (2001); NOTE: quoted from the secondary literature, not checked against the paper
-const KE_VEG_CFE = 1.33         # -, Lopez & Garcia (2001); same note
+const KE_VEG_CFK = 1.0          # -, Lopez & Garcia (1997), p. 58
+const KE_VEG_CFE = 1.33         # -, Lopez & Garcia (1997), p. 58; = (C2/C1) C_fk
 const KE_KARMAN = 0.41          # -, von Karman constant
 const KE_K_MIN = 1e-10          # m^2/s^2, floor of k
 const KE_EPS_MIN = 1e-14        # m^2/s^3, floor of eps
@@ -64,7 +68,7 @@ mutable struct KEpsilonState{T<:Real}
     surface_condition::Symbol   # :zero_flux or :rodi (eps_s = C_mu^(3/4) k_s^(3/2) / (kappa 0.07 H))
 end
 
-function KEpsilonState(nz::Int, nx::Int; T::Type{<:Real}=Float64, cfk::Real=KE_VEG_CFK, cfe::Real=KE_VEG_CFE, surface_condition::Symbol=:zero_flux)
+function KEpsilonState(nz::Int, nx::Int; T::Type{<:Real}=Float64, cfk::Real=KE_VEG_CFK, cfe::Real=KE_VEG_CFE, surface_condition::Symbol=:rodi)
     surface_condition in (:zero_flux, :rodi) || throw(ArgumentError("surface_condition must be :zero_flux or :rodi"))
     k = fill(T(KE_K_INIT), nz, nx)
     eps = fill(T(KE_C_MU * KE_K_INIT^2 / KE_NU_T_INIT), nz, nx)
@@ -203,7 +207,7 @@ function k_epsilon_step!(ke::KEpsilonState, u::AbstractMatrix{<:Real}, w::Abstra
                     sink = ratio + max(-gb, 0.0) / k[kk, i]               # implicit: eps/k and negative buoyancy
                 else
                     c3 = gb > 0 ? KE_C3_UNSTABLE : KE_C3_STABLE
-                    source = ratio * (KE_C1 * p + c3 * max(gb, 0.0) + ke.cfe * pv)
+                    source = ratio * (KE_C1 * (p + ke.cfe * pv) + c3 * max(gb, 0.0))
                     sink = KE_C2 * ratio
                 end
                 lower[j] = -kd

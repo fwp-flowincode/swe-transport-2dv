@@ -214,9 +214,10 @@ turbulence model allows).
   unmeasured stiffness, swaying) are outside the quasi-static beam model.
 - **k-epsilon closure** implemented (`turbulence_closure = "k_epsilon"`, bed wall functions, turbulent density
   diffusion; verified: decaying turbulence, implicit diffusion, open-channel momentum balance and log law). Vegetation
-  terms after Lopez & Garcia (2001) (C_fk = 1.0, C_fe = 1.33, unverified): Dunn rigid runs 8 % too slow on average
-  (C_D = 1), very sensitive to C_fe; with C_fe = 1.33 k grows without bound in a homogeneous emergent canopy. Needs the
-  original paper or a wake-scale formulation before a validation test.
+  terms after Lopez & Garcia (1997, Eqs. 26-27; C_fk = 1.0, C_fe = 1.33, C1 on the eps vegetation term) and their
+  free-surface eps condition. Homogeneous canopy balance eps/P_v = 0.9975 (test). Dunn rigid runs overpredicted by 19 %
+  (measured C_DB) to 24 % (C_D = 1) on average, as Lopez & Garcia's own model does (secondary currents in the flume);
+  run-1 profile within 10 % of their computed profile above the canopy (test).
 - **Open:** dynamic flexible stems (waves, oscillating flow); vegetation turbulence (Nepf 1999); comparison with the
   flume data of Dunn et al. (1996) once the report is available; Luhar & Nepf (2011) coefficient check; the fully
   implicit free surface damps waves by about 2 pi²/N per period (a theta scheme would need time-averaged transports in

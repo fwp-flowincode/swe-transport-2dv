@@ -512,3 +512,8 @@ function dunn1996_run(run::Int)
     h = DUNN1996_D / d_over_h
     return (H=h, a=ah / h, hp=hp_over_h * h, S=s, U=q / 1000 / (DUNN1996_WIDTH * h), cdb=cdb)
 end
+
+# Lopez & Garcia (1997), WES Technical Report WRP-CP-10, Fig. 6.1: their computed k-epsilon velocity profile for run 1 of
+# Dunn et al. (1996), read from the figure (rendered at 250 dpi; reading accuracy about 0.02 m/s and 0.005 m).
+const LG1997_RUN1_Z = [0.01, 0.10, 0.117, 0.15, 0.20, 0.25, 0.30, 0.32]       # m
+const LG1997_RUN1_U = [0.48, 0.52, 0.56, 0.79, 0.92, 1.01, 1.06, 1.07]        # m/s
