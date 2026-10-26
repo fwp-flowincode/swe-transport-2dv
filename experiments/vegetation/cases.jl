@@ -423,3 +423,92 @@ function flexible_canopy_reference(; H, stem_length, a, b, cd, ei, buoyancy=0.0,
     tip_x = ds * (sum(sin, theta) - 0.5 * (sin(theta[1]) + sin(theta[end])))
     return (z=zc, u=u, theta=theta, s_z=z_of_s, tip_x=tip_x, tip_z=z_of_s[end])
 end
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Laboratory data: Luhar & Nepf (2011), model blades in uniform flow (Limnol. Oceanogr. 56(6), 2003-2017)
+# ---------------------------------------------------------------------------------------------------------------------
+#
+# Flat blades of width b = 1 cm, lengths 5-25 cm, clamped at the base in a uniform current U = 3.6-32 cm/s (their
+# Table 1); drag coefficient of a flat plate normal to the flow C_D = 1.95 (Vogel 1994), as in their model. Two
+# materials (their Table 1): HDPE (E = 0.93 GPa, blade density 50 kg/m^3 below water, t = 0.4 mm; stiffness-dominated)
+# and silicone foam (E = 500 kPa, 330 kg/m^3 below water, t = 1.9 mm; buoyancy-dominated). Bending stiffness
+# EI = E b t³ / 12, net buoyancy per length B_l = Δρ g b t.
+# Measured horizontal forces of the 5 cm and 25 cm blades: read from their Fig. 4 (rendered at 400 dpi; reading
+# accuracy about 0.3 mN; load-cell resolution 1 mN and accuracy 10 % according to the paper). NaN: symbol hidden.
+
+const LN2011_RHO = 1000.0                      # kg/m^3, flume water
+const LN2011_CD = 1.95                         # -, flat plate normal to the flow (Vogel 1994), as in Luhar & Nepf
+const LN2011_WIDTH = 0.01                      # m, blade width b
+const LN2011_MATERIALS = Dict(
+    "HDPE" => (E=0.93e9, drho=50.0, t=0.4e-3),     # Pa, kg/m^3, m
+    "foam" => (E=500e3, drho=330.0, t=1.9e-3),
+)
+const LN2011_LENGTHS = (0.05, 0.10, 0.15, 0.20, 0.25)                        # m
+const LN2011_VELOCITIES = (0.036, 0.071, 0.11, 0.14, 0.16, 0.22, 0.27, 0.32)  # m/s
+const LN2011_FORCES = Dict(                                                  # N, from Fig. 4
+    ("HDPE", 0.05) => [0.0005, 0.0020, 0.0043, 0.0075, 0.0093, 0.0163, 0.0256, 0.0360],
+    ("HDPE", 0.25) => [0.0017, 0.0039, 0.0061, 0.0089, 0.0112, 0.0173, 0.0242, 0.0307],
+    ("foam", 0.05) => [0.00049, 0.00185, 0.00377, 0.00664, 0.0077, 0.0105, NaN, 0.01566],
+    ("foam", 0.25) => [0.00385, 0.00747, 0.00894, 0.01023, 0.01158, 0.01208, 0.01336, 0.01517],
+)
+
+"""
+    luhar_nepf_blade(material, length, velocity; n_segments=80) -> NamedTuple (force, effective_length, cauchy, buoyancy, theta)
+
+Our stem model (update_stem_posture!) for a Luhar & Nepf (2011) model blade of `material` ("HDPE" or "foam") and
+`length` (m) in the uniform current `velocity` (m/s): horizontal drag (N), effective length l_e/l = F / (1/2 rho C_D b l U²),
+Cauchy number Ca = 1/2 rho C_D b U² l³ / EI and buoyancy parameter B = Δρ g b t l³ / EI (their Eqs. 7-9), and the posture.
+"""
+function luhar_nepf_blade(material::AbstractString, length::Real, velocity::Real; n_segments::Int=80)
+    m = LN2011_MATERIALS[material]
+    ei = m.E * LN2011_WIDTH * m.t^3 / 12
+    buoyancy = m.drho * 9.81 * LN2011_WIDTH * m.t
+    theta = zeros(n_segments)
+    _, force, _ = update_stem_posture!(theta, (k, x) -> velocity; length=length, diameter=LN2011_WIDTH, drag_coefficient=LN2011_CD,
+        bending_stiffness=ei, net_buoyancy=buoyancy, rho0=LN2011_RHO, dz=1e-3, nz=1000, water_level=0.3)
+    rigid = 0.5 * LN2011_RHO * LN2011_CD * LN2011_WIDTH * length * velocity^2
+    return (force=force, effective_length=force / rigid, cauchy=rigid * length^2 / ei, buoyancy=buoyancy * length^3 / ei, theta=theta)
+end
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Laboratory data: Dunn, Lopez & Garcia (1996), Hydraulic Engineering Series 51, University of Illinois
+# ---------------------------------------------------------------------------------------------------------------------
+#
+# Uniform flow through submerged cylinder canopies in a 19.5 m long, 0.91 m wide tilting flume (section 4.3.1):
+# rigid wooden dowels (D = 6.35 mm, mean height in the flow h_p = 11.8 +- 1.67 cm) and flexible drinking straws
+# (D = 6.35 mm, undeformed height 16.9 +- 1.61 cm, bent at a corrugated hinge near the bed; flexural rigidity not
+# measured; the straws became more flexible over the runs and swayed strongly, section 5.4), staggered patterns. Columns
+# from Table 4.1 (Q, S, spacing), Tables 5.1/5.2 (bulk drag coefficient C_DB), Tables 5.3/5.4 (D/H, a H, h_p/H) and
+# Table 5.5 (flexible: canopy velocity U_c, deflection angle, deflected height). Derived: depth H = D/(D/H), frontal area
+# a = (aH)/H, h_p = (h_p/H) H, mean velocity U = Q / (0.91 m H). Horizontally averaged velocity profiles of every run
+# are tabulated in Appendix C of the report (not transcribed here).
+
+const DUNN1996_D = 0.00635                     # m, cylinder diameter
+const DUNN1996_WIDTH = 0.91                    # m, flume width
+# run => (Q (L/s), S (-), spacing (cm), C_DB (-), D/H (-), aH (-), h_p/H (-))
+const DUNN1996_RIGID = Dict(
+    1 => (179, 0.0036, 7.62, 1.01, 0.0190, 0.365, 0.351), 2 => (88, 0.0036, 7.62, 0.95, 0.0277, 0.250, 0.518),
+    3 => (46, 0.0036, 7.62, 0.86, 0.0387, 0.179, 0.714), 4 => (178, 0.0076, 7.62, 1.29, 0.0230, 0.301, 0.426),
+    5 => (98, 0.0076, 7.62, 1.18, 0.0313, 0.221, 0.578), 6 => (178, 0.0036, 15.24, 1.46, 0.0238, 0.073, 0.441),
+    7 => (95, 0.0036, 15.24, 1.39, 0.0347, 0.050, 0.641), 8 => (180, 0.0036, 5.08, 0.94, 0.0162, 0.962, 0.300),
+    9 => (58, 0.0036, 5.08, 1.13, 0.0297, 0.526, 0.549), 10 => (180, 0.0161, 5.08, 1.19, 0.0240, 0.652, 0.442),
+    11 => (177, 0.0036, 10.16, 1.06, 0.0204, 0.191, 0.377), 12 => (181, 0.0110, 10.16, 1.14, 0.0273, 0.143, 0.505),
+)
+# run => (Q (L/s), S (-), spacing (cm), C_DB (-), D/H (-), aH (-), h_p/H (-), U_c (cm/s), deflection angle (deg), h_p (cm))
+const DUNN1996_FLEXIBLE = Dict(
+    13 => (179, 0.0036, 7.62, 1.13, 0.0173, 0.401, 0.413, 32.8, 35, 15.2), 14 => (180, 0.0101, 7.62, 0.33, 0.0274, 0.253, 0.495, 72.2, 51, 11.5),
+    15 => (93, 0.0036, 7.62, 1.45, 0.0247, 0.280, 0.513, 25.6, 34, 13.2), 16 => (179, 0.0036, 15.24, 0.55, 0.0276, 0.063, 0.422, 73.4, 65, 9.7),
+    17 => (78, 0.0036, 5.08, 1.19, 0.0228, 0.686, 0.578, 18.0, 12, 16.1), 18 => (179, 0.0101, 5.08, 0.59, 0.0224, 0.699, 0.426, 44.4, 45, 12.1),
+)
+
+"""
+    dunn1996_run(run) -> NamedTuple (H, a, hp, S, U, cdb)
+
+Derived quantities of rigid run `run` (1-12) of Dunn et al. (1996): depth H (m), frontal area a (1/m), canopy height
+h_p (m), bed slope S (-), mean velocity U = Q / (0.91 m H) (m/s) and the measured bulk drag coefficient C_DB (-).
+"""
+function dunn1996_run(run::Int)
+    q, s, _, cdb, d_over_h, ah, hp_over_h = DUNN1996_RIGID[run]
+    h = DUNN1996_D / d_over_h
+    return (H=h, a=ah / h, hp=hp_over_h * h, S=s, U=q / 1000 / (DUNN1996_WIDTH * h), cdb=cdb)
+end

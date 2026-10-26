@@ -187,6 +187,60 @@ their computed shapes.
 
 ![Front position, five representations](figures/vegetation_lock_canopies_front.png)
 
+**Comparison with laboratory data: flexible blades of Luhar & Nepf (2011)** (`plot_vegetation_luhar_nepf.jl`). Luhar &
+Nepf measured the drag and posture of flat model blades clamped in a uniform current. The blades were 1 cm wide and
+5-25 cm long, the velocity 3.6-32 cm/s, and there were two materials:
+- HDPE: stiffness-dominated, buoyancy parameter B = 0.005-0.62;
+- silicone foam: buoyancy-dominated, B = 2.7-340.
+
+Their model is the same as ours: normal drag with C_D = 1.95, bending stiffness and buoyancy, effective length
+l_e/l = ∫cos³θ ds. We use their blade properties (Table 1) without any fitting. The measured forces of the 5 cm and
+25 cm blades are read from their Fig. 4 (`LN2011_FORCES` in `cases.jl`; reading accuracy about 0.3 mN; load cell
+accurate to 10 % and resolving 1 mN).
+
+![Drag, effective length and shapes of the Luhar & Nepf blades](figures/vegetation_luhar_nepf.png)
+
+| Blade | Model / measured force |
+|---|---|
+| foam 25 cm | 0.89-1.04 (0.78 at 3.6 cm/s) |
+| foam 5 cm | 0.91-0.93 for forces above 5 mN (1.23-1.28 below, near the load-cell resolution) |
+| HDPE 25 cm | 1.06-1.18 above 14 cm/s, up to 1.48 at the lowest velocities |
+| HDPE 5 cm | 1.22-1.40 |
+
+- **The 5 cm HDPE blade** is overpredicted, as the authors report for their own model. They attribute it to a lower
+  drag coefficient of short plates.
+- **Our model reproduces theirs:** as far as they can be read, our values lie on the model curves of their Fig. 4
+  (e.g. 0.044 N for the 5 cm HDPE blade at 32 cm/s). The deviations from the data are therefore those of the model
+  itself.
+- **Exponents:** exponents F ∝ U^a fitted to the points read from the figure reproduce the measured exponents of the
+  paper:
+
+| Blade | From the figure | Paper (measured) | Model |
+|---|---|---|---|
+| HDPE 25 cm | 1.33 | 1.31 ± 0.10 | 1.17 |
+| foam 5 cm | 1.62 | 1.54 ± 0.20 | 1.39 |
+| foam 25 cm | 0.52 | 0.69 ± 0.22 | 0.39 |
+
+  The model exponents lie within about 1.5 standard deviations of the measurements.
+- **Effective length:** like their Fig. 5, buoyancy delays reconfiguration length by length for the foam blades.
+- **Shapes:** the computed shapes of the 25 cm blades match their photographs (Fig. 4e, f) qualitatively. The HDPE
+  blade bends close to the base; the buoyant foam blade stays nearly straight at a nearly constant angle.
+
+The test `test_validate_luhar_nepf_2011_blade_drag` checks the forces of at least 5 mN, except the 5 cm HDPE blade:
+median deviation 7 %, largest 39 %.
+
+**Dunn, López & García (1996)** (flume runs with submerged rigid and flexible cylinders). The run data are transcribed
+in `cases.jl` (`DUNN1996_RIGID`, `DUNN1996_FLEXIBLE`, `dunn1996_run`): conditions, depths, frontal areas, canopy
+heights, bulk drag coefficients and, for the flexible runs, deflection angles and heights. A run-by-run comparison is
+not part of this experiment yet, for two reasons:
+- **Turbulence model:** the depth-averaged velocity of a submerged canopy is set by the turbulent momentum exchange
+  above and within the canopy, and our constant mixing length is not a canopy turbulence model. For rigid run 1, mixing
+  lengths of 2, 4 and 8 cm give 0.78, 0.61 and 0.52 m/s against the measured 0.589 m/s. A comparison would test the
+  chosen mixing length, not the vegetation drag.
+- **Flexible straws:** they bend at a corrugated hinge near the bed, their flexural rigidity was not measured, and
+  according to the report they softened over the runs and swayed strongly. That is outside a quasi-static beam model
+  with a known stiffness.
+
 Tests
 -----
 
@@ -222,6 +276,7 @@ Scripts
 - `plot_vegetation_channel.jl`: periodic channel references (rigid and flexible) and grid convergence; about 12 min.
 - `plot_vegetation_patch.jl`: head loss and the flexible-patch animation; about 1 min.
 - `plot_vegetation_waves.jl`: wave damping against Dalrymple et al. (1984); about 20 min.
+- `plot_vegetation_luhar_nepf.jl`: flexible blades against the laboratory data of Luhar & Nepf (2011); a few seconds.
 - `plot_vegetation_lock_exchange.jl`: lock exchange through canopies over the whole tank, front scaling; about 10 min.
 - `plot_vegetation_lock_exchange_canopies.jl`: lock exchange into vegetation in the right half, patches and individual
   rigid and flexible stems, vegetation drawn; about 35 min.
@@ -229,7 +284,8 @@ Scripts
   - the rigid 1D canopy profile and the coupled flexible canopy reference;
   - the reconfiguration helper and the independent elastica reference;
   - the wave flume with Dalrymple's decay coefficient;
-  - the canopy lock exchange.
+  - the canopy lock exchange;
+  - laboratory data of Luhar & Nepf (2011) and Dunn et al. (1996).
 - `run_oscillating_flow_with_flexible_vegetation.jl`: ported to the new model; qualitative (no reference).
 
 Output goes to `output_barotropic/vegetation_figures/`; the figures here are copies, the GIF reduced to every second
@@ -239,6 +295,7 @@ frame and 640 px width.
     julia --project=. experiments/vegetation/plot_vegetation_channel.jl
     julia --project=. experiments/vegetation/plot_vegetation_patch.jl
     julia --project=. experiments/vegetation/plot_vegetation_waves.jl
+    julia --project=. experiments/vegetation/plot_vegetation_luhar_nepf.jl
     julia --project=. experiments/vegetation/plot_vegetation_lock_exchange.jl
     julia --project=. experiments/vegetation/plot_vegetation_lock_exchange_canopies.jl
 

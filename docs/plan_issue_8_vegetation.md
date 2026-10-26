@@ -207,6 +207,11 @@ turbulence model allows).
   stem, Ca = 0.1-10⁴, with buoyancy; second order, within 0.9 % at 80 segments) and a coupled 1D reference for a
   flexible canopy in channel flow (velocity within 0.017 %, tip within 0.1 mm). Load continuation added to the posture
   solver (Newton alone failed from an upright stem at Ca >~ 3000).
+- **Laboratory data:** Luhar & Nepf (2011) blade drag reproduced without fitting (foam blades mostly within 10 %,
+  25 cm HDPE within 6-18 % above 14 cm/s; the 5 cm HDPE blade overpredicted as in the original model). Dunn et al.
+  (1996) run data transcribed; a comparison needs a canopy turbulence model (constant mixing length: depth-mean
+  velocity of run 1 between 0.52 and 0.78 m/s for l = 2-8 cm, measured 0.589 m/s); the flexible straws (hinge,
+  unmeasured stiffness, swaying) are outside the quasi-static beam model.
 - **Open:** dynamic flexible stems (waves, oscillating flow); vegetation turbulence (Nepf 1999); comparison with the
   flume data of Dunn et al. (1996) once the report is available; Luhar & Nepf (2011) coefficient check; the fully
   implicit free surface damps waves by about 2 pi²/N per period (a theta scheme would need time-averaged transports in

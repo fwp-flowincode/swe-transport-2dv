@@ -170,6 +170,34 @@ vegetation_test_config(; kwargs...) = vegetation_case_config(; kwargs...)
         @test all(errors[20][j] / errors[40][j] > REDUCTION_MIN for j in 1:3)
     end
 
+    @testset "test_validate_luhar_nepf_2011_blade_drag" begin
+        # Laboratory data: drag of flexible model blades (HDPE: stiffness-dominated; silicone foam: buoyancy-dominated)
+        # in uniform flow, Luhar & Nepf (2011), forces read from their Fig. 4 (LN2011_FORCES in experiments/vegetation/
+        # cases.jl). Compared: measured forces of at least 5 mN (5 times the load-cell resolution) of the 25 cm HDPE blade
+        # and the 5 cm and 25 cm foam blades. The 5 cm HDPE blade is left out: the authors report that their model (the
+        # same as ours) overpredicts it, attributing this to a lower drag coefficient of short plates; our model gives
+        # 1.22-1.40 times the measured force there. Observed: median deviation 7 %, largest 39 % (25 cm HDPE at 11 cm/s,
+        # where the model is also above the data in their Fig. 4); 10 % is the load-cell accuracy.
+        FORCE_MIN = 0.005           # N
+        MEDIAN_TOL = 0.10           # -
+        MAX_TOL = 0.45              # -
+        ratios = Float64[]
+        for (material, len) in (("HDPE", 0.25), ("foam", 0.05), ("foam", 0.25))
+            for (j, u) in enumerate(LN2011_VELOCITIES)
+                measured = LN2011_FORCES[(material, len)][j]
+                (isnan(measured) || measured < FORCE_MIN) && continue
+                push!(ratios, luhar_nepf_blade(material, len, u).force / measured)
+            end
+        end
+        deviations = abs.(ratios .- 1)
+        @test length(ratios) >= 15
+        @test sort(deviations)[cld(length(deviations), 2)] < MEDIAN_TOL
+        @test maximum(deviations) < MAX_TOL
+        # the reconstructed blade parameters reproduce their Table 1 (Ca = 320, B = 0.62 for the 25 cm HDPE blade at 32 cm/s)
+        check = luhar_nepf_blade("HDPE", 0.25, 0.32)
+        @test isapprox(check.cauchy, 320; rtol=0.03) && isapprox(check.buoyancy, 0.62; rtol=0.02)
+    end
+
     @testset "test_validate_emergent_rigid_canopy_uniform_velocity" begin
         # Periodic channel, body force G, emergent rigid patch over the whole channel, free-slip bed: the steady velocity
         # is uniform with 1/2 C_D a U^2 = G (exact). Observed relative error 4e-12 in both modes.

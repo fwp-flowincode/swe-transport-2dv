@@ -134,6 +134,7 @@ julia --project=. experiments/vegetation/plot_vegetation_channel.jl
 julia --project=. experiments/vegetation/plot_vegetation_patch.jl
 julia --project=. experiments/vegetation/run_oscillating_flow_with_flexible_vegetation.jl
 julia --project=. experiments/vegetation/plot_vegetation_waves.jl
+julia --project=. experiments/vegetation/plot_vegetation_luhar_nepf.jl
 julia --project=. experiments/vegetation/plot_vegetation_lock_exchange.jl
 julia --project=. experiments/vegetation/plot_vegetation_lock_exchange_canopies.jl
 julia --project=. experiments/validation/validate_surface_dam_break_front_speed.jl
