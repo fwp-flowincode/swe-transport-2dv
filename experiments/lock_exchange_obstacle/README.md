@@ -33,7 +33,8 @@ Settings (`cases.jl`):
   |u| dt/dx + |w| dt/dz is 0.30-0.47, below the `tvd2` limit 0.5.
 - The results are compared in dimensionless time t* = t sqrt(g'/a). The time scale sqrt(a/g') is 1.22 s for 10 kg/m³
   (3.86 s for 1 kg/m³, 0.55 s for 50 kg/m³). The original's 0.6 s (in full gravity) corresponds to t* = 4.9.
-- Simulated time: t* = 7 (8.5 s for 10 kg/m³), see Limitations.
+- Simulated time: t* = 12 (14.6 s for 10 kg/m³), including the wall splash and return flow. The committed figures
+  above are from the original runs ending at t* = 7.
 
 Results
 -------
@@ -83,17 +84,25 @@ size drho/rho0. It is generally accepted up to a few per cent, so 50 kg/m³ (5 %
 Limitations
 -----------
 
-From t* ~ 7.5 the model is no longer reliable. The light water displaced by the splash at the right wall is pushed up
-to the free surface, and in the top cell of the fixed grid of the non-hydrostatic mode it is forced sideways into a thin
-jet along the surface (|u| up to 0.6 m/s, against a physical velocity scale of sqrt(2 g' 2a) ~ 0.24 m/s). From t* ~ 9
-kinetic energy grows without potential energy being released and the run eventually blows up. This happens for all
-density differences and grid sizes, and also without the obstacle. The runs therefore stop at t* = 7.
+The original runs stopped at t* = 7 because a spurious surface jet appeared after the wall splash (issue #5).
+The cause was predictor transport through closed side walls: the fixed-grid branch advanced the free surface and
+projected pressure before imposing the wall velocities. Imposing them only on the final velocity changed the transport
+after both solves, leaving a continuity defect in the top cells. The wall enforcement before both solves, already
+introduced with the wind-shear correction in PR #7, removes this source; a variable-thickness non-hydrostatic layer is
+not needed to fix this defect.
 
-Investigating this problem led to the Lax-Wendroff time correction of the `tvd2` momentum advection, which removed an
-earlier and stronger energy source (technical documentation, section 3). The remaining surface problem is tracked in
-issue #5; the most likely remedy is to extend the variable-thickness top layer to the non-hydrostatic mode.
-Energy diagnostic used: kinetic energy 0.5 rho0 sum(u_c² + w_c²) dx dz against the released potential energy
-g sum((rho - rho0) z) dx dz (initial minus current), both over the wet cells.
+An isolated reversal of that wall-ordering correction reproduces the report on the 2 mm grid with 10 kg/m³:
+at t* = 8.85 the top speed is 0.303 m/s and kinetic/released potential energy is 0.972; at t* = 10.82 they reach
+0.593 m/s and 1.773. With the correction, the corresponding top speeds are 0.0049 and 0.0080 m/s, and the energy
+ratios are 0.747 and 0.740. These comparisons retain the same viscosity, transport and pressure solver.
+
+The script now runs through t* = 12 and records the issue's energy diagnostic: kinetic energy
+0.5 rho0 sum(u_c² + w_c²) dx dz against released potential energy g sum((rho - rho0) z) dx dz (initial minus current),
+both over wet cells. Progress output reports their ratio; NPZ files contain `kinetic_J_per_m` and
+`released_potential_J_per_m` alongside `t_star`. The automated regression covers obstacle and unobstructed wall
+return on a 4 mm grid, including energy, top speed, volume, mass, density bounds and continuity. This is a regression
+against artificial energy generation, not validation of the detailed late-time mixing or of a finite-amplitude moving
+surface: the non-hydrostatic grid still has fixed-thickness layers.
 
 Scripts
 -------

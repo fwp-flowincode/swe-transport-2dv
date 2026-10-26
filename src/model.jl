@@ -1105,6 +1105,8 @@ function step_forward!(model::Model)
         # predictor above also fills the wall faces (advection and diffusion evaluated from interior neighbours); on
         # the fixed grid this used to enter the eta equation as a spurious flux through closed walls, so the water
         # volume drifted (seen in the non-hydrostatic wind-shear case, issue #4).
+        # In a wall splash it also forced the projection to accommodate fictitious wall transport in the top cells,
+        # driving the surface jet of issue #5. Enforce the walls before BOTH solves, not just on the final state.u.
         _apply_x_boundary_conditions!(model, ws.u_hat)
         if masked
             _mask_u!(ws.u_hat, geo)
