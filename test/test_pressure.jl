@@ -4,7 +4,7 @@
 include(joinpath(@__DIR__, "test_common.jl"))
 
 @testset "Pressure" begin
-    @testset "test_hydrostatic_pressure_monotone_with_depth" begin
+    @testset "test_verify_hydrostatic_pressure_monotone_with_depth" begin
         nz, nx = 6, 7
         rho = fill(1000.0, nz, nx)
         p = solve_hydrostatic_pressure(zeros(nz, nx), rho, 9.81, 0.5)
@@ -13,7 +13,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test all(p[1:end-1, :] .>= p[2:end, :])
     end
 
-    @testset "test_poisson_matrix_and_nonhydrostatic_zero_rhs" begin
+    @testset "test_verify_poisson_matrix_and_nonhydrostatic_zero_rhs" begin
         nz, nx = 5, 7
         dx = dz = 0.2
         A = build_poisson_matrix((nz, nx), dx, dz)
@@ -82,7 +82,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test nnz(legacy[1, :]) == 1
     end
 
-    @testset "test_pressure_solver_spectral_matches_sparse_reference" begin
+    @testset "test_verify_pressure_solver_spectral_matches_sparse_reference" begin
         nz, nx = 6, 8
         dx, dz = 0.25, 0.3
         dt = 0.05
@@ -108,7 +108,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test all(isapprox.(gz_spec, gz_sparse, atol=1e-6, rtol=1e-6))
     end
 
-    @testset "test_periodic_pressure_spectral_matches_sparse_reference" begin
+    @testset "test_verify_periodic_pressure_spectral_matches_sparse_reference" begin
         nz, nx = 7, 10
         dx, dz, dt, rho0 = 0.2, 0.3, 0.05, 1000.0
         Random.seed!(21)
@@ -130,7 +130,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test A[idx(3, 1), idx(3, nx)] ≈ 1.0 / dx^2
     end
 
-    @testset "test_hydrostatic_pressure_vectorized_matches_reference_loop" begin
+    @testset "test_verify_hydrostatic_pressure_vectorized_matches_reference_loop" begin
         Random.seed!(7)
         nz, nx = 9, 11
         rho = 998.0 .+ 4.0 .* rand(nz, nx)
@@ -148,7 +148,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test all(isapprox.(p_vec, p_ref, atol=1e-12, rtol=1e-12))
     end
 
-    @testset "test_pressure_component_decomposition_matches_total_pressure" begin
+    @testset "test_verify_pressure_component_decomposition_matches_total_pressure" begin
         cfg = ModelConfig(nx=40, nz=12, dt=5e-4, nt=1, use_hydrostatic=false, momentum_advection_scheme="tvd2")
         model = Model(cfg)
         for _ in 1:30

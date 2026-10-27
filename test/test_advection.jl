@@ -25,7 +25,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test maximum(abs, semi_discrete .- transport) > 1e3 * TOL_IDENTITY * maximum(abs, transport)
     end
 
-    @testset "test_density_advection_zero_for_uniform_density" begin
+    @testset "test_verify_density_advection_zero_for_uniform_density" begin
         nz, nx = 8, 10
         rho = fill(1000.0, nz, nx)
         dx, dz = 0.1, 0.1
@@ -41,7 +41,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test all(isapprox.(adv, 0.0, atol=1e-12))
     end
 
-    @testset "test_density_advection_conservative_closed_box" begin
+    @testset "test_verify_density_advection_conservative_closed_box" begin
         nz, nx = 12, 14
         dx, dz, dt = 0.1, 0.1, 0.02
 
@@ -56,13 +56,13 @@ include(joinpath(@__DIR__, "test_common.jl"))
         w[end, :] .= 0.0
 
         m0 = constituent_mass(rho, dx, dz)
-        rho1 = advect_density_upwind(rho, u, w, dt, dx, dz)
+        rho1 = advect_density(rho, u, w, dt, dx, dz; scheme="upwind1")
         m1 = constituent_mass(rho1, dx, dz)
 
         @test isapprox(m0, m1, atol=1e-10, rtol=1e-10)
     end
 
-    @testset "test_periodic_density_advection_conservative" begin
+    @testset "test_verify_periodic_density_advection_conservative" begin
         nz, nx = 6, 12
         dx, dz, dt = 0.1, 0.2, 0.01
         xc = [(i - 0.5) * dx for i in 1:nx]
@@ -78,7 +78,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
         end
     end
 
-    @testset "test_momentum_advection_zero_for_uniform_velocity_fields" begin
+    @testset "test_verify_momentum_advection_zero_for_uniform_velocity_fields" begin
         nz, nx = 12, 14
         u = fill(0.1, nz, nx + 1)
         w = fill(-0.03, nz + 1, nx)
@@ -94,7 +94,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test all(isapprox.(adv_w_2[2:end-1, 2:end-1], 0.0, atol=1e-12))
     end
 
-    @testset "test_momentum_advection_conservative_in_closed_box" begin
+    @testset "test_verify_momentum_advection_conservative_in_closed_box" begin
         nz, nx = 10, 12
         dx, dz = 0.2, 0.25
         Random.seed!(123)
@@ -119,7 +119,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
         end
     end
 
-    @testset "test_model_runs_with_tvd2_momentum_advection" begin
+    @testset "test_verify_model_runs_with_tvd2_momentum_advection" begin
         cfg = ModelConfig(nx=30, nz=12, dt=5e-4, nt=1, momentum_advection_scheme="tvd2", max_froude=0.9, apply_froude_limiter=true)
         model = Model(cfg)
         for _ in 1:50

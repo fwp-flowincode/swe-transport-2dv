@@ -6,7 +6,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
 include(joinpath(@__DIR__, "..", "experiments", "wind_shear", "cases.jl"))
 
 @testset "Model" begin
-    @testset "test_model_step_conservation_and_bounds_short_run" begin
+    @testset "test_verify_model_step_conservation_and_bounds_short_run" begin
         cfg = ModelConfig(nx=30, nz=15, dt=2e-4, nt=1)
         model = Model(cfg)
 
@@ -23,7 +23,7 @@ include(joinpath(@__DIR__, "..", "experiments", "wind_shear", "cases.jl"))
         @test d1["rho_max"] <= model.rho_max_init + 1e-12
     end
 
-    @testset "test_model_froude_limiter_short_run" begin
+    @testset "test_verify_model_froude_limiter_short_run" begin
         cfg = ModelConfig(nx=40, nz=20, dt=5e-4, nt=1, max_froude=0.9, apply_froude_limiter=true)
         model = Model(cfg)
         max_fr = 0.0
@@ -35,21 +35,21 @@ include(joinpath(@__DIR__, "..", "experiments", "wind_shear", "cases.jl"))
         @test max_fr <= cfg.max_froude + 1e-6
     end
 
-    @testset "test_requested_domain_grid_dimensions" begin
+    @testset "test_verify_requested_domain_grid_dimensions" begin
         cfg = ModelConfig(length=30.0, depth=4.0, nx=100, nz=20)
         model = Model(cfg)
         @test isapprox(model.dx, 0.3)
         @test isapprox(model.dz, 0.2)
     end
 
-    @testset "test_requested_salinity_based_initial_densities" begin
+    @testset "test_verify_requested_salinity_based_initial_densities" begin
         cfg = ModelConfig(nx=20, nz=6, rho_left=1000.722, rho_right=999.972)
         model = Model(cfg)
         @test all(isapprox.(model.state.rho[:, 1:div(cfg.nx, 2)], cfg.rho_left, atol=1e-12))
         @test all(isapprox.(model.state.rho[:, (div(cfg.nx, 2)+1):end], cfg.rho_right, atol=1e-12))
     end
 
-    @testset "test_initialize_rayleigh_taylor_layering_and_reset" begin
+    @testset "test_verify_initialize_rayleigh_taylor_layering_and_reset" begin
         cfg = ModelConfig(nx=40, nz=20, length=8.0, depth=4.0)
         model = Model(cfg)
 
@@ -75,14 +75,14 @@ include(joinpath(@__DIR__, "..", "experiments", "wind_shear", "cases.jl"))
         @test all(isapprox.(model.state.rho[:, 21:40], 999.5, atol=1e-12))
     end
 
-    @testset "test_initialize_rayleigh_taylor_argument_validation" begin
+    @testset "test_verify_initialize_rayleigh_taylor_argument_validation" begin
         model = Model(ModelConfig(nx=20, nz=10, length=10.0, depth=5.0))
         @test_throws ArgumentError initialize_rayleigh_taylor!(model; rho_top=1001.0, rho_bottom=999.0, interface_height_fraction=1.1)
         @test_throws ArgumentError initialize_rayleigh_taylor!(model; rho_top=1001.0, rho_bottom=999.0, perturbation_amplitude_fraction=-1e-3)
         @test_throws ArgumentError initialize_rayleigh_taylor!(model; rho_top=1001.0, rho_bottom=999.0, perturbation_wavenumber=0)
     end
 
-    @testset "test_long_run_conservation_and_froude_control" begin
+    @testset "test_verify_long_run_conservation_and_froude_control" begin
         cfg = ModelConfig(length=30.0, depth=4.0, nx=100, nz=20, dt=5e-4, nt=1, max_froude=0.9, apply_froude_limiter=true)
         model = Model(cfg)
         d0 = compute_diagnostics(model)
@@ -101,7 +101,7 @@ include(joinpath(@__DIR__, "..", "experiments", "wind_shear", "cases.jl"))
         @test isfinite(d1["div_max"])
     end
 
-    @testset "test_baroclinic_pressure_gradient_accelerates_dense_to_right" begin
+    @testset "test_validate_baroclinic_pressure_gradient_accelerates_dense_to_right" begin
         cfg = ModelConfig(nx=40, nz=12, dt=5e-4, nt=1)
         model = Model(cfg)
         p_internal = solve_hydrostatic_pressure(model.state.p, model.state.rho, cfg.g, model.dz)
@@ -112,7 +112,7 @@ include(joinpath(@__DIR__, "..", "experiments", "wind_shear", "cases.jl"))
         @test (-(1.0 / cfg.rho0) * grad_p_x[1, j]) > 0.0
     end
 
-    @testset "test_short_time_dense_front_moves_right_with_low_damping" begin
+    @testset "test_validate_short_time_dense_front_moves_right_with_low_damping" begin
         cfg = ModelConfig(nx=100, nz=20, dt=5e-4, nt=1, rayleigh_damping=0.0, apply_froude_limiter=false, momentum_advection_scheme="upwind1")
         model = Model(cfg)
 
@@ -337,7 +337,7 @@ include(joinpath(@__DIR__, "..", "experiments", "wind_shear", "cases.jl"))
         end
     end
 
-    @testset "test_periodic_kelvin_helmholtz_boundaries_and_conservation" begin
+    @testset "test_verify_periodic_kelvin_helmholtz_boundaries_and_conservation" begin
         cfg = ModelConfig(
             length=8.0,
             depth=4.0,

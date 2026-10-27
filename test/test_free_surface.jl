@@ -4,7 +4,7 @@
 include(joinpath(@__DIR__, "test_common.jl"))
 
 @testset "Free surface" begin
-    @testset "test_barotropic_solver_zero_flow_preserves_eta" begin
+    @testset "test_verify_barotropic_solver_zero_flow_preserves_eta" begin
         cfg = ModelConfig(nx=10, nz=4, dt=0.01)
         solver = BarotropicSolver(cfg, cfg.length / cfg.nx, cfg.depth / cfg.nz)
         eta0 = fill(0.0123, cfg.nx)
@@ -15,7 +15,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test all(isapprox.(eta, eta0, atol=1e-12))
     end
 
-    @testset "test_free_surface_kinematic_bc_consistency" begin
+    @testset "test_verify_free_surface_kinematic_bc_consistency" begin
         cfg = ModelConfig(nx=60, nz=20, dt=5e-4, nt=1)
         model = Model(cfg)
         for _ in 1:150
@@ -26,7 +26,7 @@ include(joinpath(@__DIR__, "test_common.jl"))
         end
     end
 
-    @testset "test_hydrostatic_continuity_and_surface_closure_residuals" begin
+    @testset "test_verify_hydrostatic_continuity_and_surface_closure_residuals" begin
         # WHY: variable_top_layer=false pinned explicitly. This test verifies the LEGACY fixed-grid closure
         # identity (div=0 on every row including the top one, w_top=eta_t with a zero flux at a FIXED top face).
         # With the (now-default) variable top layer the top row instead closes eta_t = w_nz - div(h*u) (a different

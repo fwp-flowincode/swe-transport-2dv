@@ -39,7 +39,8 @@ Results
 
 Density (colour) and streamlines: white for the clockwise upper cell, orange for the counter-clockwise lower cell.
 Streamline spacing: 0.005 m²/s in the upper cell, 0.0025 m²/s in the lower cell.
-The hydrostatic run looks nearly the same: [wind_shear_hydro.gif](figures/wind_shear_hydro.gif).
+The hydrostatic run looks nearly the same: [wind_shear_hydro.gif](figures/wind_shear_hydro.gif),
+[snapshots](figures/wind_shear_hydro_snapshots.png).
 
 ![Non-hydrostatic run: density and streamlines at 30, 120, 300, 600, 1200 and 1800 s](figures/wind_shear_nonhydro_snapshots.png)
 

@@ -446,7 +446,7 @@ $O(\eta/\Delta z)$ effect). Vegetation coupling assumes fixed geometry. The non-
 so `variable_top_layer=true` is rejected with `use_hydrostatic=false`.
 
 Legacy-scheme-specific tests/scripts that pin `variable_top_layer=false` explicitly, because they check an invariant of the fixed
-grid that the variable top layer replaces with a different one (cross-referenced above): `test_hydrostatic_continuity_and_surface_closure_residuals`
+grid that the variable top layer replaces with a different one (cross-referenced above): `test_verify_hydrostatic_continuity_and_surface_closure_residuals`
 and `experiments/validation/audit_hydrostatic_continuity_free_surface.jl` (top-row continuity residual; see
 `test_verify_variable_top_layer_closes_kinematic_and_volume_budgets` for the variable-top-layer analogue).
 
@@ -487,7 +487,7 @@ pressure gradient and zero buoyancy forcing — is governed only by the barotrop
 UNIFORMLY over depth OUTSIDE the elliptic (non-hydrostatic) solve. With uniform density the momentum predictor's $w$ has no
 forcing either, so the field entering the projection is already very close to the continuity-consistent (depth-uniform $u$,
 linear-in-depth $w$) state, and the projection has essentially nothing left to correct. Consequence, verified by
-`test_nonhydrostatic_surface_wave_period_matches_shallow_water_not_full_dispersion` (a domain with $k H\approx1.57$, chosen so the
+`test_verify_nonhydrostatic_surface_wave_period_matches_shallow_water_not_full_dispersion` (a domain with $k H\approx1.57$, chosen so the
 two relations differ by about 31%): the non-hydrostatic branch's surface-wave period still matches the shallow-water relation
 $T=2L/\sqrt{gH}$, not the full linear dispersion relation $\omega^2=gk\tanh(kH)$. **This is fixed for a new, opt-in mode**
 (`ModelConfig.nonhydro_surface_dirichlet=true`): section 15.
@@ -674,7 +674,7 @@ vegetation terms switched off the resistance is higher still. Converged in time 
 
 ## Test-by-test documentation
 
-### test_state_shapes
+### test_verify_state_shapes
 
 Purpose: verify staggered-array storage layout for $u$, $w$, $p$, $\rho$, and $\eta$.
 
@@ -689,7 +689,7 @@ p,\rho \in \mathbb{R}^{n_z \times n_x},\quad
 
 Validation section: shape consistency ensures discrete divergence/gradient operators are conformable.
 
-### test_grad_and_div_shapes_and_consistency
+### test_verify_grad_and_div_shapes_and_consistency
 
 Purpose: verify centered gradient operators and combined divergence structure.
 
@@ -703,7 +703,7 @@ Reference equations:
 
 Validation section: for a linear $p(x)$, discrete $\partial p/\partial x$ is constant and $\partial p/\partial z=0$.
 
-### test_density_advection_zero_for_uniform_density
+### test_verify_density_advection_zero_for_uniform_density
 
 Purpose: confirm density advection operator vanishes for spatially uniform tracer.
 
@@ -717,7 +717,7 @@ For constant $\rho$ and divergence-free velocity, RHS is zero.
 
 Validation section: exact discrete near-zero tendency threshold is used.
 
-### test_density_advection_conservative_closed_box
+### test_verify_density_advection_conservative_closed_box
 
 Purpose: verify closed-box conservative transport of constituent mass.
 
@@ -731,7 +731,16 @@ must remain constant with impermeable boundaries.
 
 Validation section: compares $M_\rho^{n+1}$ vs $M_\rho^n$ at tight tolerance.
 
-### test_hydrostatic_pressure_monotone_with_depth
+### test_verify_periodic_density_advection_conservative
+
+Purpose: verify that density transport through the periodic seam conserves constituent mass.
+
+Setup: a sinusoidal density profile in x, uniform velocity 0.15 m/s, `periodic_x=true`, schemes `upwind1` and `tvd2`.
+
+Validation section: the domain integral of the advective tendency vanishes ($<10^{-10}$) and one transport step keeps
+$M_\rho$ to round-off.
+
+### test_verify_hydrostatic_pressure_monotone_with_depth
 
 Purpose: validate hydrostatic pressure solver monotonicity and free-surface reference condition.
 
@@ -745,7 +754,7 @@ with pressure fixed at the top cell in the implemented convention.
 
 Validation section: checks top boundary and monotone increase with depth.
 
-### test_barotropic_solver_zero_flow_preserves_eta
+### test_verify_barotropic_solver_zero_flow_preserves_eta
 
 Purpose: ensure barotropic free-surface solve preserves constant elevation when depth-integrated transport is zero.
 
@@ -758,7 +767,7 @@ Reference equation:
 
 Validation section: if $U=0$, then $\eta$ remains unchanged.
 
-### test_model_step_conservation_and_bounds_short_run
+### test_verify_model_step_conservation_and_bounds_short_run
 
 Purpose: short-run system conservation and boundedness checks.
 
@@ -770,7 +779,7 @@ Checked invariants:
 
 Validation section: includes lower/upper bounds against initial density extrema.
 
-### test_froude_diagnostic_behaviour
+### test_verify_froude_diagnostic_behaviour
 
 Purpose: verify finite positive internal Froude diagnostic.
 
@@ -782,7 +791,7 @@ Fr = \frac{U}{c_i}, \quad c_i \sim \sqrt{g' H}.
 
 Validation section: positivity and finiteness in stratified flow state.
 
-### test_diagnostics_boundary_flux_closed_streamfunction_field
+### test_verify_diagnostics_boundary_flux_closed_streamfunction_field
 
 Purpose: check zero net normal flux for streamfunction-generated closed flow.
 
@@ -796,7 +805,7 @@ Reference identity:
 
 Validation section: integrated boundary-normal flux is near zero.
 
-### test_poisson_matrix_and_nonhydrostatic_zero_rhs
+### test_verify_poisson_matrix_and_nonhydrostatic_zero_rhs
 
 Purpose: verify Poisson operator structure and zero-RHS pressure-correction behavior.
 
@@ -808,7 +817,7 @@ Reference equation:
 
 Validation section: matrix diagonals for boundary/topology and zero solution for divergence-free predictor field.
 
-### test_pressure_solver_spectral_matches_sparse_reference
+### test_verify_pressure_solver_spectral_matches_sparse_reference
 
 Purpose: cross-validate spectral and sparse solvers.
 
@@ -816,7 +825,14 @@ Reference requirement: both methods should produce equivalent pressure gradients
 
 Validation section: compares $\nabla p'$ components with tolerance.
 
-### test_hydrostatic_pressure_vectorized_matches_reference_loop
+### test_verify_periodic_pressure_spectral_matches_sparse_reference
+
+Purpose: cross-validate the spectral and sparse pressure-correction solvers with `periodic_x=true`.
+
+Validation section: random periodic velocities; both solvers give the same $\nabla p'$ (within $10^{-7}$), and the sparse
+Poisson matrix couples the first and last columns with $1/\Delta x^2$ (periodic seam).
+
+### test_verify_hydrostatic_pressure_vectorized_matches_reference_loop
 
 Purpose: ensure vectorized hydrostatic integration matches loop baseline exactly.
 
@@ -828,7 +844,7 @@ p_k = p_{k+1} + \frac{1}{2}(\rho_{k+1}+\rho_k)g\Delta z.
 
 Validation section: elementwise equality at tight absolute/relative tolerances.
 
-### test_buoyancy_sign_heavy_down_light_up
+### test_verify_buoyancy_sign_heavy_down_light_up
 
 Purpose: confirm buoyancy sign convention.
 
@@ -840,7 +856,7 @@ b = -g\frac{\rho-\rho_{ref}}{\rho_{ref}}.
 
 Validation section: heavy parcels produce negative buoyancy, light positive.
 
-### test_pressure_component_decomposition_matches_total_pressure
+### test_verify_pressure_component_decomposition_matches_total_pressure
 
 Purpose: ensure pressure decomposition consistency.
 
@@ -852,7 +868,7 @@ p = p_h + p'.
 
 Validation section: reconstructed total pressure equals model stored pressure.
 
-### test_model_froude_limiter_short_run
+### test_verify_model_froude_limiter_short_run
 
 Purpose: verify limiter constrains Froude to configured maximum.
 
@@ -864,7 +880,7 @@ Fr_{new} \le Fr_{max}.
 
 Validation section: tracks maximum diagnostic Froude through run.
 
-### test_requested_domain_grid_dimensions
+### test_verify_requested_domain_grid_dimensions
 
 Purpose: enforce requested geometric discretization.
 
@@ -874,13 +890,13 @@ Validation section:
 \Delta x = L/n_x,\quad \Delta z = H/n_z.
 ```
 
-### test_requested_salinity_based_initial_densities
+### test_verify_requested_salinity_based_initial_densities
 
 Purpose: enforce lock-exchange initial density partition from salinity-derived target values.
 
 Validation section: left/right halves match configured $\rho_{left}$ and $\rho_{right}$.
 
-### test_initialize_rayleigh_taylor_layering_and_reset
+### test_verify_initialize_rayleigh_taylor_layering_and_reset
 
 Purpose: verify RT initializer layering and state reset, and switch-back lock-exchange initializer.
 
@@ -888,13 +904,13 @@ Reference setup: heavy-over-light with optional perturbation (Rayleigh-Taylor ca
 
 Validation section: layer values and zero initial velocities/free-surface checks.
 
-### test_initialize_rayleigh_taylor_argument_validation
+### test_verify_initialize_rayleigh_taylor_argument_validation
 
 Purpose: input-domain safety checks for RT initializer parameters.
 
 Validation section: invalid parameter ranges must raise `ArgumentError`.
 
-### test_free_surface_kinematic_bc_consistency
+### test_verify_free_surface_kinematic_bc_consistency
 
 Purpose: enforce kinematic free-surface closure.
 
@@ -906,7 +922,7 @@ w_{top} = \frac{\partial \eta}{\partial t}.
 
 Validation section: compares reconstructed top vertical velocity to finite-difference $\eta_t$ each step.
 
-### test_hydrostatic_continuity_and_surface_closure_residuals
+### test_verify_hydrostatic_continuity_and_surface_closure_residuals
 
 Purpose: verify that the LEGACY fixed-grid hydrostatic branch (`variable_top_layer=false`, pinned explicitly since
 section 13's variable top layer is the default for `use_hydrostatic=true`) preserves discrete continuity and
@@ -935,13 +951,21 @@ $10^{-10}$ m/s every step, and a non-zero set-up. Before the fixes of issue #4 t
 the fixed grid (wall faces of $u^{\ast}$ in the barotropic solve) and the mismatch was about $8\cdot10^{-6}$ m/s in all
 three treatments (wind added after the solve); see sections 9 and 10.
 
-### test_long_run_conservation_and_froude_control
+### test_verify_long_run_conservation_and_froude_control
 
 Purpose: long-run integration stability and conservation.
 
 Validation section: volume/mass conservation and limiter compliance over extended steps.
 
-### test_momentum_advection_zero_for_uniform_velocity_fields
+### test_verify_periodic_kelvin_helmholtz_boundaries_and_conservation
+
+Purpose: verify the periodic seam of the Kelvin-Helmholtz initial state and model steps (non-hydrostatic, sparse solver).
+
+Validation section: after `initialize_kelvin_helmholtz!` the seam faces 1 and nx+1 carry the same velocity and density
+and the full shear profile (not a wall with u = 0); they stay identical over three steps; constituent mass is conserved
+to round-off; the Poisson matrix couples the first and last columns.
+
+### test_verify_momentum_advection_zero_for_uniform_velocity_fields
 
 Purpose: verify zero self-advection tendency for uniform velocity fields.
 
@@ -962,19 +986,19 @@ Purpose: with a constant velocity ($C_x=0.14$, $C_z=0.16$) the `tvd2` momentum t
 step, i.e. both use the same flux-limited Lax-Wendroff scheme. Contrast: the semi-discrete momentum flux (`dt = 0`)
 differs.
 
-### test_momentum_advection_conservative_in_closed_box
+### test_verify_momentum_advection_conservative_in_closed_box
 
 Purpose: ensure net momentum-advection tendency integrates to near zero in closed domain.
 
 Validation section: integral of advection tendencies for $u$ and $w$ near zero for both schemes.
 
-### test_model_runs_with_tvd2_momentum_advection
+### test_verify_model_runs_with_tvd2_momentum_advection
 
 Purpose: smoke/stability check for TVD2 branch with full step coupling.
 
 Validation section: finite diagnostic metrics after integration.
 
-### test_baroclinic_pressure_gradient_accelerates_dense_to_right
+### test_validate_baroclinic_pressure_gradient_accelerates_dense_to_right
 
 Purpose: ensure pressure-gradient sign from baroclinic density contrast is physically consistent.
 
@@ -986,7 +1010,7 @@ a_x = -\frac{1}{\rho_0}\frac{\partial p}{\partial x}.
 
 Validation section: gradient sign and acceleration sign in expected direction.
 
-### test_short_time_dense_front_moves_right_with_low_damping
+### test_validate_short_time_dense_front_moves_right_with_low_damping
 
 Purpose: verify short-time lock-exchange front propagation direction.
 
@@ -1073,7 +1097,7 @@ Validation section: profile error below 2 % of the exact surface velocity (obser
 upwind flow below the interface, surface slope within 2 % (observed 0.09 %) and interface slope within 3 % (observed
 0.3 % hydrostatic, 0.5 % non-hydrostatic). The experiment `plot_wind_shear_analytic.jl` runs both cases from rest.
 
-### test_nonhydrostatic_branch_produces_pressure_correction
+### test_verify_nonhydrostatic_branch_produces_pressure_correction
 
 Purpose: ensure non-hydrostatic branch computes non-trivial pressure correction.
 
@@ -1081,7 +1105,7 @@ Reference equation: non-zero $p'$ expected when predictor divergence is non-zero
 
 Validation section: `nonhydro_pcorr_max > 0` and finite.
 
-### test_nonhydrostatic_solution_differs_from_hydrostatic
+### test_verify_nonhydrostatic_solution_differs_from_hydrostatic
 
 Purpose: regression guard that hydrostatic and non-hydrostatic trajectories diverge under same forcing.
 
@@ -1105,7 +1129,7 @@ Purpose: regression guard for the rigid-lid coupling fix (section 14). A lock ex
 baroclinic forcing, $\eta$ starts at 0) must reach $\max|\eta|$ well above round-off, while the kinematic closure and interior
 divergence stay at round-off (the reordering must not degrade existing continuity guarantees).
 
-### test_nonhydrostatic_surface_wave_period_matches_shallow_water_not_full_dispersion
+### test_verify_nonhydrostatic_surface_wave_period_matches_shallow_water_not_full_dispersion
 
 Purpose: documents a known LIMITATION OF THE DEFAULT MODE (not a `test_verify_*`/`test_validate_*` physics validation): with the
 legacy Neumann top condition, the non-hydrostatic branch does not produce dispersive surface-gravity waves (section 14). Pins the
@@ -1141,7 +1165,7 @@ gave $\sim3.7\times10^4\,\mathrm{Pa}$ for the same case).
 ### test_validate_nonhydrostatic_dirichlet_surface_wave_matches_full_dispersion
 
 Purpose: physics validation that `nonhydro_surface_dirichlet=true` produces genuine surface-wave dispersion (section 15), as the
-positive counterpart to `test_nonhydrostatic_surface_wave_period_matches_shallow_water_not_full_dispersion` above (same domain,
+positive counterpart to `test_verify_nonhydrostatic_surface_wave_period_matches_shallow_water_not_full_dispersion` above (same domain,
 $kH\approx1.57$, same $31\%$ shallow-water/exact gap).
 
 Analytical solution: full linear dispersion relation $\omega^2=gk\tanh(kH)$, period from the same zero-crossing technique as the
@@ -1207,7 +1231,7 @@ for random $\hat u$ and a surface within $\pm30\%$ of the top layer; residual at
 
 ### test_verify_top_layer_density_transport_conserves_mass_and_constancy
 
-Purpose: kernel-level check of `advect_density_upwind_top_layer!` with $(u,w,\eta^n,\eta^{n+1})$ taken from a model step.
+Purpose: kernel-level check of `advect_density_top_layer!` with $(u,w,\eta^n,\eta^{n+1})$ taken from a model step.
 
 Identities: $\sum\rho h\Delta x$ is conserved for a random density; a uniform density stays uniform (residual $\sim10^{-13}$). The
 constancy check caught a real defect during development (the horizontal flux of the layers below the top layer had been scaled by
@@ -1453,9 +1477,9 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The maske
   $H=0.2$ m, $g'=0.02$ m/s²): the front exponent decreases from the inertial value towards $x_f\propto t^{2/3}$ of the
   quadratic-drag regime (triangular current, pressure gradient $g'H/x_f$ balancing $\tfrac12C_Dau^2$); late exponent
   within 0.04 of 2/3 (observed 0.685).
-- `test_vegetation_damps_free_surface_wave_motion`: a rigid patch around a velocity antinode of a standing wave
+- `test_validate_vegetation_damps_free_surface_wave_motion`: a rigid patch around a velocity antinode of a standing wave
   reduces the wave energy after 10 s to below 0.8 of the case without vegetation (observed 0.69).
-- `test_vegetation_slows_lock_exchange_front`: a rigid patch in the right half delays the dense front by more than
+- `test_validate_vegetation_slows_lock_exchange_front`: a rigid patch in the right half delays the dense front by more than
   1 m after 60 s.
 
 ### Turbulence tests (`test_turbulence.jl`, section 17)
