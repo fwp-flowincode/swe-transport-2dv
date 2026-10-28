@@ -11,6 +11,9 @@
 # WetDryState / Model, and neighbour indices (f-1, f+1, k-1, k+1) are guarded by the loop ranges or explicit checks.
 
 const WD_EMPTY_CELL_THICKNESS = 1e-12   # m, a cell thinner than this is empty for the constituent transport
+# -, safety factor on the round-off bound gamma_m S, m = 2 nz + 8, of a computed depth (docs/depth_positivity.md, section 5);
+# a depth below -WD_POSITIVITY_ROUNDOFF_FACTOR gamma_m S stops the run
+const WD_POSITIVITY_ROUNDOFF_FACTOR = 2
 
 """
     WetDryState
@@ -39,11 +42,13 @@ mutable struct WetDryState{T<:Real}
     dp::Vector{T}
     delta::Vector{T}
     theta::Vector{T}
+    outflow::Vector{T}
     tri_a::Vector{T}
     tri_b::Vector{T}
     tri_c::Vector{T}
     tri_d::Vector{T}
     time::Float64
+    clamped_volume::Float64   # m^2 (per unit width): volume added by setting round-off negative depths to zero
     left_velocity::Any   # nothing, or a function t (s) -> u (m/s, scalar or length nz) at the left boundary face
 end
 
@@ -57,7 +62,7 @@ function WetDryState(cfg::ModelConfig; T::Type{<:Real}=Float64)
     end
     return WetDryState(bed, bed_face, zeros(T, nz, nx), zeros(T, nz, nx), zeros(T, nz, nx + 1), zeros(T, nz, nx + 1),
         zeros(T, nz, nx), zeros(T, nz, nx), zeros(T, nx + 1), zeros(T, nx + 1), zeros(T, nx), zeros(T, nx), zeros(T, nx),
-        zeros(T, nx), ones(T, nx), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz), 0.0, nothing)
+        zeros(T, nx), ones(T, nx), zeros(T, nx), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz), 0.0, 0.0, nothing)
 end
 
 """
@@ -81,6 +86,16 @@ function layer_thicknesses!(h::AbstractVector{<:Real}, zeta::Real, zb::Real, dz:
 end
 
 _wd_level(model::Model, i::Int) = model.config.depth + model.state.eta[i]   # m, water level zeta of column i
+
+# Surface elevation eta (m) of a dry column: the smallest float with fl(depth + eta) >= zb, so that the computed depth
+# zeta - zb is exactly >= 0 (eta = zb - depth alone can round to one ulp below the bed).
+function _wd_dry_eta(depth::Real, zb::Real)
+    eta = zb - depth
+    while depth + eta < zb
+        eta = nextfloat(eta)
+    end
+    return eta
+end
 
 """
     water_depth(model) -> Vector
@@ -109,7 +124,9 @@ function initialize_water_level!(model::Model, level::Union{Real,AbstractVector{
     st = model.state
     levels = level isa Real ? fill(float(level), cfg.nx) : collect(float.(level))
     length(levels) == cfg.nx || throw(ArgumentError("level must have nx = $(cfg.nx) entries"))
-    @. st.eta = max(levels, wd.bed) - cfg.depth
+    @inbounds for i in 1:cfg.nx
+        st.eta[i] = levels[i] > wd.bed[i] ? levels[i] - cfg.depth : _wd_dry_eta(cfg.depth, wd.bed[i])
+    end
     if rho isa Real
         fill!(st.rho, rho)
     elseif rho !== nothing
@@ -128,7 +145,9 @@ end
 function _wd_clamp_to_bed!(model::Model)
     wd = model.wetdry
     @inbounds for i in eachindex(model.state.eta)
-        model.state.eta[i] = max(model.state.eta[i], wd.bed[i] - model.config.depth)
+        if model.config.depth + model.state.eta[i] < wd.bed[i]
+            model.state.eta[i] = _wd_dry_eta(model.config.depth, wd.bed[i])
+        end
     end
     return nothing
 end
@@ -312,6 +331,93 @@ function _wd_boundary_velocities!(model::Model, wd::WetDryState, u::AbstractMatr
     return nothing
 end
 
+# Round-off tolerance (m) of the depth of column i (docs/depth_positivity.md, section 5): WD_POSITIVITY_ROUNDOFF_FACTOR *
+# gamma_m * S with gamma_m = m eps / (1 - m eps), m = 2 nz + 8 (rounding steps of the continuity update) and
+# S = depth + |eta^n| + |eta^{n+1}| + |z_b| + O_i (m) the magnitudes that enter it (Higham 2002, Lemma 3.1 and Sec. 4.2).
+function _wd_depth_roundoff(model::Model, wd::WetDryState, i::Int)
+    m = 2 * model.config.nz + 8
+    gamma = m * eps(Float64) / (1 - m * eps(Float64))
+    S = model.config.depth + abs(model.ws.eta_old[i]) + abs(model.state.eta[i]) + abs(wd.bed[i]) + wd.outflow[i]
+    return WD_POSITIVITY_ROUNDOFF_FACTOR * gamma * S
+end
+
+"""
+    _wd_check_depth_positivity(model, wd)
+
+Stops the run if a column holds a negative depth zeta - z_b beyond round-off at the start of a step (only possible if the
+state was set from outside, e.g. eta written directly below the bed; the step itself cannot produce it, see
+docs/depth_positivity.md).
+"""
+function _wd_check_depth_positivity(model::Model, wd::WetDryState)
+    @inbounds for i in eachindex(wd.bed)
+        depth = _wd_level(model, i) - wd.bed[i]
+        if depth < -_wd_depth_roundoff(model, wd, i)
+            throw(DomainError(depth, @sprintf("negative water depth %.3e m in column %d (bed %.4f m, level %.4f m); wetting and drying requires depth >= 0",
+                depth, i, wd.bed[i], _wd_level(model, i))))
+        end
+    end
+    return nothing
+end
+
+"""
+    _wd_limit_fluxes_and_update_level!(model, wd)
+
+Positivity-preserving continuity step (docs/depth_positivity.md). From the layer discharges q = hf u of the final
+velocities:
+- outflow volume of column i (m): O_i = dt/dx sum_k (max(q_{k,i+1}, 0) + max(-q_{k,i}, 0));
+- limiter: theta_i = min(1, V_i / O_i), V_i = max(zeta_i - z_b,i, 0) the volume (depth) at time n;
+- every outflowing face-layer flux of column i is multiplied by theta_i (u likewise); inflows from outside the domain
+  are not limited;
+- eta_i^{n+1} = eta_i^n - dt/dx sum_k (q_{k,i+1} - q_{k,i}) with the limited fluxes.
+Then V^{n+1} = V^n - theta O + I >= 0 for any dt (I >= 0: limited inflows). In floating point the new depth can be a few
+ulps below zero; such a depth is set to zero (the volume added is accumulated in wd.clamped_volume), a larger negative
+depth stops the run (it would indicate a defect).
+"""
+function _wd_limit_fluxes_and_update_level!(model::Model, wd::WetDryState)
+    cfg = model.config
+    st = model.state
+    ws = model.ws
+    nz, nx = cfg.nz, cfg.nx
+    dt, dx = cfg.dt, model.dx
+    @. wd.q = wd.hf * st.u
+    @inbounds for i in 1:nx
+        out = 0.0
+        for k in 1:nz
+            out += max(wd.q[k, i + 1], 0.0) + max(-wd.q[k, i], 0.0)
+        end
+        out *= dt / dx
+        volume = max(_wd_level(model, i) - wd.bed[i], 0.0)
+        wd.outflow[i] = out
+        wd.theta[i] = out > volume ? volume / out : 1.0
+    end
+    @inbounds for f in 1:(nx + 1), k in 1:nz
+        q = wd.q[k, f]
+        factor = q > 0.0 ? (f > 1 ? wd.theta[f - 1] : 1.0) : (q < 0.0 ? (f <= nx ? wd.theta[f] : 1.0) : 1.0)
+        if factor < 1.0
+            wd.q[k, f] = q * factor
+            st.u[k, f] *= factor
+        end
+    end
+    @inbounds for i in 1:nx
+        div = 0.0
+        for k in 1:nz
+            div += wd.q[k, i + 1] - wd.q[k, i]
+        end
+        st.eta[i] = ws.eta_old[i] - dt * div / dx
+        depth = _wd_level(model, i) - wd.bed[i]
+        if depth < 0.0
+            if depth < -_wd_depth_roundoff(model, wd, i)
+                throw(DomainError(depth, @sprintf("negative water depth %.3e m in column %d after the limited continuity step (outflow %.3e m, theta %.3e); this violates the positivity proof (docs/depth_positivity.md)",
+                    depth, i, wd.outflow[i], wd.theta[i])))
+            end
+            st.eta[i] = _wd_dry_eta(cfg.depth, wd.bed[i])
+            wd.clamped_volume += (_wd_level(model, i) - wd.bed[i] - depth) * dx
+        end
+        ws.eta_t[i] = (st.eta[i] - ws.eta_old[i]) / dt
+    end
+    return nothing
+end
+
 """
     _step_forward_wetting_drying!(model)
 
@@ -345,12 +451,15 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     dt, dx, g = cfg.dt, model.dx, cfg.g
     model.vegetation === nothing || throw(ArgumentError("vegetation is not supported with wetting_drying=true"))
 
+    copyto!(ws.eta_old, st.eta)
+    fill!(wd.outflow, 0.0)
+    _wd_check_depth_positivity(model, wd)
+
     # 1. geometry at time n
     _wd_cell_thicknesses!(wd.h, model, wd)
     _wd_face_thicknesses!(model, wd)
     @. wd.q = wd.hf * st.u   # discharges of time n, for the advection
     _wd_baroclinic_pressure!(model, wd)
-    copyto!(ws.eta_old, st.eta)
 
     # 2. momentum predictor
     damp = cfg.rayleigh_damping > 0.0 ? max(0.0, 1.0 - cfg.rayleigh_damping * dt) : 1.0
@@ -420,34 +529,7 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     @views st.u[:, nx + 1] .= ws.u_hat[:, nx + 1]
 
     # 5. positivity of the column volumes and the new water level from the flux divergence
-    @. wd.q = wd.hf * st.u
-    @inbounds for i in 1:nx
-        out = 0.0
-        for k in 1:nz
-            out += max(wd.q[k, i + 1], 0.0) + max(-wd.q[k, i], 0.0)
-        end
-        out *= dt / dx
-        volume = max(_wd_level(model, i) - wd.bed[i], 0.0)
-        wd.theta[i] = out > volume ? volume / out : 1.0
-    end
-    @inbounds for f in 1:(nx + 1), k in 1:nz
-        q = wd.q[k, f]
-        factor = q > 0.0 ? (f > 1 ? wd.theta[f - 1] : 1.0) : (q < 0.0 ? (f <= nx ? wd.theta[f] : 1.0) : 1.0)
-        if factor < 1.0
-            wd.q[k, f] = q * factor
-            st.u[k, f] *= factor
-        end
-    end
-    @inbounds for i in 1:nx
-        div = 0.0
-        for k in 1:nz
-            div += wd.q[k, i + 1] - wd.q[k, i]
-        end
-        st.eta[i] = ws.eta_old[i] - dt * div / dx
-        # WHY: a fully drained column can end a round-off below its bed
-        st.eta[i] = max(st.eta[i], wd.bed[i] - cfg.depth)
-        ws.eta_t[i] = (st.eta[i] - ws.eta_old[i]) / dt
-    end
+    _wd_limit_fluxes_and_update_level!(model, wd)
 
     # 6. vertical fluxes through the fixed interfaces (m/s), integrated upwards from the bed
     @inbounds for i in 1:nx

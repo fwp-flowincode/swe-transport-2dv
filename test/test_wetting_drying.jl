@@ -138,6 +138,48 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         @test all(isfinite, model.state.u)
     end
 
+    # Depth positivity (docs/depth_positivity.md): the limited continuity step keeps every depth >= 0 for any time step.
+    # Dam break onto a dry bed and the sloshing basin with time steps far beyond the advective CFL limit, where the
+    # limiter must act; the depth never becomes negative and volume and mass stay conserved.
+    @testset "test_verify_wd_depth_positivity_large_time_step_$(label)" for (label, nz) in (("1d", 1), ("2dv", 10))
+        CFL_TARGET = 3.0          # -, advective Courant number 2 c0 dt / dx of the dam break (positivity is unconditional)
+        NSTEPS = 200              # -
+        CLAMP_REL_MAX = 1e-14     # -, volume added by setting round-off negative depths to zero, relative to the total
+        cfg = wd_config(length=40.0, depth=1.2, nx=80, nz=nz)
+        dx = cfg.length / cfg.nx
+        cfg.dt = CFL_TARGET * dx / (2 * sqrt(cfg.g * 1.0))
+        x = wd_x_centres(cfg)
+        cfg.bed_level = @. 0.05 * max(x - 0.5 * cfg.length, 0.0)   # a dry beach behind the dry flat bed
+        model = Model(cfg)
+        dz = cfg.depth / cfg.nz
+        rho = [(x[i] < 10.0 ? 1003.0 : 1000.0) + ((k - 0.5) * dz < 0.4 ? 1.0 : 0.0) for k in 1:cfg.nz, i in 1:cfg.nx]
+        initialize_water_level!(model, [xi < 10.0 ? 1.0 : 0.0 for xi in x]; rho=rho)
+        diag0 = compute_diagnostics(model)
+        min_depth = Inf
+        theta_min = 1.0
+        for _ in 1:NSTEPS
+            step_forward!(model)
+            min_depth = min(min_depth, minimum(cfg.depth .+ model.state.eta .- model.wetdry.bed))
+            theta_min = min(theta_min, minimum(model.wetdry.theta))
+        end
+        diag = compute_diagnostics(model)
+        @test theta_min < 1.0        # the limiter did act
+        @test min_depth >= 0.0
+        @test model.wetdry.clamped_volume <= CLAMP_REL_MAX * diag0["water_volume"]
+        @test abs(diag["water_volume"] - diag0["water_volume"]) <= TOL_VOLUME_REL * diag0["water_volume"]
+        @test abs(diag["constituent_mass"] - diag0["constituent_mass"]) <= TOL_MASS_REL * diag0["constituent_mass"]
+        @test all(isfinite, model.state.u)
+    end
+
+    @testset "test_verify_wd_negative_depth_is_rejected" begin
+        cfg = wd_config(length=10.0, depth=1.0, nx=20, nz=4, dt=0.01)
+        cfg.bed_level = fill(0.3, cfg.nx)
+        model = Model(cfg)
+        initialize_water_level!(model, 0.8; rho=1000.0)
+        model.state.eta[7] = 0.2 - cfg.depth   # water level below the bed: depth -0.1 m
+        @test_throws DomainError step_forward!(model)
+    end
+
     @testset "test_verify_ritter_reference_solution" begin
         RITTER_QUADRATURE_RTOL = 1e-5   # -, midpoint sum over the jump at x0 - c0 t: error ~ step * h0 / 2
         # Ritter (1892): the rarefaction conserves the released volume, joins h0 at x0 - c0 t and ends at x0 + 2 c0 t

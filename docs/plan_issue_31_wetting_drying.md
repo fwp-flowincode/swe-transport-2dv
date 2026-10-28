@@ -49,6 +49,7 @@ all existing cases stay unchanged. Hydrostatic mode only in this issue.
 3. Velocity correction u = u_hat - g dt d(eta)/dx on the wet face layers.
 4. Positivity: outflow fluxes of a cell are scaled down if they would remove more than its volume (one pass; the
    inflow only adds). eta^{n+1} is then taken from the flux divergence, so the water volume is conserved to round-off.
+   Proof (any dt), floating-point bound, run-time check and time-step conditions: `docs/depth_positivity.md`.
 5. Vertical fluxes through the fixed interfaces from the layer continuity, using the new layer thicknesses.
 6. Constituent transport: conservative finite volumes with the same fluxes and layer volumes (first-order upwind). Cells
    that empty pass their residual mass to the column; values outside the initial bounds (possible in thin cells)
