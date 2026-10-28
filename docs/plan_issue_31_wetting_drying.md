@@ -104,14 +104,21 @@ Findings during the implementation:
 - The dry front of the Ritter case converges slowly (first-order upwinding; 12.7 %, 11.3 %, 7.5 % at dx = 0.5, 0.25,
   0.125 m), while the depth converges at first order. The test accepts 12 % at dx = 0.25 m and requires convergence.
 
+- 2DV Ritter: the velocity is not uniform over the depth where the surface has dropped through several layers (upper
+  layers up to 6 % slower at t = 5 s). Likely cause: in the draining surface layer the upwind face thickness exceeds the
+  averaged cell thickness, which over-weights the inflow of slower fluid in the momentum-conservative form; the vertical
+  exchange carries the deficit down. To be fixed with the momentum-advection work of step 2.
+
 Open questions for review:
 - **Q1, accuracy targets:** are 12 % front lag (Ritter, dx = 0.25 m) and 10 % shoreline error (Carrier-Greenspan,
   dx = 0.05 m) "sufficiently accurate"? Tighter targets need second-order (limited) momentum advection and depth
   reconstruction near the front (section 6).
 - **Q2, non-hydrostatic wetting and drying:** needed in this issue, or a separate one?
 
-Next step: the experiments of section 4 (README, figures, animations) and the documentation in
-`test/TESTS_TECHNICAL_DOCUMENTATION.md`.
+Experiments of section 4: done, `experiments/wetting_drying/` (README, figures, animations).
+
+Decided in review (2026-10-28): non-hydrostatic wetting and drying and the `tvd2` momentum and transport schemes are
+part of this issue (step 2). Still to do: the documentation in `test/TESTS_TECHNICAL_DOCUMENTATION.md`.
 
 6 Out of scope (proposed for later)
 -----------------------------------

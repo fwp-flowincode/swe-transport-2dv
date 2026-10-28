@@ -23,6 +23,7 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
     TOL_VOLUME_REL = 1e-12         # -, relative water-volume change in a closed basin (round-off)
     TOL_MASS_REL = 1e-12           # -, relative constituent-mass change in a closed basin (round-off)
     TOL_DENSITY_BOUND = 1e-9       # kg/m^3, allowed overshoot of the initial density bounds (round-off)
+    WET_DEPTH = 1e-3               # m, a column counts as wet above this depth (a drained beach keeps a thin film)
 
     @testset "test_verify_wd_layer_thickness_kernel" begin
         nz, dz = 5, 0.2
@@ -117,7 +118,7 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         model = sloshing_model(nz)
         diag0 = compute_diagnostics(model)
         rho_lo, rho_hi = extrema(model.state.rho)
-        wet0 = water_depth(model) .> 0.0
+        wet0 = water_depth(model) .> WET_DEPTH
         wet_changed = falses(model.config.nx)
         min_depth = Inf
         rho_overshoot = 0.0
@@ -125,7 +126,7 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
             step_forward!(model)
             depth = water_depth(model)
             min_depth = min(min_depth, minimum(depth))
-            wet_changed .|= (depth .> 0.0) .!= wet0
+            wet_changed .|= (depth .> WET_DEPTH) .!= wet0
             rho_overshoot = max(rho_overshoot, maximum(model.state.rho) - rho_hi, rho_lo - minimum(model.state.rho))
         end
         diag = compute_diagnostics(model)
