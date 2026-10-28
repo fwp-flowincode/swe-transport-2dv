@@ -1,7 +1,7 @@
 # 2DV SWE Test Technical Documentation
 
 This document provides technical background, governing equations, and literature context for all test blocks of the test suite.
-`test/runtests.jl` includes one file per functional area. Shared packages and tolerances live in `test/test_common.jl`, which
+`test/runtests.jl` includes one file per functional area (this document lives in `docs/`). Shared packages and tolerances live in `test/test_common.jl`, which
 every file includes, so each file also runs on its own (`julia --project=. test/test_advection.jl`):
 
 | File | Area |
@@ -15,6 +15,8 @@ every file includes, so each file also runs on its own (`julia --project=. test/
 | `test_turbulence.jl` | k-epsilon closure, bed wall functions, turbulent density diffusion (section 17) |
 | `test_nonhydrostatic.jl` | non-hydrostatic branch and free surface (sections 14, 15) |
 | `test_variable_top_layer.jl` | variable-thickness top layer (section 13) |
+| `test_bed_geometry.jl` | variable bed (staircase, issue #3) |
+| `test_wetting_drying.jl` | wetting and drying, reference solutions (section 18) |
 
 ## Governing model
 
@@ -102,7 +104,7 @@ earlier ordering that had the free-surface solve AFTER the non-hydrostatic proje
 
 ### 3) Momentum advection schemes (`upwind1`, `tvd2`)
 
-For each advected component $\phi\in\{u,w\}$, the code computes conservative flux divergence:
+For each advected component $\phi\in\lbrace u,w\rbrace$, the code computes conservative flux divergence:
 
 ```math
 \mathcal{A}(\phi)=\frac{F^x_{i+1/2}-F^x_{i-1/2}}{\Delta x}+\frac{F^z_{k+1/2}-F^z_{k-1/2}}{\Delta z}.
@@ -141,7 +143,7 @@ released potential energy) and blew up; with it the energy budget stays consiste
 
 ### 4) Density transport method (`upwind1`, `tvd2`)
 
-Density is advanced by one forward-Euler step of conservative face fluxes $F_f=v_f\,\rho_f$ on the C-grid velocities,
+Density is advanced by one forward-Euler step of conservative face fluxes $F_f=v_f\thinspace\rho_f$ on the C-grid velocities,
 with zero flux through all outer faces:
 
 ```math
@@ -162,9 +164,9 @@ earlier results bit for bit):
   mirrored for $v_f<0$, with $s=0$ in the boundary cells. It contains the time-correction factor $(1-C_f)$ (since issue #3
   also used for momentum, section 3). The reason is that the update is a single forward-Euler step: without that factor, MUSCL with forward
   Euler is first order in time and TVD only for $C\le1/2$ in 1D; with it the scheme is second order in time and TVD up to
-  $C=1$ in 1D (MC lies in Sweby's TVD region $0\le\psi(r)\le\min(2r,2)$). The unsplit 2D update satisfies a local maximum
+  $C=1$ in 1D, since MC lies in Sweby's TVD region $0\le\psi(r)\le\min(2r,2)$. The unsplit 2D update satisfies a local maximum
   principle for $C_x+C_z\le1/2$ (each face coefficient is at most $C(2-C)\le2C$). It has no corner-transport
-  (cross-derivative) term, so for flow oblique to the grid the time error is $O(\Delta t\,|uw|\,\partial_{xz}\rho)$: first
+  (cross-derivative) term, so for flow oblique to the grid the time error is $O(\Delta t\thinspace|uw|\thinspace\partial_{xz}\rho)$: first
   order in time but second order in space. Measured L1 orders for a Gaussian at $C=0.4$: about 2.2 for grid-aligned flow,
   1.0 for diagonal flow (error still about 4 times below `upwind1`), and 1.8 for diagonal flow at $C=0.02$.
 
@@ -181,7 +183,7 @@ $\nabla\cdot\mathbf{u}=-\eta_t/\Delta z\neq0$. The top row is therefore advanced
 
 with $\nabla\cdot\mathbf{u}$ built from the same face velocities and zero-flux conventions as the fluxes
 (`_density_top_row_advective_form!`, option `top_row_advective_form` of `advect_density!`). A uniform density stays uniform.
-The fixed-grid mass $\sum\rho\,\Delta x\Delta z$ changes only by terms proportional to the top-row density anomaly (the uniform
+The fixed-grid mass $\sum\rho\thinspace\Delta x\Delta z$ changes only by terms proportional to the top-row density anomaly (the uniform
 part cancels because $\sum_i\eta_t=0$ in a closed basin); the global mass correction (section 11) removes that residual.
 
 Optional bound-preserving clamping is applied during update:
@@ -208,7 +210,7 @@ forward-Euler stability: $2\nu\Delta t(1/\Delta x^2+1/\Delta z^2)\le1$. Tests:
 `test_verify_diffusion_flux_form_second_order_convergence` (manufactured solution with $\nu(z)$, order 2 in the max norm
 including the top and bottom rows) and `test_verify_diffusion_flux_form_conserves_column_momentum`.
 
-The former kernel $\nu\,\nabla^2u$ skipped the top and bottom rows: the top row had no viscous coupling to the row below,
+The former kernel $\nu\thinspace\nabla^2u$ skipped the top and bottom rows: the top row had no viscous coupling to the row below,
 so a wind stress stayed in the top cell. At $\Delta z=0.025$ m the resulting surface jet kept accelerating and the
 hydrostatic downwelling at the downwind wall broke the run down (issue #4). The mixing-length $\nu_t$ uses one-sided shear
 in the top and bottom rows, so that their face viscosity is not halved.
@@ -384,9 +386,9 @@ the explicit value. `variable_top_layer=true` with `use_hydrostatic=false` raise
 `variable_top_layer=false` (legacy treatment, forced by the automatic default when `use_hydrostatic=false`, and available as an
 explicit override for the hydrostatic mode too — see limitations below): all layers have the fixed thickness $\Delta z$, the free
 surface $\eta$ is a separate field that enters only through the barotropic solve (section 8), the surface-slope force
-$-g\,\partial_x\eta$ and the top-face velocity $w_{top}=\eta_t$ (section 9). Density and momentum advection set the flux through
+$-g\thinspace\partial_x\eta$ and the top-face velocity $w_{top}=\eta_t$ (section 9). Density and momentum advection set the flux through
 the top face to zero. In flux form that is consistent only if $w_{top}=0$ (rigid lid). With a moving surface a zero top flux is
-a source of $\rho\,\eta_t\,\Delta t/\Delta z$ per step in the top row, and $\rho\approx 10^3\,\mathrm{kg/m^3}$ makes it large; this
+a source of $\rho\thinspace\eta_t\thinspace\Delta t/\Delta z$ per step in the top row, and $\rho\approx 10^3\thinspace\mathrm{kg/m^3}$ makes it large; this
 was the original motivation for section 13 (see the wind-shear test note below). The surface moves in both modes: since the
 reordering of section 14 the non-hydrostatic $\eta$ is driven by the momentum predictor, so the earlier assumption that the
 non-hydrostatic projection keeps $\eta$ at round-off no longer holds. In the Rayleigh-Taylor experiment the source reached
@@ -398,7 +400,7 @@ momentum advection is unchanged.
 `variable_top_layer=true` (hydrostatic mode; the default) lets the top layer follow the surface: layers $k\lt n_z$ keep $\Delta z$,
 the top layer has $h=\Delta z+\eta$, and the free surface is a material boundary (zero flux through it). Per step:
 
-1. Face thickness (old level): $h^{n}_{i+1/2}=\Delta z+\tfrac12(\eta^n_i+\eta^n_{i+1})$ (`top_layer_face_thickness!`).
+1. Face thickness (old level): $h_{i+1/2}^{n}=\Delta z+\tfrac12(\eta^n_i+\eta^n_{i+1})$ (`top_layer_face_thickness!`).
 2. Semi-implicit free surface (`solve_variable_thickness!`), same thicknesses in the right-hand side and the matrix:
 
 ```math
@@ -411,9 +413,9 @@ a_i=\frac{g\Delta t^2}{\Delta x^2}\left((n_z-1)\Delta z+h^n_i\right),
 ```
 
 with $a=0$ at the boundary faces; the boundary-face values of $\hat u$ are set to the boundary condition first, so the solve sees the
-transport the final velocities have. Then $u^{n+1}=\hat u-g\Delta t\,\partial_x\eta^{n+1}$ in every layer, which gives
+transport the final velocities have. Then $u^{n+1}=\hat u-g\Delta t\thinspace\partial_x\eta^{n+1}$ in every layer, which gives
 $\eta^{n+1}-\eta^n=-\Delta t\sum_k\partial_x(h_k u_k^{n+1})$ exactly.
-3. Continuity: layers below the top layer as before, $w_{k+1}=w_k-\Delta z\,(\partial_x u)_k$; the top layer closes its own budget
+3. Continuity: layers below the top layer as before, $w_{k+1}=w_k-\Delta z\thinspace(\partial_x u)_k$; the top layer closes its own budget
 
 ```math
 \frac{\partial\eta}{\partial t}+\frac{\partial}{\partial x}\left(h\,u_{n_z}\right)=w_{n_z},
@@ -428,19 +430,19 @@ thickness-integrated budget
 \rho^{n+1}_{top}=\frac{h^n\rho^n_{top}-\Delta t\left(\partial_x(h^n u\rho)-w_{n_z}\rho_{bot}\right)}{h^{n+1}},\qquad h^{n+1}=\Delta z+\eta^{n+1},
 ```
 
-which preserves a uniform density exactly and conserves $\sum\rho h\,\Delta x$ to round-off. The constituent mass, the mass
+which preserves a uniform density exactly and conserves $\sum\rho h\thinspace\Delta x$ to round-off. The constituent mass, the mass
 correction (section 11) and the diagnostics use the actual cell volumes.
-5. Momentum: the top row uses the advective form, $\mathcal{A}(u)\leftarrow\partial_x(v u)+\partial_z(w u)-u\,\nabla\!\cdot v$, with
-$\nabla\!\cdot v$ built from the same face velocities and zero-flux boundary conventions as the flux form. It supplies the missing
-$u\,\eta_t/h$ term and makes a uniform $u$ advection-free. Below the top row the validated flux form is unchanged.
+5. Momentum: the top row uses the advective form, $\mathcal{A}(u)\leftarrow\partial_x(v u)+\partial_z(w u)-u\thinspace\nabla\negthinspace\cdot v$, with
+$\nabla\negthinspace\cdot v$ built from the same face velocities and zero-flux boundary conventions as the flux form. It supplies the missing
+$u\thinspace\eta_t/h$ term and makes a uniform $u$ advection-free. Below the top row the validated flux form is unchanged.
 6. Hydrostatic pressure: the reference at the top-cell centre is the weight of the upper half layer, $p=\rho_{top}g\Delta z/2$
-(`top_half_layer=true`), instead of 0, so the top row sees the baroclinic gradient $(g\Delta z/2)\,\partial_x\rho_{top}$.
+(`top_half_layer=true`), instead of 0, so the top row sees the baroclinic gradient $(g\Delta z/2)\thinspace\partial_x\rho_{top}$.
 
 Limitations: the surface must stay inside the top layer, $\Delta z+\eta\ge$ `top_layer_min_fraction`$\cdot\Delta z$ (the run stops
 with a clear error otherwise; there is no layer removal or wetting/drying). Cases with a large surface excursion relative to
 $\Delta z$ must set `variable_top_layer=false` explicitly: the surface dam break (`initialize_surface_dam_break!`, $|\eta|$ set
 directly by `eta_jump`) and any case forcing a large-amplitude free-surface wave (e.g. the vegetation wave-damping experiment,
-amplitude $\mathcal{O}(1\,\mathrm{m})$ against $\Delta z=\mathcal{O}(0.1\,\mathrm{m})$); see the `variable_top_layer=false` comments
+amplitude of order 1 m against $\Delta z$ of order 0.1 m); see the `variable_top_layer=false` comments
 at their `ModelConfig` construction. The horizontal momentum fluxes of the top row are not weighted with the face thickness (an
 $O(\eta/\Delta z)$ effect). Vegetation coupling assumes fixed geometry. The non-hydrostatic projection is not adapted (see above),
 so `variable_top_layer=true` is rejected with `use_hydrostatic=false`.
@@ -455,14 +457,14 @@ Numer. Methods Fluids 32, 331-348 (z-layer model with a variable top layer). Equ
 
 ### 14) Non-hydrostatic free surface: rigid-lid coupling fix, and a remaining dispersion limitation
 
-Before this fix, the non-hydrostatic branch's free surface $\eta$ stayed pinned at round-off ($\sim10^{-13}\,\mathrm{m}$)
+Before this fix, the non-hydrostatic branch's free surface $\eta$ stayed pinned at round-off ($\sim10^{-13}\thinspace\mathrm{m}$)
 regardless of real internal (baroclinic) forcing, effectively a rigid lid, even though the SAME barotropic solve (section 8) and
 surface-slope correction (section 9) as the hydrostatic branch were being computed every step. Cause: in `step_forward!`, the
 barotropic solve used to run AFTER the non-hydrostatic projection, on the projection's OUTPUT $\hat u$. The projection makes
 $(\hat u,\hat w)$ exactly divergence-free cell-by-cell (Neumann-Neumann Poisson solve, section 7); summed over depth this forces
 the transport divergence the barotropic solve sees, $\sum_k\partial_x\hat u_k$, to equal $-\hat w_{top}$ — but $\hat w_{top}$ is
 never touched by the projection (it only corrects interior faces $2{:}n_z$) and still carries the value copied from the OLD
-$w_{top}$ (the previous step's $\eta_t$) at the top of the function. The recursion $\eta^{n+1}\approx\eta^n+\Delta t\,\eta_t^n$ is
+$w_{top}$ (the previous step's $\eta_t$) at the top of the function. The recursion $\eta^{n+1}\approx\eta^n+\Delta t\thinspace\eta_t^n$ is
 homogeneous in $\eta$, with $\eta\equiv0$ a self-consistent fixed point — an incidental consequence of the step ordering, not a
 deliberate rigid-lid choice.
 
@@ -477,13 +479,13 @@ same way the (always exactly 0) bottom face already is.
 
 Verified (`test_verify_nonhydrostatic_free_surface_responds_to_internal_forcing`): a lock exchange (uniform-density regions in
 hydrostatic equilibrium give $\eta\equiv0$; the forcing here is purely baroclinic) run in non-hydrostatic mode now reaches
-$\max|\eta|\sim7\times10^{-4}\,\mathrm{m}$ after 400 steps ($\Delta t=5\times10^{-4}\,\mathrm{s}$), several orders of magnitude
+$\max|\eta|\sim7\times10^{-4}\thinspace\mathrm{m}$ after 400 steps ($\Delta t=5\times10^{-4}\thinspace\mathrm{s}$), several orders of magnitude
 above round-off, while the kinematic closure and interior divergence stay at round-off (the reordering does not degrade the
 existing continuity guarantees). No other test in the suite changed outcome from this fix (full-suite regression check).
 
 **Limitation of the DEFAULT (legacy Neumann) mode: non-hydrostatic surface waves are non-dispersive.** The fix above makes $\eta$
 respond to real (baroclinic) internal dynamics, but a pure free-surface gravity wave — uniform density, so zero baroclinic
-pressure gradient and zero buoyancy forcing — is governed only by the barotropic surface-slope force $-g\,\partial_x\eta$, applied
+pressure gradient and zero buoyancy forcing — is governed only by the barotropic surface-slope force $-g\thinspace\partial_x\eta$, applied
 UNIFORMLY over depth OUTSIDE the elliptic (non-hydrostatic) solve. With uniform density the momentum predictor's $w$ has no
 forcing either, so the field entering the projection is already very close to the continuity-consistent (depth-uniform $u$,
 linear-in-depth $w$) state, and the projection has essentially nothing left to correct. Consequence, verified by
@@ -505,9 +507,9 @@ spectral (DCT-based) solver's fast transform represents only a Neumann-Neumann e
 Dirichlet(top)/Neumann(bottom) condition.
 
 **Physical motivation.** The model splits total pressure as $p=p_{hydro}+p'$ (section 7), with the barotropic surface-slope force
-$-g\,\partial_x\eta$ (a REFERENCE-density, $\rho_0$-based, depth-UNIFORM approximation of the surface's dynamic pressure) applied
+$-g\thinspace\partial_x\eta$ (a REFERENCE-density, $\rho_0$-based, depth-UNIFORM approximation of the surface's dynamic pressure) applied
 separately. For a linear surface wave, potential-flow theory gives the exact dynamic pressure
-$p_{dyn}(z)=\rho_0 g\,\eta\,\cosh(k(z+H))/\cosh(kH)$: equal to the barotropic approximation $\rho_0 g\eta$ exactly AT the surface
+$p_{dyn}(z)=\rho_0 g\thinspace\eta\thinspace\cosh(k(z+H))/\cosh(kH)$: equal to the barotropic approximation $\rho_0 g\eta$ exactly AT the surface
 ($z=0$: $\cosh(kH)/\cosh(kH)=1$) but decaying with depth for $kH$ not small. The remaining piece the barotropic term misses,
 $p'(z)=p_{dyn}(z)-\rho_0 g\eta$, is therefore exactly 0 AT the top face and non-zero below — i.e. $p'=0$ at the top is the correct
 dynamic free-surface condition for the part of the pressure not already carried by the barotropic/hydrostatic split, and letting the
@@ -527,14 +529,14 @@ and solution means must NOT be removed (`PressureCorrectionSolver.top_dirichlet`
 For the legacy Neumann-Neumann projection this is harmless — the projection's role there is only to correct $u$ via
 $\partial_x p'$ (section 7), and the "trivial", $x$-independent reference-profile contribution to $p'$ has zero $x$-gradient
 regardless of its (possibly large) magnitude, and the mean-removal step additionally erases whatever of it is left. It is NOT
-harmless with the Dirichlet condition, where $p'$'s absolute magnitude is now physically meaningful (no mean removal): empirically,
-for a $\rho\equiv\rho_0$ test case the reference contribution alone gave $|p'|\sim3.7\times10^4\,\mathrm{Pa}$, dwarfing the genuine
-dynamic-pressure signal ($\rho_0 g\eta\sim1\,\mathrm{Pa}$ for a $10^{-4}\,\mathrm{m}$ wave) by four orders of magnitude — besides the
-conceptual problem of applying a "$p'=0$ at the surface" condition to a quantity dominated by something that is not $p'$ at all.
+harmless with the Dirichlet condition, where the absolute magnitude of $p'$ is now physically meaningful (no mean removal): empirically,
+for a $\rho\equiv\rho_0$ test case the reference contribution alone gave $|p'|\sim3.7\times10^4\thinspace\mathrm{Pa}$, dwarfing the genuine
+dynamic-pressure signal ($\rho_0 g\eta\sim1\thinspace\mathrm{Pa}$ for a $10^{-4}\thinspace\mathrm{m}$ wave) by four orders of magnitude — besides the
+conceptual problem of applying the surface condition $p'=0$ to a quantity dominated by something that is not $p'$ at all.
 Fix: `Model.grad_p_z_reference` caches $\partial_z p_{ref}$, where $p_{ref}$ is the hydrostatic pressure of the reference profile
 (the initial state's column 1, matching `rho_0_w`'s reference, repeated across $x$ so it is exactly $x$-independent — its own
 $x$-gradient is therefore already exactly 0 without correction); it is subtracted from `ws.grad_p_z` before the $\hat w$ predictor,
-only when `nonhydro_surface_dirichlet` is active. After the fix, the same test case's $|p'|$ dropped to $\approx0.44\,\mathrm{Pa}$,
+only when `nonhydro_surface_dirichlet` is active. After the fix, the same test case's $|p'|$ dropped to $\approx0.44\thinspace\mathrm{Pa}$,
 the correct order of magnitude.
 
 **Validation** (`test_validate_nonhydrostatic_dirichlet_surface_wave_matches_full_dispersion`): the same $kH\approx1.57$ domain as
@@ -578,7 +580,7 @@ stem density $n$ (stems/m²) and drag coefficient $C_D$ over an x-range; a repre
 carries the drag of its column, and the force per unit volume is $n$ times the stem force per unit height. The u-faces
 are weighted by the fraction of their control interval $x\pm\Delta x/2$ inside the patch. An **individual stem**
 (`VegetationStem`) stands for a row of stems with lateral spacing $\Delta y$; its force is deposited as
-$F/(\rho_0\Delta x\,h\,\Delta y)$, split linearly between the two neighbouring u-faces. Here $h$ is the layer thickness
+$F/(\rho_0\Delta x\thinspace h\thinspace\Delta y)$, split linearly between the two neighbouring u-faces. Here $h$ is the layer thickness
 of the momentum equation: $\Delta z$, and in the top row with the variable top layer its u-face thickness. Stems are
 loaded up to the top of the momentum layers: $n_z\Delta z$ on the fixed grid (linear free surface, the top layer keeps
 $\Delta z$) and $(n_z-1)\Delta z+h_{top}$ with the variable top layer (individual stems: interpolated to the base). Earlier
@@ -593,11 +595,11 @@ EI\,\frac{d\theta}{ds}=T(s),\qquad f_n=\tfrac12\rho_0 C_D b\,u_n|u_n|,\quad u_n=
 ```
 
 with $T(s)$ the moment of the loads beyond $s$ (normal drag and net buoyancy per length $B_l$) and $\theta$ the angle
-from the vertical. Per unit vertical extent the horizontal drag is $\tfrac12\rho_0C_Db\,u|u|\cos^2\theta$. Discretisation:
+from the vertical. Per unit vertical extent the horizontal drag is $\tfrac12\rho_0C_Db\thinspace u|u|\cos^2\theta$. Discretisation:
 $N$ straight segments, angles at the segment midpoints, curvature at the nodes ($\theta_1=\kappa_0\Delta s/2$,
 $\theta_m=\theta_{m-1}+\kappa_{m-1}\Delta s$, second order). The segments are split at the cell boundaries; a piece in row
 $k$ uses the velocity of that row, and the same pieces load the stem and, with the opposite sign, the fluid (exact
-momentum exchange; a rigid patch gives exactly $\tfrac12C_Da\,u|u|$ per unit volume, $a=nb$). The posture is solved
+momentum exchange; a rigid patch gives exactly $\tfrac12C_Da\thinspace u|u|$ per unit volume, $a=nb$). The posture is solved
 with Newton's method (finite-difference Jacobian, backtracking), warm-started every step. If Newton fails (e.g. from an
 upright stem at $Ca\gtrsim3000$), the load is applied in stages (velocity times $\sqrt{\lambda}$, $\lambda=1/n\ldots1$, with
 $n=8, 32, 128$) from the start posture; postures that still do not converge are counted in
@@ -605,13 +607,13 @@ $n=8, 32, 128$) from the start posture; postures that still do not converge are 
 surface carry no load; the vertical drag component is not applied to $w$.
 
 The drag enters the u predictor explicitly, from the velocities of time level n. It is monotone for
-$\Delta t\,K\le1$ with the linearised drag rate $K$ (rigid patch: $\tfrac12C_Da|u|$); `step_forward!` checks this.
+$\Delta t\thinspace K\le1$ with the linearised drag rate $K$ (rigid patch: $\tfrac12C_Da|u|$); `step_forward!` checks this.
 WHY explicit: an implicit factor applied to the predictor before the free-surface solve would make the steady state
 depend on $\Delta t$, because the surface-slope correction is not divided by it.
 
 `ModelConfig.body_force_x` (m/s²) adds a uniform body force (channel slope) for steady periodic-channel flow.
 `sponge_length` (m) and `sponge_rate` (1/s) add an absorbing layer at the right end: over the last `sponge_length` the
-u predictor is multiplied by $1/(1+\Delta t\,r\,s^2)$, $s$ the relative position in the layer (quadratic ramp, implicit,
+u predictor is multiplied by $1/(1+\Delta t\thinspace r\thinspace s^2)$, $s$ the relative position in the layer (quadratic ramp, implicit,
 stable for any rate); used for the wave cases. The
 former ad hoc vegetation viscosity (`vegetation_turbulence_strength`) and the old stem model (force relaxation 0.35,
 response gain 8, `source_strength`, string-like bending) were removed; in the old tests that model changed the wave
@@ -639,11 +641,11 @@ $\sigma_k=1.0$, $\sigma_\varepsilon=1.3$, $\sigma_\rho=0.7$; vegetation weights 
 
 Numerics after each flow and density update: explicit first-order upwind advection (conservative, closed walls,
 periodic or zero-gradient inflow), then per column a backward-Euler vertical diffusion with the sinks linearised
-implicitly (Patankar: $\varepsilon/k^\ast\,k$, $C_2\varepsilon^\ast/k^\ast\,\varepsilon$, negative buoyancy); positive for
+implicitly (Patankar: $\varepsilon/k^\ast\thinspace k$, $C_2\varepsilon^\ast/k^\ast\thinspace\varepsilon$, negative buoyancy); positive for
 any $\Delta t$, first order in time. Bed: with `bed_roughness_length` $z_0>0$ a log-law quadratic friction
 $c_b|u_1|u_1$ on the lowest row, $c_b=(\kappa/\ln(z_1/z_0))^2$, $z_1=\Delta z/2$, and the wall functions
-$k_1=u_*^2/\sqrt{C_\mu}$, $\varepsilon_1=u_*^3/(\kappa z_1)$ (Rodi 1993); otherwise free slip and zero flux. Surface:
-zero flux for $k$; for $\varepsilon$ the value $\varepsilon_s=C_\mu^{3/4}k_s^{3/2}/(\kappa\,0.07H)$ (Rodi 1993; default, as
+$k_1=u_{\ast}^2/\sqrt{C_\mu}$, $\varepsilon_1=u_{\ast}^3/(\kappa z_1)$ (Rodi 1993); otherwise free slip and zero flux. Surface:
+zero flux for $k$; for $\varepsilon$ the value $\varepsilon_s=C_\mu^{3/4}k_s^{3/2}/(\kappa\thinspace 0.07H)$ (Rodi 1993; default, as
 in Lopez & Garcia 1997) or zero flux.
 The momentum equation uses $\nu+\nu_t$ (u-faces: mean of the neighbouring cells; the mixing-length cap does not apply).
 Density gets the turbulent diffusivity $\nu_t/\sigma_\rho$ (implicit, conservative with the layer thicknesses, top layer
@@ -671,6 +673,178 @@ series (Figs. 6.16, 6.18) the momentum transfer to the bed agrees within a few p
 water (H/h_p = 6-9) our model gives more resistance: Manning n up to 1.25 (160 stems/m²) and 1.53 (1581 stems/m²) times
 theirs at their depth. Our profile above the canopy then corresponds to a roughness length of about $h_p/2$; with the
 vegetation terms switched off the resistance is higher still. Converged in time and grid; not resolved.
+
+### 18) Wetting and drying (`src/wetting_drying.jl`, issue #31)
+
+`ModelConfig(wetting_drying=true)` selects a separate time step (`_step_forward_wetting_drying!`) on z-level cells cut
+by the bed and by the free surface; the other time steps are not used then. Hydrostatic or non-hydrostatic,
+`upwind1` or `tvd2` for momentum and transport; `nz = 1` gives the 1D (depth-averaged) model on the same code path.
+Plan and decisions: `docs/plan_issue_31_wetting_drying.md`; depth-positivity proof: `docs/depth_positivity.md`;
+experiments: `experiments/wetting_drying/README.md`.
+
+**Geometry.** Interfaces $z_k=(k-1)\Delta z$; the top layer is open above. Column $i$ has the bed $z_{b,i}$ (any value
+$\ge0$, `bed_level`) and the level $\zeta_i=H+\eta_i$; a dry column has $\zeta_i=z_{b,i}$ (stored as the smallest float with
+$\mathrm{fl}(H+\eta)\ge z_b$). Layer thicknesses
+
+```math
+h_{k,i}=\max\bigl(0,\ \min(z_{k+1},\zeta_i)-\max(z_k,z_{b,i})\bigr),\qquad \textstyle\sum_k h_{k,i}=\max(\zeta_i-z_{b,i},0),
+```
+
+which for a flat bed and $\zeta$ in the top layer is the variable top layer of section 13. Faces use the bed of the
+higher neighbour, $z_{b,f}=\max(z_{b,i},z_{b,i+1})$, and the upwind level of time $n$ (sign of $\sum_k u_{k,f}$; the higher
+level for zero flow), as in Stelling & Duinmeijer (2003); a face whose upwind depth does not exceed
+`dry_depth_threshold` (default $10^{-6}$ m) is closed.
+
+**Time step.**
+1. Cell and face thicknesses at time $n$; a face layer that opens takes the velocity of the nearest open layer below
+   (see "depth-uniform velocity" below); baroclinic pressure
+   $p'(z)=g\int_z^{\zeta}(\rho-\rho_0)\thinspace dz'$ at the *nominal* layer centres $z_k+\Delta z/2$, layers above the surface
+   extrapolated with the surface-layer density. WHY nominal centres: a horizontally uniform stratification at rest then
+   gives bit-identical $p'$ in neighbouring columns whatever their bed (exact lake at rest, also stratified).
+2. Momentum predictor on the wet face layers: advection (below), baroclinic pressure, body force, Rayleigh damping, sponge,
+   implicit vertical viscosity with zero stress at bed and surface.
+3. Free surface in the volume formulation of Casulli (2009): $V(\eta)+T\eta=b$ with $V_i=\max(0,H+\eta_i-z_{b,i})$,
+   $\sum_jT_{ij}\eta_j=a_{i+1/2}(\eta_i-\eta_{i+1})+a_{i-1/2}(\eta_i-\eta_{i-1})$, $a_f=g\Delta t^2H_f/\Delta x^2$,
+   $b_i=V_i(\eta^n)-\frac{\Delta t}{\Delta x}(\hat U_{i+1/2}-\hat U_{i-1/2})$; Newton's method of Brugnano & Casulli (2008)
+   from $\eta^n$. Every depth stays $\ge0$ for any $\Delta t$; the iteration ends after at most $n_x+1$ steps; a lake at rest
+   has a zero residual and is not iterated (proof and conditions: `docs/depth_positivity.md`). In the validation cases
+   the solve takes one iteration per step (the linear semi-implicit solve of Casulli & Cheng 1992).
+4. $u=\hat u-g\Delta t\thinspace\partial_x\eta^{n+1}$ on the wet face layers; non-hydrostatic correction (below).
+5. $\eta^{n+1}$ from the flux divergence (volume conserved to round-off); a depth below zero by more than the bound of
+   `docs/depth_positivity.md`, section 5, stops the run (`DomainError`), as does a negative depth at the start of a step.
+6. Vertical fluxes through the fixed interfaces from the layer continuity with the new thicknesses, integrated upwards
+   from the bed.
+7. Conservative transport of $\rho$ with the same discharges and cell volumes, in increment form
+   $\rho^{n+1}=\rho^n+D/h^{n+1}$, $D=(h\rho)^{n+1}-h^{n+1}\rho^n$. WHY the increment: $(h\rho)/h$ changes $\rho$ by round-off even
+   without flow, which drove an internal motion of $5\cdot10^{-9}$ m/s in a stratified lake at rest. Face values:
+   `upwind1`, or `tvd2` = the flux-limited Lax-Wendroff value of section 4 with the Courant number of the cut cell
+   $|q|\Delta t/(\Delta x\thinspace h_{up})$. Empty cells ($h<10^{-12}$ m) pass their increment to the thickest cell of the column.
+   The scheme is monotone only if no cell loses more than its old volume in a step, which thin cut cells can violate;
+   values outside the initial bounds are clipped and the clipped mass is redistributed over the cells with room for it
+   (slack-weighted), so the mass stays exact. There is no global mass correction (section 11) in this mode.
+
+**Momentum advection.** Momentum-conservative upwind form of Stelling & Duinmeijer (2003), per layer with the
+discharges $q_{k,f}=h_{k,f}u_{k,f}$ and the interface fluxes $W$ of time $n$:
+
+```math
+\frac{du_{k,f}}{dt}=\frac{a_L(u^*_L-u)-a_R(u^*_R-u)}{\Delta x}+\frac{\bar W_{bot}(u^*_{bot}-u)-\bar W_{top}(u^*_{top}-u)}{\bar h_{k}},
+```
+
+with $u^{\ast}$ the value upwinded by the sign of each flux: the upwind velocity (`upwind1`; on an outflow side $u^{\ast}=u$, so
+the form is a sum over the inflow sides with non-negative coefficients) or its limited MUSCL extrapolation with the MC
+slope (`tvd2`, forward Euler like the momentum `tvd2` of section 3; the outflow sides then contribute $s_f/2$). The
+update is capped: with $C=\Delta t\sum$(inflow coefficients) the tendency is scaled by $1/C$ where $C>1$, so for `upwind1`
+the update stays a convex combination (thin layers at the front are stable).
+
+**Depth-uniform velocity: analysis and the advective velocities $a_L,a_R$.** Hydrostatic theory keeps a depth-uniform
+velocity depth-uniform: in every layer $u_t=-uu_x-g\zeta_x$. A first version used the layer-wise weights
+$a_C=\bar q_{k,C}/\bar h_{k}$ ($\bar q$ the cell discharge, $\bar h$ the cell thickness averaged to the face), the direct
+layer-wise transcription of the 1D scheme. In the 2DV Ritter dam break the layers then drifted apart (upper layers up to
+0.29 m/s, 6 %, slower than the bed layer at $t=5$ s, $\Delta x=0.25$ m), and the draining surface layers carried the
+slower fluid to the front.
+
+*Manufactured solution.* To isolate the operator, `test_verify_wd_advection_depth_uniform_mms_*` (and
+`experiments/wetting_drying/plot_wetting_drying.jl mms`) evaluates the tendency for a prescribed state: a depth-uniform
+$u(x)=1+2\tanh((x-50)/15)$ m/s (changes sign) under a surface $\zeta(x)=0.6+0.3(1-\tanh((x-50)/15))$ m that crosses six
+layer interfaces ($\Delta z=0.1$ m), with $W$ from the discrete layer continuity (the column continuity gives $\zeta_t$, the
+surface layer takes the volume change). The exact tendency is $-uu_x$ in every layer. Results (maximum error over all
+layers, m/s²; $|uu_x|\le0.27$):
+
+| $\Delta x$ (m) | 1 | 0.5 | 0.25 | 0.125 | 0.0625 |
+|---|---|---|---|---|---|
+| 1D `upwind1` | 7.8e-3 | 3.9e-3 | 1.9e-3 | 9.7e-4 | 4.8e-4 |
+| 2DV, first version (layer-wise weights) | 0.51 | 0.46 | 0.87 | 0.39 | 0.17 |
+| 2DV `upwind1` and `tvd2`, present | 1.2e-2 | 5.3e-3 | 2.6e-3 | 1.3e-3 | 5.7e-4 |
+| 1D `tvd2` | 2.0e-3 | 1.1e-3 | 5.4e-4 | 2.7e-4 | 1.4e-4 |
+
+The first version did not converge in the maximum norm (its mean error did, at first order: the defects are confined to
+about one cell per interface crossing). The harness located three defects; each is fixed:
+
+1. *Weight in thinly cut layers.* With $\bar q_{k,L}=\tfrac12(h_{k,f-1}u_{f-1}+h_{k,f}u_f)$ and upwinded face thicknesses,
+   $\bar q_{k,L}/\bar h_k\approx u\thinspace r_k$ with $r_k-1\approx-\Delta x\thinspace\partial_x h_k/h_k$. For full layers $\partial_xh_k=0$; for
+   the layer that the surface cuts, $\partial_x h_k=\partial_x\zeta$, so the relative error is $\Delta x|\zeta_x|/h_k$, which is
+   O(1) wherever the cut layer is thinner than the surface drop over one cell, i.e. at every interface crossing, on every
+   grid. At the worst face of the harness ($\Delta x=0.25$ m) the cut layer was 1.3 mm thick, $r=5.3$ and the tendency 5
+   times the exact one. The present weights are the layer velocity times the column factor of the 1D scheme,
+
+   $$a_C=\frac{\bar q_{k,C}}{\tilde h_{k,C}}\thickspace\frac{\tilde H_C}{\bar H_f},\qquad \tilde h_{k,C}=\tfrac12(h_{k,f'}+h_{k,f''}),\quad \tilde H_C=\sum_k\tilde h_{k,C},\quad \bar H_f=\sum_k\bar h_k,$$
+
+   ($f',f''$ the faces of cell $C$): $\bar q_{k,C}/\tilde h_{k,C}$ is the velocity of the layer in the cell, and
+   $\tilde H_C/\bar H_f$ the factor that makes the 1D scheme momentum conservative. For one layer this is exactly the 1D
+   weight of Stelling & Duinmeijer; for a depth-uniform flow every layer gets the 1D advective velocity. Per-layer momentum
+   conservation is given up in thin cut layers (the column-integrated form of the 1D scheme is kept).
+2. *Closed far face.* If the far face of the inflow cell is closed for the layer (its upwind level lies below the layer),
+   the form counted it as inflow with $u=0$ and dragged the face towards rest (the remaining O(1) errors after fix 1, at
+   faces where the cut layer ends upstream). The water entering the layer there comes from the nearest open layer below at
+   that face and rises; its velocity is now the upwind value (no inflow if all layers below are closed, e.g. a dry cell).
+3. *Inconsistent tvd2 stencil.* Next to a closed face, `tvd2` combined a second-order inflow value with a first-order
+   outflow value, which halved the tendency. Second order is now used in a direction only if the whole stencil (faces
+   $f-2\ldots f+2$, layers $k-2\ldots k+2$) is open. Consequence: the 2DV maximum error of `tvd2` is first order (set by the
+   faces where layers end), the mean error second order.
+
+A fourth effect appears only in time-dependent runs: a face layer that opens when the upwind level rises past its lower
+interface carried $u=0$ from the time it was closed. The layer-wise weights adjusted it almost instantly (the thin
+$\bar h$ made the coefficient huge, which hid the problem); with consistent weights it adjusts at the physical rate
+$u/\Delta x$ and lagged for many steps. A new face layer now takes the velocity of the nearest open layer below (or above,
+for a face that opens from the bed upwards), the common practice of z-layer models.
+
+Effect in the 2DV Ritter dam break (12 layers, $t=5$ s): the spread of the layer velocities dropped from 0.29 m/s to
+0.0013 m/s (`upwind1`) and from 0.18 to 0.0028 m/s (`tvd2`), converging at first order (0.0080, 0.0036, 0.0013, 0.0005
+m/s for $\Delta x=1\ldots0.125$ m, `upwind1`); depth error and front position of 2DV `upwind1` equal those of 1D to the
+printed digits, and the `tvd2` front lag fell from 11.3 % to 6.6 % (1D: 5.6 %). Carrier-Greenspan 2DV: surface error
+3.4 → 2.1 mm.
+
+**Non-hydrostatic mode** (`use_hydrostatic=false`, $n_z>1$). Pressure split $p=p_{hydrostatic}+q$ (Casulli 1999; Casulli
+& Zanolli 2002): after the free-surface solve, (i) a predictor of the vertical velocity at the interfaces between two wet
+cells, $w^{\ast}=w^n-\Delta t\thinspace\mathrm{adv}(w)$ (first-order upwind, advective form, capped); (ii) a Poisson problem for $q$ on
+the wet cells below the surface cell of each column ($q=0$ in the surface cell, the dynamic surface condition, and in
+empty cells): every such cell satisfies its continuity with $u=u_{fs}-\frac{\Delta t}{\rho_0}\partial_xq$ and
+$w=w^{\ast}-\frac{\Delta t}{\rho_0}\partial_zq$ ($\partial_z$ over $\tfrac12(h_{k-1}+h_k)$, $w=0$ at the bed), which gives a symmetric
+positive definite system, assembled and solved with a sparse Cholesky factorization every step (the wet domain
+changes); (iii) $-\frac{\Delta t}{\rho_0}\partial_xq$ is added to the predictor $\hat u$ and the free-surface solve is repeated.
+WHY (iii) instead of correcting $u$ directly (Casulli 1999): the direct correction changes the column transports after
+the positive solve and voids the positivity proof; with the repeated solve the final velocities come from it. The price
+is that the continuity of the cells below the surface holds only approximately (the two solves differ by a depth-uniform
+change of the surface gradient); $w$ then follows from the exact layer continuity (step 6). $q=0$ in the surface cell is
+first order in the surface-cell thickness. Standing wave at $kH=\pi/2$ (L = 8 m, H = 4 m) against
+$\omega^2=gk\tanh(kH)$ (the shallow-water period is 24 % shorter): period error 1.75 %, 0.89 %, 0.45 % on 40 x 20, 80 x 40 and
+160 x 80 cells (first order), both schemes. A lake at rest gives a zero right-hand side and $q=0$ exactly.
+
+**Boundaries and restrictions.** Closed walls; a prescribed left velocity, constant (`set_x_inflow_outflow!` with a
+profile) or time-dependent (`set_x_inflow_outflow!(model, t -> u)`); right: wall, prescribed or zero-gradient. Rejected
+with wetting and drying: `periodic_x`, vegetation, k-epsilon, `bed_roughness_length`, `wind_stress_x`. Not applied: the
+Froude limiter and the horizontal viscosity.
+
+**Reference solutions** (`src/reference_solutions.jl`).
+- Ritter (1892) dam break on a dry bed: $h=(2c_0-\xi)^2/(9g)$, $u=\tfrac23(\xi+c_0)$ for $-c_0<\xi<2c_0$,
+  $\xi=(x-x_0)/t$, $c_0=\sqrt{gh_0}$.
+- Carrier & Greenspan (1958) standing wave on a planar beach. Dimensionless with length $L$, elevation $sL$, velocity
+  $\sqrt{gsL}$ and time $T=\sqrt{L/(gs)}$ ($s$ the slope; $x$ offshore, bed $-x$, $u$ offshore): from the Riemann
+  invariants $u\pm2c-t$ ($c^2=x+\eta$), with $\sigma=4c$, $\lambda=2(t-u)$,
+  $u=\phi_\sigma/\sigma$, $\eta=\phi_\lambda/4-u^2/2$, $x=\sigma^2/16-\eta$, $t=\lambda/2+u$, $\partial_\sigma(\sigma\phi_\sigma)=\sigma\phi_{\lambda\lambda}$;
+  the periodic solution is $\phi=AJ_0(\sigma)\cos\lambda$ (non-breaking for $A<1$; period $\pi T$). Points $(x,t)$ are mapped to
+  $(\sigma,\lambda)$ by Newton's method; the shoreline is $\sigma=0$. Bessel functions by the trapezoid rule on their
+  periodic integral representation (64 points, exponential convergence). The sign convention was derived here and is
+  verified by the residual test below; equation numbers of the original were not checked.
+
+**Order at the wet/dry front.** Both schemes are first order at the front, for three reasons: the depth has a kink there
+(linear vanishing on a beach, quadratic in the Ritter rarefaction), so any limited reconstruction clips; in runup the
+flow reverses at maximum runup and rundown (extremum of the velocity at the tip, switch of the upwind face depths); and
+each column has one bed level, so the shoreline moves cell by cell with a staircase error of order $\Delta x\tan\beta$ in
+elevation. The domain-integrated errors are hardly affected (O($\Delta x$) errors over an O($\Delta x$) region of small depth),
+but the front position and the runup converge at first order, the same for `upwind1` and `tvd2` (solitary runup
+0.80 ... 1.00 of the law for $\Delta x=0.2\ldots0.0125$ m, both schemes). A sloping bed within each column (sub-grid
+bathymetry, Casulli 2009: $V_i(\eta)$ piecewise quadratic, still convex and non-decreasing, so the Newton solve and the
+positivity proof carry over; Casulli & Zanolli 2012 for the iteration) would move the shoreline continuously and is the
+candidate to reduce the staircase error.
+
+References: Casulli & Cheng (1992), Int. J. Numer. Methods Fluids 15, 629-648; Casulli (1999), Int. J. Numer. Methods
+Fluids 30, 425-440; Casulli & Zanolli (2002), Math. Comput. Model. 36, 1131-1149; Stelling & Duinmeijer (2003), Int. J.
+Numer. Methods Fluids 43, 1329-1354; Brugnano & Casulli (2008), SIAM J. Sci. Comput. 30, 463-472; Casulli (2009), Int. J.
+Numer. Methods Fluids 60, 391-408; Ritter (1892), Z. Ver. Deutsch. Ing. 36, 947-954; Carrier & Greenspan (1958), J.
+Fluid Mech. 4, 97-109; Synolakis (1987), J. Fluid Mech. 185, 523-545; Casulli & Zanolli (2012), SIAM J. Sci.
+Comput. 34, A2040-A2059; Delestre et al. (2013), Int. J. Numer. Methods Fluids 72, 269-300 (SWASHES). Equation numbers were
+not checked.
 
 ## Test-by-test documentation
 
@@ -946,7 +1120,7 @@ free-surface treatments (hydrostatic with variable top layer, hydrostatic fixed 
 Setup: closed 10 m x 4 m basin, 40 x 20 cells, two layers at rest, wind stress 0.2 Pa, $\nu=10^{-3}$ m²/s (non-zero
 diffusion at the predictor's wall faces), 200 steps.
 
-Validation section: $|\sum\eta\,\Delta x|<10^{-12}$ m² and the kinematic mismatch $|w_{top}^{rec}-\eta_t|$ below
+Validation section: $|\sum\eta\thinspace\Delta x|<10^{-12}$ m² and the kinematic mismatch $|w_{top}^{rec}-\eta_t|$ below
 $10^{-10}$ m/s every step, and a non-zero set-up. Before the fixes of issue #4 the volume drifted by about $10^{-8}$ m² on
 the fixed grid (wall faces of $u^{\ast}$ in the barotropic solve) and the mismatch was about $8\cdot10^{-6}$ m/s in all
 three treatments (wind added after the solve); see sections 9 and 10.
@@ -1063,10 +1237,10 @@ u(z)=\frac{s}{2H}\left(z^2-\frac{H^2}{3}\right),\quad s=\frac{\tau}{\rho_0\nu},\
 ```
 
 Setup: 40 m x 4 m basin, 40 columns, $\nu=10^{-2}$ m²/s, $\tau=0.2$ Pa, started from the exact state (u, $\eta$), 600 s,
-mean u over $x=15$-$25$ m averaged over the last 200 s, $n_z=5,10,20$, both modes.
+mean u over $15\le x\le25$ m averaged over the last 200 s, $n_z=5,10,20$, both modes.
 
 Validation section: observed order of the maximum profile error above 1.8 (observed 1.98 and 1.88; errors
-$1.3\cdot10^{-4}$, $3.4\cdot10^{-5}$, $9.2\cdot10^{-6}$ m/s, which equal the midpoint-rule offset $s\,\Delta z^2/(24H)$ of
+$1.3\cdot10^{-4}$, $3.4\cdot10^{-5}$, $9.2\cdot10^{-6}$ m/s, which equal the midpoint-rule offset $s\thinspace\Delta z^2/(24H)$ of
 the discrete zero-flux condition) and surface slope within 1 % (observed 0.07 %). On finer grids the error levels off at
 about $3\cdot10^{-6}$ m/s ($10^{-4}$ of the surface velocity), independent of the run length (not investigated further).
 
@@ -1159,8 +1333,8 @@ convention from what reaches the Dirichlet-top projection (section 15) — the s
 Checks: `grad_p_z_reference` is all zero unless `nonhydro_surface_dirichlet` is set; for $\rho\equiv\rho_0$ it equals the exact
 hydrostatic gradient $-\rho_0 g$ at every interior face; for a two-layer (internal-seiche) reference profile it is $x$-independent
 (same in every column) but genuinely $z$-dependent; and, as a full-model regression guard against reintroducing the found defect, a
-$10^{-4}\,\mathrm{m}$-amplitude surface wave's corrected non-hydrostatic pressure correction stays below 5 Pa (the uncorrected defect
-gave $\sim3.7\times10^4\,\mathrm{Pa}$ for the same case).
+$10^{-4}\thinspace\mathrm{m}$-amplitude surface wave's corrected non-hydrostatic pressure correction stays below 5 Pa (the uncorrected defect
+gave $\sim3.7\times10^4\thinspace\mathrm{Pa}$ for the same case).
 
 ### test_validate_nonhydrostatic_dirichlet_surface_wave_matches_full_dispersion
 
@@ -1178,7 +1352,7 @@ the finer grid's period sits closer to the exact relation than to the shallow-wa
 
 Purpose: the non-hydrostatic mode always uses the fixed grid. With a moving free surface (cosine perturbation, clamp bounds
 widened) a uniform density stays uniform for `upwind1` and `tvd2` (top-row advective form, section 4). Contrast: the plain flux
-form on the same velocities violates constancy by more than $10^{-6}\,\mathrm{kg/m^3}$.
+form on the same velocities violates constancy by more than $10^{-6}\thinspace\mathrm{kg/m^3}$.
 
 ### test_validate_rayleigh_taylor_linear_growth_rate
 
@@ -1190,7 +1364,7 @@ layer ($h_2$), released from rest, grows as $a(t)=a_0\cosh\sigma t$ with the inv
 ```
 
 (two layers between rigid horizontal boundaries; Chandrasekhar 1961, ch. X; the free surface acts as a rigid lid for this mode).
-Setup: 8 m × 4 m, 200 × 80 cells, $\rho_{top}=1002.5$, $\rho_{bottom}=998.5\,\mathrm{kg/m^3}$, interface at $0.82H$,
+Setup: 8 m × 4 m, 200 × 80 cells, $\rho_{top}=1002.5$, $\rho_{bottom}=998.5\thinspace\mathrm{kg/m^3}$, interface at $0.82H$,
 $a_0=0.02$ m, $m=3$ ($k=2.36$ m⁻¹), `tvd2` momentum and transport. The interface height is taken from the heavy-fluid thickness
 of each column and projected onto $\cos kx$; the numerical rate is $\mathrm{acosh}(a/a_0)/t$ at $\sigma t=2$ ($ka\approx0.2$,
 still linear). Required: $0.8\lt\sigma_{num}/\sigma\lt1.05$. Measured: 0.84 (0.87 on 400 × 160 cells; the smeared numerical
@@ -1205,7 +1379,7 @@ of the block (`TOL_IDENTITY`, `TOL_MODEL_IDENTITY`, ...).
 
 Purpose: `top_half_layer=true` gives the exact hydrostatic pressure at layer centres.
 
-Analytical solution (uniform density): $p_k=\rho_0 g\,\Delta z\,(n_z-k+\tfrac12)$; it equals the legacy field plus $\rho_0 g\Delta z/2$.
+Analytical solution (uniform density): $p_k=\rho_0 g\thinspace\Delta z\thinspace(n_z-k+\tfrac12)$; it equals the legacy field plus $\rho_0 g\Delta z/2$.
 
 ### test_verify_constituent_mass_with_variable_top_layer
 
@@ -1221,7 +1395,7 @@ Purpose: `solve_variable_thickness!` with the thickness of a flat surface reprod
 
 Purpose: verify the derivation of the variable-thickness free-surface system.
 
-Identity: with the final velocities $u^{n+1}=\hat u-g\Delta t\,\partial_x\eta^{n+1}$,
+Identity: with the final velocities $u^{n+1}=\hat u-g\Delta t\thinspace\partial_x\eta^{n+1}$,
 
 ```math
 \eta^{n+1}_i-\eta^n_i+\Delta t\,\frac{U^{n+1}_{i+1}-U^{n+1}_i}{\Delta x}=0,\qquad U_i=\Delta z\sum_{k\lt n_z}u_{k,i}+h^n_iu_{n_z,i},
@@ -1242,7 +1416,7 @@ $\Delta z$); mass conservation alone cannot detect it, because any scaling of a 
 Purpose: full-model version of the constancy property with a moving free surface (clamp bounds widened so that they cannot hide a
 deviation). Both the variable top layer and the fixed grid (top-row advective form, section 4) keep a uniform density uniform.
 Contrast: the plain flux form applied to the fixed-grid velocities of the same run violates it by more than
-$10^{-6}\,\mathrm{kg/m^3}$ (the defect that motivated section 13).
+$10^{-6}\thinspace\mathrm{kg/m^3}$ (the defect that motivated section 13).
 
 ### test_verify_variable_top_layer_closes_kinematic_and_volume_budgets
 
@@ -1267,7 +1441,7 @@ Analytical solution: linear standing wave in a closed basin of uniform density, 
 $\omega=\pi\sqrt{gH}/L$, $T=2L/\sqrt{gH}$. The period is taken from the zero crossing of $\eta$ in the first cell
 ($\omega t=\pi/2$). The discrete relative period error (period too long) follows $+(\pi\Delta x/2L)^2/6\approx$ 4.1e-3, 1.0e-3,
 2.6e-4 for $n_x=10,20,40$; the test requires an observed order in $[1.6,2.4]$ on both grid pairs and an error below 2e-3 on the finest grid. The
-amplitude is tiny ($A=10^{-4}$ m): a finite-amplitude wave carries a crossing-time shift of about $0.15\,A/H$ that would mask the
+amplitude is tiny ($A=10^{-4}$ m): a finite-amplitude wave carries a crossing-time shift of about $0.15\thinspace A/H$ that would mask the
 second-order error.
 
 ### Density transport schemes (section 4)
@@ -1319,7 +1493,7 @@ number in Float32).
 
 Purpose: with solid cells the constituent mass counts the wet cells only (an obstacle of 2 x 3 cells in a 12 m x 4 m
 domain leaves 46.8 m² of water, mass 46,800 kg/m for 1000 kg/m³), unaffected by the unused density stored in solid
-cells; with the variable top layer the surface elevation adds $\rho\,\eta\,\Delta x$ per column (48,000 kg/m for
+cells; with the variable top layer the surface elevation adds $\rho\thinspace\eta\thinspace\Delta x$ per column (48,000 kg/m for
 $\eta=0.1$ m). The obstacle-force diagnostic of the experiment (`leo_obstacle_force`) includes the free-surface pressure
 $\rho_0 g(\eta_{left}-\eta_{right})$, which the model applies separately from `state.p`: with $p=0$ and an elevation
 difference of 0.2 m over a 0.6 m high obstacle the force is $\rho_0 g\cdot0.2\cdot0.6$.
@@ -1404,20 +1578,20 @@ surface jet and artificial energy growth at 2 mm. The fixed top-cell geometry wa
 
 Manufactured solution on the wet cells above a raised flat bed of height $d$:
 $p=\cos(\pi x/L)\cos(\pi(z-d)/(H-d))$ has zero normal derivative at the side walls, the bed and the top, and
-$\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The masked matrix of `build_poisson_matrix`
+$\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\thinspace p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The masked matrix of `build_poisson_matrix`
 (gauge pin at the first wet cell, mean removal over the wet cells) reproduces it with maximum errors 5.1e-3, 1.3e-3 and
 3.2e-4 on $32\times16$, $64\times32$ and $128\times64$ cells: observed orders 1.99 and 2.00 (required: 1.8-2.2).
 
 
 ### Vegetation tests (`test_vegetation.jl`, section 16)
 
-- `test_verify_rigid_patch_drag_per_unit_volume`: kernel check, $-\tfrac12C_Da\,u|u|$ per unit volume with the
+- `test_verify_rigid_patch_drag_per_unit_volume`: kernel check, $-\tfrac12C_Da\thinspace u|u|$ per unit volume with the
   canopy-top cell fraction and the patch-edge weights, random velocities of both signs, to round-off.
 - `test_verify_patch_stiffness_must_be_positive`: zero, negative and NaN bending stiffness of a patch are rejected.
 - `test_verify_emergent_drag_up_to_top_of_momentum_layers`: emergent rigid stem and patch with a non-flat surface, fixed
-  and variable top layer: stem force $\tfrac12\rho_0C_Db\,u^2$ times the top of the momentum layers ($n_z\Delta z$, or
+  and variable top layer: stem force $\tfrac12\rho_0C_Db\thinspace u^2$ times the top of the momentum layers ($n_z\Delta z$, or
   $(n_z-1)\Delta z+h_{top}$ interpolated to the base), volume-integrated sink with the layer thicknesses equal to the stem
-  force, and $\tfrac12C_Da\,u|u|$ per unit volume in the top row of a patch, all to round-off.
+  force, and $\tfrac12C_Da\thinspace u|u|$ per unit volume in the top row of a patch, all to round-off.
 - `test_verify_stem_drag_equals_fluid_momentum_sink`: three flexible stems in a sheared profile; the momentum removed
   from the fluid ($\rho_0\Delta x\Delta z\Delta y\sum a$) equals the sum of the stem drags to round-off; the stems bend
   downstream and their drag stays below the rigid value.
@@ -1433,7 +1607,7 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The maske
   above 1.8 in the number of segments for $R$ and the tip position, $|R/R_{ref}-1|<3\cdot10^{-3}$ and tip error below
   $10^{-3}l$ at 80 segments (observed $5\cdot10^{-6}$ to $1.9\cdot10^{-3}$). Over $Ca=0.1\ldots10^4$ the model with 80
   segments agrees within 0.9 % ($B\le10$) and within 0.4 % for $B=100$ up to $Ca=3162$; beyond that the shooting
-  reference is badly conditioned. The reference gives $R\,Ca^{1/3}=0.890$ at large $Ca$.
+  reference is badly conditioned. The reference gives $R\thinspace Ca^{1/3}=0.890$ at large $Ca$.
 - `test_validate_flexible_canopy_against_coupled_reference`: flexible submerged canopy in a periodic channel
   ($h_v=H/2$, $a=4$ 1/m, $EI=2\cdot10^{-5}$ N m², constant $\nu$) against the independent coupled 1D reference
   `flexible_canopy_reference`: the continuous elastica in the velocity along the stem, iterated with
@@ -1464,11 +1638,11 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The maske
   $10^{-4}$, the stems bend, and the velocity exceeds the rigid case.
 - `test_validate_patch_head_loss`: inflow/outflow channel, emergent patch; $g\Delta\eta=\tfrac12C_DaLU^2$ within
   0.3 % (observed $-0.03$ %), both modes.
-- `test_verify_explicit_drag_stability_check`: $\Delta t\,K=2$ is rejected.
+- `test_verify_explicit_drag_stability_check`: $\Delta t\thinspace K=2$ is rejected.
 - `test_validate_wave_height_decay_over_rigid_canopy`: regular linear waves ($H_0/h=0.005$, $kh=0.2$) through an
   emergent canopy ($a=10$ 1/m) over 60 m, wavemaker at the left boundary, sponge at the right end. The wave height
   decays as $H_0/(1+\beta x)$ of Dalrymple, Kirby & Hwang (1984),
-  $\beta=\tfrac{4}{9\pi}C_DaH_0k\,(\sinh^3k\alpha h+3\sinh k\alpha h)/((\sinh2kh+2kh)\sinh kh)$ (derived from the wave
+  $\beta=\tfrac{4}{9\pi}C_DaH_0k\thinspace(\sinh^3k\alpha h+3\sinh k\alpha h)/((\sinh2kh+2kh)\sinh kh)$ (derived from the wave
   energy balance with the time-averaged drag dissipation). Compared: decay with canopy divided by decay without canopy,
   which removes the numerical damping of the fully implicit free surface ($\approx2\pi^2/N$ per period with $N$ steps per
   period). Within 1.5 % (observed 0.25-0.70 %). At larger amplitude ($H_0/h=0.05$, Ursell number about 50) the first
@@ -1489,11 +1663,11 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The maske
 - `test_verify_implicit_vertical_diffusion_cosine_mode`: $\partial_t\phi=K\partial_z^2\phi$ with zero flux; the
   cosine mode decays as $e^{-K(\pi/H)^2t}$; first order in $\Delta t$; column integral conserved to round-off.
 - `test_validate_k_epsilon_open_channel`: uniform flow over a rough bed (periodic channel, both modes): bed shear
-  $=gSH$, total stress at mid-depth $=gS(H-z)$ and wall-function $k_1=u_*^2/\sqrt{C_\mu}$ within $10^{-4}$ (observed
-  $1.2\cdot10^{-5}$ after 600 s), depth-mean velocity within 8 % of the log law $U/u_*=(\ln(H/z_0)-1)/\kappa$
+  $=gSH$, total stress at mid-depth $=gS(H-z)$ and wall-function $k_1=u_{\ast}^2/\sqrt{C_\mu}$ within $10^{-4}$ (observed
+  $1.2\cdot10^{-5}$ after 600 s), depth-mean velocity within 8 % of the log law $U/u_{\ast}=(\ln(H/z_0)-1)/\kappa$
   (observed +6.0 %, consistent with the wake of channel flows); $\nu_t$ peaks at mid-depth ($z/H=0.53$).
-- `test_verify_k_epsilon_vegetation_balance`: homogeneous emergent canopy; $\varepsilon/P_v\to C_1C_{f\varepsilon}/C_2
-  =0.9975$ within $10^{-3}$ below the two surface rows (observed 0.9975).
+- `test_verify_k_epsilon_vegetation_balance`: homogeneous emergent canopy;
+  $\varepsilon/P_v\to C_1C_{f\varepsilon}/C_2=0.9975$ within $10^{-3}$ below the two surface rows (observed 0.9975).
 - `test_validate_k_epsilon_canopies_against_lopez_garcia`: runs 1, 9, 13, 17 of Dunn et al. (1996) (measured $C_{DB}$;
   flexible runs as rigid canopies of the deflected height) against the computed profiles of Lopez & Garcia (1997,
   Figs. 6.1, 6.2, 6.4, 6.5; digitized from the scan: frames and ticks located in the image, the thick k-epsilon dots
@@ -1515,6 +1689,78 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\,p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). The maske
   of the closure across the k-epsilon boundary after construction rejected.
 - `test_verify_clear_vegetation_resets_k_epsilon_production`: the vegetation production $P_v$ is zero after
   `clear_vegetation!`.
+
+### Wetting and drying tests (`test_wetting_drying.jl`, section 18)
+
+Exactness, conservation and positivity tests run for the four variants hydrostatic/non-hydrostatic x `upwind1`/`tvd2`
+(suffix `_hydro_upwind1` etc.), each in 1D (nz = 1) and 2DV.
+
+- `test_verify_wd_layer_thickness_kernel`: `layer_thicknesses!` gives non-negative layers summing to
+  $\max(\zeta-z_b,0)$, reduces to the variable top layer for a flat bed, keeps the top layer open above the grid top and
+  cuts the layers at bed and surface correctly.
+- `test_verify_wd_configuration_checks`: unknown momentum scheme, `periodic_x` and a negative bed are rejected; one layer,
+  a bed that is not a whole number of cells, the non-hydrostatic mode and `tvd2` are accepted.
+- `test_verify_wd_lake_at_rest_{1d,2dv,2dv_stratified}_*`: still water over a beach rising out of the water, an island and
+  a submerged bump (no level a whole number of cells), 500 steps: largest velocity and largest change of the level below
+  $10^{-13}$ (observed exactly zero), dry cells stay dry; the stratified variant has a two-layer density in z.
+- `test_verify_wd_volume_and_constituent_conservation_{1d,2dv}_*`: sloshing basin with beaches on both sides and two
+  water masses, 1000 steps: water volume and constituent mass to $10^{-12}$ relative (observed $\le 9\cdot10^{-16}$),
+  depth $\ge0$, density within its initial bounds, at least 5 columns change between wet and dry (depth above 1 mm).
+- `test_verify_wd_depth_positivity_large_time_step_{1d,2dv}_*`: dam break onto a dry bed and beach at advective Courant
+  number 6, where columns fall dry within the free-surface solve (more than one Newton iteration): depth $\ge0$ in every
+  step, clamped round-off volume below $10^{-14}$ of the total, volume and mass conserved (`docs/depth_positivity.md`).
+- `test_verify_wd_advection_depth_uniform_mms_{upwind1,tvd2}`: operator-level manufactured solution of section 18
+  (depth-uniform $u$ under a surface crossing six interfaces): the maximum error over all layers converges with an
+  observed order of at least 0.8 per grid halving and stays within twice the 1D `upwind1` error (observed: 2DV 1.2e-2 ...
+  1.3e-3, 1D 7.8e-3 ... 9.7e-4 for $\Delta x=1\ldots0.125$ m).
+- `test_verify_wd_negative_depth_is_rejected`: a level written below the bed stops the step with a `DomainError`.
+- `test_verify_wd_cut_cell_output_masking`: the plot masking blanks the cells above the water level and dry columns (cut
+  cells, fractional bed), and keeps the wet cells.
+- `test_verify_wd_boundary_profiles_and_wet_flux`: a constant inflow profile replaces an earlier time-dependent
+  callback; the `boundary_flux` diagnostic uses the wet face discharge ($-0.5$ m²/s for 1 m/s over 0.5 m of water in a
+  2 m grid); callback and right-profile lengths other than nz raise an `ArgumentError`.
+- `test_verify_wd_float32_dry_columns`: with `T=Float32` the dry levels are representable (depth $\ge0$ after
+  initialisation and five steps); the Newton and round-off tolerances use the precision of the state type.
+- `test_verify_wd_pressure_components_include_nonhydrostatic_correction`: in the non-hydrostatic mode `state.p` is the
+  cut-cell hydrostatic pressure plus the solved non-hydrostatic pressure, and `pressure_buoyancy_components` returns
+  these two components.
+- `test_verify_wd_nz1_pressure_diagnostics_output`: `run!` with one layer writes the pressure/buoyancy diagnostics (no
+  interior interface).
+- `test_verify_ritter_reference_solution`: the Ritter solution conserves the released volume (quadrature, $10^{-5}$), is
+  $h_0$ behind the rarefaction and 0 ahead of the front, $h=4h_0/9$ and $u=2c_0/3$ at the dam.
+- `test_verify_carrier_greenspan_reference_solution`: the hodograph solution satisfies the nonlinear shallow-water
+  equations over the sloping bed (central differences, residuals below $10^{-6}$ of the term scales at nine points), the
+  linear limit gives the shoreline amplitude $A/4$, points beyond the shoreline are dry.
+- `test_validate_wd_ritter_dry_dam_break_1d`: $h_0=1$ m, $t=5$ s, $\Delta x=0.25$ m: relative L1 depth error $\le3$ %
+  (observed 0.91 %) and converging (0.8 per halving; 1.42 % at 0.5 m); front ($h=1$ cm) within 12 % of the travelled
+  distance (observed 11.3 %) and converging. WHY 12 %: the thin tip $h\propto(x_f-x)^2$ lags by first-order numerical
+  diffusion and converges slowly (12.7, 11.3, 7.7, 5.0 % for $\Delta x=0.5\ldots0.0625$ m), while the depth converges at first
+  order.
+- `test_validate_wd_ritter_dry_dam_break_2dv`: 12 layers: the same bounds, depth within 1 % of the 1D run (observed equal
+  to the printed digits), spread of the layer velocities $\le0.01$ m/s (observed 0.0013 m/s; hydrostatic theory: 0).
+- `test_validate_wd_ritter_tvd2_improves_on_upwind1`: `tvd2` has a smaller L1 error and front lag than `upwind1`, in 1D
+  (0.51 % / 5.6 % against 0.91 % / 11.3 %) and 2DV (0.54 % / 6.6 % against 0.91 % / 11.3 %); 2DV layer spread $\le0.01$
+  m/s (0.0028 m/s).
+- `test_validate_wd_ritter_dry_dam_break_2dv_nonhydro_{upwind1,tvd2}`: the non-hydrostatic mode within the same bounds.
+- `test_validate_wd_carrier_greenspan_runup_1d`: $A=0.4$, slope 1:20, $L=20$ m, one period, forced by the analytical
+  velocity at the offshore boundary: shoreline elevation within 10 % of the runup amplitude $A/4\thinspace sL=0.1$ m at
+  $\Delta x=0.05$ m (observed 9.2 %), converging (14.6 % at 0.1 m), surface elevation of the wet cells within 5 % (1.8 %).
+- `test_validate_wd_carrier_greenspan_runup_2dv`: 15 layers, same bounds (shoreline 9.2 %, surface 2.1 %).
+- `test_validate_wd_carrier_greenspan_runup_tvd2`: `tvd2` gives a smaller shoreline error than `upwind1` (14.3 against
+  14.6 mm at $\Delta x=0.1$ m) and a surface error within 5 %; both are dominated by the wet/dry front, where `tvd2` falls back
+  to first order.
+- `test_validate_wd_carrier_greenspan_runup_2dv_nonhydro`: long wave ($kH\ll1$): the non-hydrostatic mode within the
+  hydrostatic bounds.
+- `test_validate_wd_nonhydro_standing_wave_full_dispersion_{upwind1,tvd2}`: closed basin, $kH=\pi/2$ (the shallow-water
+  and the full period differ by more than 25 %): period error below 2 % on 80 x 40 cells (observed 0.89 %), smaller than
+  on 40 x 20 (1.75 %), closer to $\omega^2=gk\tanh(kH)$ than to the shallow-water relation.
+- `test_validate_wd_nonhydro_standing_wave_deep_water`: $kH=3$ (shallow-water period 42 % too short): period error
+  below 3 % on 40 x 40 cells (observed 1.9 %). Over $kH=0.25\ldots3$ the phase speed is within 0.0-1.9 % of the exact one
+  (`experiments/wetting_drying`, mode `dispersion`).
+- `test_validate_wd_solitary_wave_runup`: non-breaking solitary wave, $H/d=0.019$, beach 1:19.85, against the maximum
+  runup $R/d=2.831\sqrt{\cot\beta}\thinspace(H/d)^{5/4}$ of Synolakis (1987): 1D within 10 % at $\Delta x=0.05$ m (observed 6.2 %) and
+  smaller than at 0.1 m (11.2 %); 2DV non-hydrostatic (12 layers, `tvd2`) within 15 % at 0.1 m (observed 12.9 %). The
+  runup converges at first order to the law (1.00 at 0.0125 m); it is set by the wet/dry front.
 
 ## Additional validation scripts and literature basis
 

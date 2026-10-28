@@ -74,6 +74,13 @@ Base.@kwdef mutable struct ModelConfig
     # columns). nothing (default) = flat bed, legacy code paths. An explicit vector (also all zeros) uses the masked
     # code paths; see BedGeometry in src/geometry.jl.
     bed_level::Union{Nothing,Vector{Float64}} = nothing
+    # Wetting and drying (issue #31, src/wetting_drying.jl): time step on cells cut by the bed and the free surface, with
+    # dry columns, hydrostatic or non-hydrostatic, momentum and transport advection "upwind1" or "tvd2"; the free-surface
+    # solve keeps every depth >= 0 (docs/depth_positivity.md). bed_level may then take any value >= 0 (not only whole
+    # cells) and nz = 1 (1D) is allowed. Requires a closed or prescribed lateral boundary (no periodic_x).
+    wetting_drying::Bool = false
+    # Wetting and drying: smallest upwind water depth (m) at which a u-face is open; shallower faces carry no flow.
+    dry_depth_threshold::Float64 = 1e-6
 end
 
 """
@@ -85,6 +92,7 @@ thickness and rejects an explicit `variable_top_layer=true`). Evaluated on every
 the closure on a config after creation (as `copy_config` workflows do) keeps the default consistent.
 """
 use_variable_top_layer(cfg::ModelConfig) =
+    cfg.wetting_drying ? false :   # WHY: the wet/dry step has its own cut-cell geometry, which contains the variable top layer
     cfg.variable_top_layer === nothing ? (cfg.use_hydrostatic && turbulence_closure(cfg) != "k_epsilon") : cfg.variable_top_layer
 
 """
@@ -161,6 +169,8 @@ function copy_config(cfg::ModelConfig)
         top_layer_min_fraction=cfg.top_layer_min_fraction,
         nonhydro_surface_dirichlet=cfg.nonhydro_surface_dirichlet,
         bed_level=cfg.bed_level === nothing ? nothing : copy(cfg.bed_level),
+        wetting_drying=cfg.wetting_drying,
+        dry_depth_threshold=cfg.dry_depth_threshold,
     )
 end
 
@@ -268,6 +278,7 @@ mutable struct Model{T<:Real}
     x_boundary_u_right_profile::Any
     geometry::BedGeometry   # staircase bed masks (all cells wet for the flat bed)
     turbulence::Any         # KEpsilonState with turbulence_closure = "k_epsilon", else nothing
+    wetdry::Any             # WetDryState with wetting_drying = true, else nothing
 end
 
 function _linspace(start::Real, stop::Real, n::Int)
@@ -294,6 +305,7 @@ end
 
 # Constituent mass (kg/m) of the current state; uses the variable top-layer thickness dz + eta when it is active.
 function _constituent_mass(model::Model)
+    model.wetdry === nothing || return _wd_constituent_mass(model)
     st = model.state
     if model.geometry.any_solid
         mass = sum(st.rho[model.geometry.wet_cell]) * model.dx * model.dz
@@ -676,7 +688,9 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
     last_p_corr = zeros(T, cfg.nz, cfg.nx)
     last_buoy_w = zeros(T, cfg.nz - 1, cfg.nx)
 
-    geometry = BedGeometry(cfg.bed_level, cfg.nz, cfg.nx, cfg.depth / cfg.nz; periodic_x=cfg.periodic_x)
+    # WHY flat masks with wetting and drying: the wet/dry step keeps its own bed (any level, dry columns allowed)
+    geometry = cfg.wetting_drying ? BedGeometry(nothing, cfg.nz, cfg.nx, cfg.depth / cfg.nz; min_wet_cells=1) :
+        BedGeometry(cfg.bed_level, cfg.nz, cfg.nx, cfg.depth / cfg.nz; periodic_x=cfg.periodic_x)
     initial_constituent_mass = geometry.any_solid ? sum(st.rho[geometry.wet_cell]) * dx * dz : constituent_mass(st.rho, dx, dz)
     barotropic_solver = BarotropicSolver(cfg, dx, dz; T=T, geometry=geometry)
     # WHY wet only with solid cells: a zero bed keeps the rectangular (and spectral-capable) Poisson problem unchanged
@@ -716,9 +730,14 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
         nothing,
         geometry,
         turbulence_closure(cfg) == "k_epsilon" ? KEpsilonState(cfg.nz, cfg.nx; T=T) : nothing,
+        cfg.wetting_drying ? WetDryState(cfg; T=T) : nothing,
     )
 
     initialize_lock_exchange!(model; rho_left=cfg.rho_left, rho_right=cfg.rho_right)
+    if cfg.wetting_drying
+        _wd_clamp_to_bed!(model)
+        _refresh_density_metadata!(model)
+    end
 
     return model
 end
@@ -729,6 +748,7 @@ function set_x_inflow_outflow!(
     open_right::Bool=true,
     right_profile::Union{Nothing,AbstractVector{<:Real}}=nothing,
 )
+    model.wetdry === nothing || (model.wetdry.left_velocity = nothing)
     model.x_boundary_u_left_profile = collect(left_profile)
     model.x_boundary_u_right_open = open_right
     model.x_boundary_u_right_profile = right_profile === nothing ? nothing : collect(right_profile)
@@ -736,7 +756,28 @@ function set_x_inflow_outflow!(
     return model
 end
 
+"""
+    set_x_inflow_outflow!(model, left_velocity::Function; open_right=false, right_profile=nothing)
+
+Wetting-drying mode: time-dependent velocity at the left boundary face, `left_velocity(t)` (m/s; scalar or one value per
+layer) at the model time t (s) of the end of each step; dry layers of the face carry no flow.
+"""
+function set_x_inflow_outflow!(
+    model::Model,
+    left_velocity::Function;
+    open_right::Bool=false,
+    right_profile::Union{Nothing,AbstractVector{<:Real}}=nothing,
+)
+    model.wetdry === nothing && throw(ArgumentError("a time-dependent boundary velocity requires ModelConfig(wetting_drying=true)"))
+    model.wetdry.left_velocity = left_velocity
+    model.x_boundary_u_left_profile = nothing
+    model.x_boundary_u_right_open = open_right
+    model.x_boundary_u_right_profile = right_profile === nothing ? nothing : collect(right_profile)
+    return model
+end
+
 function clear_x_inflow_outflow!(model::Model)
+    model.wetdry === nothing || (model.wetdry.left_velocity = nothing)
     model.x_boundary_u_left_profile = nothing
     model.x_boundary_u_right_open = false
     model.x_boundary_u_right_profile = nothing
@@ -744,6 +785,7 @@ function clear_x_inflow_outflow!(model::Model)
 end
 
 function _check_model_config(cfg::ModelConfig)
+    cfg.wetting_drying && _check_wetting_drying_config(cfg)
     if cfg.periodic_x && use_variable_top_layer(cfg)
         throw(ArgumentError("periodic_x=true is not supported with the variable top layer"))
     end
@@ -775,6 +817,20 @@ function _check_model_config(cfg::ModelConfig)
         if cfg.pressure_solver_method != "sparse"
             throw(ArgumentError("nonhydro_surface_dirichlet=true requires pressure_solver_method=\"sparse\" (the spectral solver cannot represent a Dirichlet top condition)"))
         end
+    end
+    return nothing
+end
+
+function _check_wetting_drying_config(cfg::ModelConfig)
+    cfg.periodic_x && throw(ArgumentError("wetting_drying=true does not support periodic_x=true"))
+    cfg.momentum_advection_scheme in ("upwind1", "tvd2") || throw(ArgumentError("momentum_advection_scheme must be \"upwind1\" or \"tvd2\", got \"$(cfg.momentum_advection_scheme)\""))
+    turbulence_closure(cfg) == "none" || throw(ArgumentError("wetting_drying=true does not support a turbulence closure"))
+    cfg.bed_roughness_length == 0.0 || throw(ArgumentError("wetting_drying=true does not support bed_roughness_length"))
+    cfg.wind_stress_x == 0.0 || throw(ArgumentError("wetting_drying=true does not support wind_stress_x"))
+    cfg.dry_depth_threshold > 0.0 || throw(ArgumentError("dry_depth_threshold must be > 0"))
+    if cfg.bed_level !== nothing
+        length(cfg.bed_level) == cfg.nx || throw(ArgumentError("bed_level must have nx = $(cfg.nx) entries, got $(length(cfg.bed_level))"))
+        all(b -> isfinite(b) && b >= 0.0, cfg.bed_level) || throw(ArgumentError("bed_level must be finite and >= 0"))
     end
     return nothing
 end
@@ -861,9 +917,11 @@ function compute_diagnostics(model::Model)
         "cfl_z" => cfl_z,
         "cfl_total" => cfl_total,
         "froude" => froude_number(st.u, st.rho, cfg.rho0, cfg.g, cfg.depth),
-        "water_volume" => water_volume(cfg.depth, st.eta, model.dx) - sum(model.geometry.bed_level) * model.dx,
+        "water_volume" => model.wetdry === nothing ? water_volume(cfg.depth, st.eta, model.dx) - sum(model.geometry.bed_level) * model.dx : sum(water_depth(model)) * model.dx,
         "constituent_mass" => _constituent_mass(model),
-        "boundary_flux" => boundary_normal_flux(st.u, st.w, model.dx, model.dz),
+        "boundary_flux" => model.wetdry === nothing ?
+            boundary_normal_flux(st.u, st.w, model.dx, model.dz) :
+            -sum(@view model.wetdry.q[:, 1]) + sum(@view model.wetdry.q[:, end]),
         "div_max" => maximum(abs, div),
         "div_mean_abs" => mean(abs, div),
         "rho_min" => minimum(st.rho),
@@ -951,6 +1009,10 @@ function pressure_buoyancy_components(model::Model)
     st = model.state
     cfg = model.config
 
+    if model.wetdry !== nothing
+        return copy(model.last_p_hydro), copy(model.last_p_corr), copy(model.last_buoy_w)
+    end
+
     p_hydro = solve_hydrostatic_pressure(st.p, st.rho, cfg.g, model.dz; top_half_layer=use_variable_top_layer(cfg))
     p_corr = cfg.use_hydrostatic ? zeros(size(st.p)) : (st.p .- p_hydro)
 
@@ -1003,6 +1065,10 @@ function step_forward!(model::Model)
     ws = model.ws
 
     _check_model_config(cfg)   # the flags are mutable after construction
+    if cfg.wetting_drying != (model.wetdry !== nothing)
+        throw(ArgumentError("wetting_drying cannot be changed after Model construction"))
+    end
+    cfg.wetting_drying && return _step_forward_wetting_drying!(model)
     if (model.turbulence !== nothing) != (turbulence_closure(cfg) == "k_epsilon")
         throw(ArgumentError("turbulence_closure cannot be changed across the k_epsilon boundary after Model construction"))
     end
@@ -1155,7 +1221,7 @@ function step_forward!(model::Model)
     # the previous step's w_hat predictor copy above, never touched by the projection's interior-only correction),
     # i.e. eta^{n+1} ~= eta^n + dt*eta_t^n: a homogeneous recursion with eta=0 as a self-consistent fixed point. That
     # silently made the non-hydrostatic mode a rigid lid (eta stayed at round-off regardless of real internal
-    # forcing; see test/TESTS_TECHNICAL_DOCUMENTATION.md section 14) even though the same barotropic solve and
+    # forcing; see docs/TESTS_TECHNICAL_DOCUMENTATION.md section 14) even though the same barotropic solve and
     # surface-slope correction as the hydrostatic branch were already being computed. Moving them here (before the
     # projection, exactly as the hydrostatic branch already had them relative to its own -- absent -- projection)
     # decouples eta from the projection in both modes; nothing changes for the hydrostatic branch, whose projection

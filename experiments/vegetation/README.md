@@ -310,7 +310,7 @@ Tests
 - the approach of a canopy lock exchange to x_f ∝ t^(2/3);
 - damping of a standing wave and delay of a lock-exchange front by a patch.
 
-Details: section 16 of `test/TESTS_TECHNICAL_DOCUMENTATION.md`.
+Details: section 16 of `docs/TESTS_TECHNICAL_DOCUMENTATION.md`.
 
 Published data
 --------------

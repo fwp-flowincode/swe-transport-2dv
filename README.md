@@ -35,7 +35,9 @@ Model
   - wind stress and wind-induced mixing;
   - Rayleigh damping and a Froude limiter for numerical stabilisation;
   - vegetation: canopy patches and individual stems, rigid or flexible (quasi-static elastica);
-  - a uniform body force (`body_force_x`, channel slope) and an absorbing sponge layer (`sponge_length`, `sponge_rate`).
+  - a uniform body force (`body_force_x`, channel slope) and an absorbing sponge layer (`sponge_length`, `sponge_rate`);
+  - wetting and drying (`wetting_drying=true`, hydrostatic): cells cut by the bed and the free surface, dry columns, any
+    bed level and a single layer (1D) allowed; see `docs/plan_issue_31_wetting_drying.md`.
 - Diagnostics: water volume, constituent mass, boundary fluxes, CFL numbers, reduced gravity and
   internal wave speed. Plots and animations are written to `output_barotropic/`.
 
@@ -57,6 +59,7 @@ README with a description, settings and figures in its `figures/` subfolder.
 | Surface dam break | `surface_dam_break/` | barotropic bore and rarefaction, front speed |
 | [Wind-driven double gyre](experiments/wind_shear/README.md) | `wind_shear/` | wind stress over a closed two-layer basin, double gyre, hydrostatic vs. non-hydrostatic |
 | [Vegetation](experiments/vegetation/README.md) | `vegetation/` | rigid and flexible canopies and stems, emergent and submerged; channel flow, wave damping and gravity currents against references |
+| [Wetting and drying](experiments/wetting_drying/README.md) | `wetting_drying/` | lake at rest, Ritter dry dam break, Carrier-Greenspan and solitary-wave runup, sloshing over beaches, non-hydrostatic dispersion; 1D and 2DV, upwind1 and tvd2 |
 | Validation | `validation/` | comparisons with analytical or semi-analytical references |
 
 <a href="experiments/lock_exchange/README.md"><img src="experiments/lock_exchange/figures/lock_exchange_nonhydro.gif" alt="Lock exchange, non-hydrostatic" width="560"></a>
@@ -84,8 +87,9 @@ clockwise cell in the upper layer and a counter-rotating cell in the lower layer
 Folder layout
 -------------
 - `src/`: Julia package source.
-- `test/`: test suite (`runtests.jl`, which includes one `test_*.jl` file per functional area) and technical
-  documentation (`TESTS_TECHNICAL_DOCUMENTATION.md`).
+- `test/`: test suite (`runtests.jl`, which includes one `test_*.jl` file per functional area).
+- `docs/`: technical documentation of the methods and tests (`TESTS_TECHNICAL_DOCUMENTATION.md`), plans of the issues,
+  the depth-positivity proof of the wetting-drying scheme (`depth_positivity.md`) and the validation catalogue.
 - `experiments/`: one folder per experiment (scripts, README, `figures/`), plus `validation/`,
   `benchmarks/` and `common/`.
 - `analysis/`: Python evaluation tools, e.g. `analysis/lock_exchange/` (bulk reference values and
@@ -107,7 +111,7 @@ julia --project=. -e "using Pkg; Pkg.test()"
 ```
 
 Technical test documentation:
-- `test/TESTS_TECHNICAL_DOCUMENTATION.md`
+- `docs/TESTS_TECHNICAL_DOCUMENTATION.md`
 
 Run experiments
 ---------------
@@ -141,6 +145,7 @@ julia --project=. experiments/vegetation/plot_vegetation_dunn_k_epsilon.jl
 julia --project=. experiments/vegetation/plot_vegetation_manning.jl
 julia --project=. experiments/vegetation/plot_vegetation_lock_exchange.jl
 julia --project=. experiments/vegetation/plot_vegetation_lock_exchange_canopies.jl
+julia --project=. experiments/wetting_drying/plot_wetting_drying.jl
 julia --project=. experiments/validation/validate_surface_dam_break_front_speed.jl
 julia --project=. experiments/validation/validate_internal_seiche_period.jl
 julia --project=. experiments/validation/validate_lock_exchange_front_speed.jl
@@ -157,12 +162,12 @@ volume change enters the top-layer budgets and the free surface is a material bo
 a moving surface that otherwise acts as a spurious density source in the top row. The non-hydrostatic mode keeps the legacy fixed
 (dz) grid for this bookkeeping; see the section below for what does and does not move there.
 
-The surface must stay inside the top layer (`top_layer_min_fraction`; the run stops with a clear error otherwise — there is no
-layer removal or wetting/drying). Set `ModelConfig(variable_top_layer=false)` explicitly for hydrostatic cases with a large
+The surface must stay inside the top layer (`top_layer_min_fraction`; the run stops with a clear error otherwise — this treatment
+has no layer removal; `wetting_drying=true` lets the surface cross layers and columns fall dry). Set `ModelConfig(variable_top_layer=false)` explicitly for hydrostatic cases with a large
 surface excursion relative to dz, such as the surface dam break or a large-amplitude forced wave; the affected experiment/
 validation scripts already do this (see the `variable_top_layer=false` comments there). Force it on for a specific case with
 `variable_top_layer=true` (rejected for `use_hydrostatic=false`). Details, the full per-step formulation and limitations: section
-13 of `test/TESTS_TECHNICAL_DOCUMENTATION.md`.
+13 of `docs/TESTS_TECHNICAL_DOCUMENTATION.md`.
 
 Non-hydrostatic free surface
 -----------------------------
@@ -175,7 +180,7 @@ it already did in hydrostatic mode, with no change to either mode's continuity/k
 By default this does NOT make free-surface gravity waves dispersive: a pure surface wave (uniform density, so no baroclinic
 forcing) still follows the shallow-water relation `T = 2L/sqrt(gH)`, not the full `omega^2 = g*k*tanh(k*H)` relation, because the
 barotropic surface force is applied outside the elliptic (non-hydrostatic) solve rather than coupled into it as a Dirichlet
-condition. Details: section 14 of `test/TESTS_TECHNICAL_DOCUMENTATION.md`.
+condition. Details: section 14 of `docs/TESTS_TECHNICAL_DOCUMENTATION.md`.
 
 Set `ModelConfig(nonhydro_surface_dirichlet=true, pressure_solver_method="sparse")` (non-hydrostatic mode only) to fix this: the
 pressure correction's top condition becomes Dirichlet `p'=0` instead of Neumann, and the resulting surface waves are genuinely
@@ -185,7 +190,7 @@ spectral one cannot represent a Dirichlet condition) and is implemented for the 
 1500x200 grid took about 1.9 s to factorize once and about 0.095 s per step for the pressure solve alone, comparable to or exceeding
 a full spectral-method step's total cost. Details, the physical derivation, and a second defect found and fixed while validating
 this (a "trivial" reference-density pressure contribution that otherwise dominates the correction's magnitude): section 15 of
-`test/TESTS_TECHNICAL_DOCUMENTATION.md`.
+`docs/TESTS_TECHNICAL_DOCUMENTATION.md`.
 
 Plotting backend note
 ---------------------
