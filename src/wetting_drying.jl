@@ -59,6 +59,7 @@ mutable struct WetDryState{T<:Real}
     nh_cols::Vector{Int}
     nh_vals::Vector{T}
     nh_rhs::Vector{T}
+    hf_prev::Matrix{T}         # m, nz x (nx+1): face layer thicknesses of the previous step (-1: none yet)
     time::Float64
     clamped_volume::Float64   # m^2 (per unit width): volume added by setting round-off negative depths to zero
     newton_iterations::Int        # Newton iterations of the last free-surface solve
@@ -78,7 +79,7 @@ function WetDryState(cfg::ModelConfig; T::Type{<:Real}=Float64)
         zeros(T, nz, nx), zeros(T, nz, nx), zeros(T, nx + 1), zeros(T, nx + 1), zeros(T, nx), zeros(T, nx), zeros(T, nx),
         zeros(T, nx), zeros(T, nx), zeros(T, nx), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz),
         zeros(T, nz, nx + 1), zeros(T, nz + 1, nx), zeros(T, nz, nx), zeros(T, nz, nx), zeros(Int, nz, nx),
-        Int[], Int[], T[], T[], 0.0, 0.0, 0, 0, nothing)
+        Int[], Int[], T[], T[], fill(T(-1), nz, nx + 1), 0.0, 0.0, 0, 0, nothing)
 end
 
 """
@@ -256,19 +257,44 @@ end
     return u_up + 0.5 * _monotonized_central_scalar(u_up - u_upup, u_down - u_up)
 end
 
-# Advection tendency du/dt of face f, layer k: upwind, momentum conservative (Stelling & Duinmeijer 2003, Sec. 3,
-# equation numbers not checked), horizontally with the cell discharges qbar and vertically with the interface fluxes W
-# of time n:
-#   du/dt = -(1/hbar) [ (qbar_R u*_R - qbar_L u*_L)/dx - u (qbar_R - qbar_L)/dx ] + (vertical analogue with W)
-#         = [ qbar_L (u*_L - u) - qbar_R (u*_R - u) ] / (dx hbar) + [ W_bot (u*_bot - u) - W_top (u*_top - u) ] / hbar,
+# Nearest layer at or below k that is open at face f (0 if none).
+function _wd_open_layer_at_or_below(wd::WetDryState, k::Int, f::Int)
+    (1 <= f <= size(wd.hf, 2)) || return 0
+    @inbounds for kk in k:-1:1
+        wd.hf[kk, f] > 0.0 && return kk
+    end
+    return 0
+end
+
+# Advection tendency du/dt of face f, layer k: upwind, momentum conservative in the form of Stelling & Duinmeijer (2003,
+# Sec. 3; equation numbers not checked), horizontally with the cell discharges and vertically with the interface fluxes
+# W of time n:
+#   du/dt = [ a_L (u*_L - u) - a_R (u*_R - u) ] / dx + [ W_bot (u*_bot - u) - W_top (u*_top - u) ] / hbar,
 # with u* the value upwinded by the sign of each flux: the upwind velocity (upwind1) or its limited MUSCL extrapolation
 # (tvd2, `_wd_upwind_value`; second order in space, forward Euler in time like the momentum tvd2 of the other modes).
-# On an outflow side the upwind node is face f itself, so u* - u = 0 for upwind1 (the form reduces to a sum over the
-# inflow sides, sum_j c_j (u_j - u), c_j >= 0) and u* - u = s_f/2 for tvd2.
-# WHY the cap: with C = dt * (sum of the inflow coefficients c_j), the tendency is scaled by 1/C where C > 1; for upwind1
-# this keeps the update a convex combination of the neighbours, so thin layers at the wet/dry front (large c_j) stay
-# stable (they then take the inflow velocity). For tvd2 the outflow corrections are limited (|s_f/2| bounded by the
-# neighbour differences) and are scaled with the same factor.
+# On an outflow side the upwind node is face f itself, so u* - u = 0 for upwind1 (a sum over the inflow sides,
+# sum_j c_j (u_j - u), c_j >= 0) and u* - u = s_f/2 for tvd2.
+#
+# Advective velocities a_L, a_R of the cells left and right of the face (docs/TESTS_TECHNICAL_DOCUMENTATION.md,
+# section "Wetting and drying: depth-uniform velocity"):
+#   a_C = (qbar_{k,C} / htilde_{k,C}) * (Htilde_C / Hbar_f),
+#   qbar_{k,C} = mean of the layer discharges of the two faces of cell C, htilde_{k,C} = mean of their layer thicknesses
+#   (so qbar/htilde is the layer velocity of the cell), Htilde_C = sum_k htilde_{k,C}, Hbar_f = sum_k of the cell
+#   thicknesses averaged to face f.
+# For one layer this is the 1D weight qbar/hbar of Stelling & Duinmeijer. WHY not qbar_k / hbar_k per layer (the direct
+# layer-wise form): its error relative to u is about dx |d zeta/dx| / h_k, which is O(1) wherever the surface cuts a layer
+# thinly (every interface crossing) and does not vanish under refinement; it made the layers of a depth-uniform flow
+# drift apart (2DV Ritter: 0.9 m/s spread). With the column factor, every layer of a depth-uniform flow has exactly the
+# advective velocity of the 1D scheme, so 2DV reproduces 1D (verified by an operator-level manufactured solution).
+# WHY the closed-face rule: if the far face of the inflow cell is closed for this layer (its upwind level lies below the
+# layer), the water entering the layer there comes from the nearest open layer below at that face and rises into it; its
+# velocity is the upwind value (no inflow if the face is closed in all layers below, e.g. dry or blocked by the bed).
+# Counting the closed face as inflow with u = 0 would drag the face towards rest.
+# WHY consistent stencils: tvd2 uses second order in a direction only if the whole stencil (faces f-2..f+2, layers
+# k-2..k+2) is open; a one-sided mix of a second-order inflow and a first-order outflow value is inconsistent (it halves
+# the tendency next to a closed face).
+# WHY the cap: with C = dt * (sum of the inflow coefficients), the tendency is scaled by 1/C where C > 1; for upwind1 this
+# keeps the update a convex combination of the neighbours (thin layers stay stable).
 function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, second::Bool)
     u = model.state.u
     W = model.state.w
@@ -284,50 +310,61 @@ function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, s
     csum = 0.0   # 1/s, sum of the inflow coefficients
     tend = 0.0   # m/s^2
     @inbounds begin
-        # horizontal: cell L (between faces f-1 and f) and cell R (between f and f+1)
-        q_left = 0.5 * (wd.q[k, f - 1] + wd.q[k, f])
-        if q_left > 0.0       # inflow from cell L: upwind node f-1, behind it f-2
-            has = open_h(f - 2) && open_h(f - 1)
-            c = q_left / (dx * hbar)
-            csum += c
-            tend += c * (_wd_upwind_value(u[k, f - 1], has ? u[k, f - 2] : 0.0, uf, has, second) - uf)
-        elseif q_left < 0.0 && second   # outflow into cell L: upwind node f, behind it f+1
-            has = open_h(f + 1) && open_h(f - 1)
-            tend += q_left / (dx * hbar) * (_wd_upwind_value(uf, has ? u[k, f + 1] : 0.0, u[k, f - 1], has, true) - uf)
+        # advective velocities of cells L and R (m/s)
+        Hbar = 0.0
+        HtL = 0.0
+        HtR = 0.0
+        for kk in 1:nz
+            Hbar += 0.5 * (wd.h[kk, L] + wd.h[kk, R])
+            HtL += 0.5 * (wd.hf[kk, f - 1] + wd.hf[kk, f])
+            HtR += 0.5 * (wd.hf[kk, f] + wd.hf[kk, f + 1])
         end
-        q_right = 0.5 * (wd.q[k, f] + wd.q[k, f + 1])
-        if q_right < 0.0      # inflow from cell R: upwind node f+1, behind it f+2
-            has = open_h(f + 2) && open_h(f + 1)
-            c = -q_right / (dx * hbar)
+        htL = 0.5 * (wd.hf[k, f - 1] + wd.hf[k, f])
+        htR = 0.5 * (wd.hf[k, f] + wd.hf[k, f + 1])
+        aL = htL > 0.0 ? 0.5 * (wd.q[k, f - 1] + wd.q[k, f]) / htL * HtL / Hbar : 0.0
+        aR = htR > 0.0 ? 0.5 * (wd.q[k, f] + wd.q[k, f + 1]) / htR * HtR / Hbar : 0.0
+
+        # horizontal
+        h2 = second && open_h(f - 2) && open_h(f - 1) && open_h(f + 1) && open_h(f + 2)
+        kin = aL > 0.0 ? _wd_open_layer_at_or_below(wd, k, f - 1) : 0
+        if kin > 0                         # inflow from cell L: upwind node f-1, behind it f-2
+            c = aL / dx
             csum += c
-            tend += c * (_wd_upwind_value(u[k, f + 1], has ? u[k, f + 2] : 0.0, uf, has, second) - uf)
-        elseif q_right > 0.0 && second  # outflow into cell R: upwind node f, behind it f-1
-            has = open_h(f - 1) && open_h(f + 1)
-            tend -= q_right / (dx * hbar) * (_wd_upwind_value(uf, has ? u[k, f - 1] : 0.0, u[k, f + 1], has, true) - uf)
+            uin = kin == k ? _wd_upwind_value(u[k, f - 1], h2 ? u[k, f - 2] : 0.0, uf, h2, true) : u[kin, f - 1]
+            tend += c * (uin - uf)
+        elseif aL < 0.0 && h2              # outflow into cell L: upwind node f, behind it f+1
+            tend += aL / dx * (_wd_upwind_value(uf, u[k, f + 1], u[k, f - 1], true, true) - uf)
         end
+        kin = aR < 0.0 ? _wd_open_layer_at_or_below(wd, k, f + 1) : 0
+        if kin > 0                         # inflow from cell R: upwind node f+1, behind it f+2
+            c = -aR / dx
+            csum += c
+            uin = kin == k ? _wd_upwind_value(u[k, f + 1], h2 ? u[k, f + 2] : 0.0, uf, h2, true) : u[kin, f + 1]
+            tend += c * (uin - uf)
+        elseif aR > 0.0 && h2              # outflow into cell R: upwind node f, behind it f-1
+            tend -= aR / dx * (_wd_upwind_value(uf, u[k, f - 1], u[k, f + 1], true, true) - uf)
+        end
+
         # vertical: interface k (below layer k) and k+1 (above)
+        v2 = second && open_v(k - 2) && open_v(k - 1) && open_v(k + 1) && open_v(k + 2)
         if open_v(k - 1)
             w_bot = 0.5 * (W[k, L] + W[k, R])
-            if w_bot > 0.0    # inflow from below: upwind node k-1, behind it k-2
-                has = open_v(k - 2)
+            if w_bot > 0.0                 # inflow from below: upwind node k-1, behind it k-2
                 c = w_bot / hbar
                 csum += c
-                tend += c * (_wd_upwind_value(u[k - 1, f], has ? u[k - 2, f] : 0.0, uf, has, second) - uf)
-            elseif w_bot < 0.0 && second   # outflow downwards: upwind node k, behind it k+1
-                has = open_v(k + 1)
-                tend += w_bot / hbar * (_wd_upwind_value(uf, has ? u[k + 1, f] : 0.0, u[k - 1, f], has, true) - uf)
+                tend += c * (_wd_upwind_value(u[k - 1, f], v2 ? u[k - 2, f] : 0.0, uf, v2, true) - uf)
+            elseif w_bot < 0.0 && v2       # outflow downwards: upwind node k, behind it k+1
+                tend += w_bot / hbar * (_wd_upwind_value(uf, u[k + 1, f], u[k - 1, f], true, true) - uf)
             end
         end
         if open_v(k + 1)
             w_top = 0.5 * (W[k + 1, L] + W[k + 1, R])
-            if w_top < 0.0    # inflow from above: upwind node k+1, behind it k+2
-                has = open_v(k + 2)
+            if w_top < 0.0                 # inflow from above: upwind node k+1, behind it k+2
                 c = -w_top / hbar
                 csum += c
-                tend += c * (_wd_upwind_value(u[k + 1, f], has ? u[k + 2, f] : 0.0, uf, has, second) - uf)
-            elseif w_top > 0.0 && second   # outflow upwards: upwind node k, behind it k-1
-                has = open_v(k - 1)
-                tend -= w_top / hbar * (_wd_upwind_value(uf, has ? u[k - 1, f] : 0.0, u[k + 1, f], has, true) - uf)
+                tend += c * (_wd_upwind_value(u[k + 1, f], v2 ? u[k + 2, f] : 0.0, uf, v2, true) - uf)
+            elseif w_top > 0.0 && v2       # outflow upwards: upwind node k, behind it k-1
+                tend -= w_top / hbar * (_wd_upwind_value(uf, u[k - 1, f], u[k + 1, f], true, true) - uf)
             end
         end
     end
@@ -395,6 +432,40 @@ function _wd_depth_roundoff(model::Model, wd::WetDryState, i::Int)
     gamma = m * eps(Float64) / (1 - m * eps(Float64))
     S = model.config.depth + abs(model.ws.eta_old[i]) + abs(model.state.eta[i]) + abs(wd.bed[i]) + wd.outflow[i]
     return abs(wd.rhs[i]) + WD_POSITIVITY_ROUNDOFF_FACTOR * gamma * S
+end
+
+# A face layer that opens in this step (the upwind level has risen past its lower interface, or the face has become wet)
+# carries u = 0 from the time it was closed. It takes the velocity of the nearest open layer below at the same face
+# (or above, at a face that opens from the bed upwards), i.e. the fluid that rises into it.
+# WHY: hydrostatic theory has no vertical shear without stress; a new layer at rest beside a moving column is a spurious
+# shear that the advection only removes at its own rate (about u/dx), so the layer lags for many steps. Common practice in
+# z-layer models (e.g. Delft3D-FLOW, Z-model: the velocity of a new top layer is copied from the layer below).
+function _wd_initialize_new_face_layers!(model::Model, wd::WetDryState)
+    u = model.state.u
+    nz = model.config.nz
+    @inbounds for f in 2:model.config.nx
+        for k in 1:nz
+            (wd.hf[k, f] > 0.0 && wd.hf_prev[k, f] == 0.0) || continue
+            src = 0
+            for kk in (k - 1):-1:1
+                if wd.hf[kk, f] > 0.0 && wd.hf_prev[kk, f] > 0.0
+                    src = kk
+                    break
+                end
+            end
+            if src == 0
+                for kk in (k + 1):nz
+                    if wd.hf[kk, f] > 0.0 && wd.hf_prev[kk, f] > 0.0
+                        src = kk
+                        break
+                    end
+                end
+            end
+            src > 0 && (u[k, f] = u[src, f])
+        end
+    end
+    copyto!(wd.hf_prev, wd.hf)
+    return nothing
 end
 
 """
@@ -761,6 +832,7 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     # 1. geometry at time n
     _wd_cell_thicknesses!(wd.h, model, wd)
     _wd_face_thicknesses!(model, wd)
+    _wd_initialize_new_face_layers!(model, wd)
     @. wd.q = wd.hf * st.u   # discharges of time n, for the advection
     _wd_baroclinic_pressure!(model, wd)
 

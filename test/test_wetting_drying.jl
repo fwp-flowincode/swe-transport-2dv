@@ -183,6 +183,63 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         @test all(isfinite, model.state.u)
     end
 
+    # Operator-level manufactured solution for the momentum advection (docs/TESTS_TECHNICAL_DOCUMENTATION.md, section
+    # "Wetting and drying: depth-uniform velocity"): a depth-uniform u(x) under a surface zeta(x) that crosses several
+    # layer interfaces, with the interface fluxes W from the discrete layer continuity. Hydrostatic theory gives the same
+    # tendency -u du/dx in every layer; the discrete tendency must converge to it at first order in the maximum norm in
+    # every layer, as in 1D. (The layer-wise weight qbar_k/hbar_k had O(1) errors in thinly cut surface layers that did
+    # not converge: 0.46, 0.87, 0.39, 0.17 m/s^2 for nx = 200 ... 1600 against |u du/dx| <= 0.27 m/s^2.)
+    MMS_ORDER_MIN = 0.8          # -, observed order of the maximum error per grid halving (first-order scheme)
+    MMS_2DV_VS_1D_MAX = 2.0      # -, the 2DV maximum error may exceed the 1D upwind1 one at most by this factor
+    MMS_LAYER_MIN = 1e-3         # m, face layers thinner than this are left out (their weight in the momentum is nil)
+    mms_zeta(x) = 0.6 + 0.3 * (1 - tanh((x - 50) / 15))    # m, from 1.2 m down to 0.6 m: crosses 6 interfaces
+    mms_u(x) = 1.0 + 2.0 * tanh((x - 50) / 15)             # m/s, changes sign: inflow from both sides occurs
+    mms_dudx(x) = 2.0 / 15 * (1 - tanh((x - 50) / 15)^2)   # 1/s
+
+    function mms_advection_error(nx, nz, second)
+        cfg = wd_config(length=100.0, depth=1.2, nx=nx, nz=nz, dt=0.001)
+        model = Model(cfg)
+        wd = model.wetdry
+        dx = model.dx
+        xc = wd_x_centres(cfg)
+        xf = [(f - 1) * dx for f in 1:(nx + 1)]
+        model.state.eta .= mms_zeta.(xc) .- cfg.depth
+        for f in 2:nx, k in 1:nz
+            model.state.u[k, f] = mms_u(xf[f])
+        end
+        SweTransport2DV._wd_cell_thicknesses!(wd.h, model, wd)
+        SweTransport2DV._wd_face_thicknesses!(model, wd)
+        model.state.u .*= wd.hf .> 0.0
+        wd.q .= wd.hf .* model.state.u
+        fill!(model.state.w, 0.0)
+        for i in 1:nx
+            zeta_t = -(sum(@view wd.q[:, i + 1]) - sum(@view wd.q[:, i])) / dx   # m/s, column continuity
+            s = findlast(>(0.0), @view wd.h[:, i])                               # the surface layer takes the change
+            for k in 1:nz
+                model.state.w[k + 1, i] = model.state.w[k, i] - ((k == s ? zeta_t : 0.0) + (wd.q[k, i + 1] - wd.q[k, i]) / dx)
+            end
+        end
+        err = 0.0
+        for f in 3:(nx - 1), k in 1:nz
+            wd.hf[k, f] > MMS_LAYER_MIN || continue
+            err = max(err, abs(SweTransport2DV._wd_advection_tendency(model, wd, k, f, second) + mms_u(xf[f]) * mms_dudx(xf[f])))
+        end
+        return err
+    end
+
+    @testset "test_verify_wd_advection_depth_uniform_mms_$(scheme)" for scheme in ("upwind1", "tvd2")
+        second = scheme == "tvd2"
+        nxs = (100, 200, 400, 800)
+        # WHY the 1D upwind1 error as reference for both schemes: at faces where a layer ends, tvd2 falls back to first order
+        # (consistent stencils), so its 2DV maximum error is first order, while 1D tvd2 never falls back
+        e1 = [mms_advection_error(nx, 1, false) for nx in nxs]
+        e2 = [mms_advection_error(nx, 12, second) for nx in nxs]
+        for j in 2:length(nxs)
+            @test log2(e2[j - 1] / e2[j]) >= MMS_ORDER_MIN
+            @test e2[j] <= MMS_2DV_VS_1D_MAX * e1[j]
+        end
+    end
+
     @testset "test_verify_wd_negative_depth_is_rejected" begin
         cfg = wd_config(length=10.0, depth=1.0, nx=20, nz=4, dt=0.01)
         cfg.bed_level = fill(0.3, cfg.nx)
@@ -253,6 +310,10 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
     RITTER_2DV_VS_1D_MAX = 0.01      # -, relative L1 difference between the 2DV and the 1D depth
 
     RITTER_LAYER_DEPTH_MIN = 1e-3    # m, layers thinner than this are left out of the vertical velocity spread
+    # m/s, accepted difference between the layer velocities (hydrostatic theory: 0; measured at t = 5 s, dx = 0.25 m:
+    # 0.001 m/s upwind1, 0.003 m/s tvd2, of a largest velocity of about 5 m/s; 0.29 m/s before the column-consistent
+    # advection weights, docs/TESTS_TECHNICAL_DOCUMENTATION.md)
+    RITTER_LAYER_SPREAD_MAX = 0.01
 
     # Largest difference (m/s) between the layer velocities of a face (layers thicker than RITTER_LAYER_DEPTH_MIN);
     # hydrostatic theory keeps an initially depth-uniform velocity depth-uniform.
@@ -305,6 +366,7 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         @test l1 <= RITTER_L1_REL_MAX
         @test front_error <= RITTER_FRONT_REL_MAX
         @test sum(abs, h2dv .- h1d) / sum(h1d) <= RITTER_2DV_VS_1D_MAX
+        @test layer_velocity_spread(model) <= RITTER_LAYER_SPREAD_MAX
         @test all(isfinite, model.state.u)
     end
 
@@ -364,21 +426,15 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
 
     variant(tag) = only(v for v in WD_VARIANTS if v.tag == tag)
 
-    # Measured at dx = 0.25 m: 1D L1 0.51 % (upwind1 0.91 %), front 5.6 % (11.3 %); 2DV L1 0.80 % (0.89 %), layer spread
-    # 0.18 m/s (0.29 m/s), front 11.3 % (10.3 %, one cell apart). In 2DV the upper layers still lag where the surface
-    # has dropped through several layers, and draining carries their slower fluid to the front (open point, plan).
+    # Measured at dx = 0.25 m: 1D L1 0.51 % (upwind1 0.91 %), front 5.6 % (11.3 %); 2DV L1 0.54 % (0.91 %), front 6.6 %
+    # (11.3 %), layer spread 0.003 m/s (0.001 m/s).
     @testset "test_validate_wd_ritter_tvd2_improves_on_upwind1" begin
         for nz in (1, 12)
             model_up, _, l1_up, front_up = run_ritter(400, nz; v=variant("hydro_upwind1"))
             model_tvd, _, l1_tvd, front_tvd = run_ritter(400, nz; v=variant("hydro_tvd2"))
             @test l1_tvd < l1_up
-            if nz == 1
-                @test front_tvd < front_up
-            else
-                @test front_tvd <= RITTER_FRONT_REL_MAX
-                # second-order momentum advection reduces the first-order layer-velocity error of the draining surface layer
-                @test layer_velocity_spread(model_tvd) < layer_velocity_spread(model_up)
-            end
+            @test front_tvd < front_up
+            nz > 1 && @test layer_velocity_spread(model_tvd) <= RITTER_LAYER_SPREAD_MAX
         end
     end
 
