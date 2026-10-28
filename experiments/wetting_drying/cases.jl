@@ -250,3 +250,85 @@ function mms_advection_tendencies(nx::Int, nz::Int; method::AbstractString="upwi
     end
     return xf, tend, [-mms_u(x) * mms_dudx(x) for x in xf]
 end
+
+# ---- Non-hydrostatic: standing wave in a closed basin ---------------------------------------------------------------
+const NH_WAVE_DEPTH = 1.0        # m, still water depth of the dispersion cases
+const NH_WAVE_AMPLITUDE = 1e-4   # m, linear regime
+
+"Period (s) of a standing wave with wavenumber k (1/m) in water of depth H (m): omega^2 = g k tanh(k H) (Lamb 1932)."
+standing_wave_period(k::Real, H::Real; g::Real=9.81) = 2pi / sqrt(g * k * tanh(k * H))
+
+"""
+    standing_wave_model(kH; nx_per_half_wave=40, nz=40, steps_per_period=400, kwargs...) -> (model, period_exact)
+
+Closed basin of length L = pi H / (kH) (one half wavelength, k = pi / L) with the surface cos(pi x / L) of amplitude
+NH_WAVE_AMPLITUDE; `kwargs` override configuration fields (use_hydrostatic, schemes).
+"""
+function standing_wave_model(kH::Real; nx_per_half_wave::Int=40, nz::Int=40, steps_per_period::Int=400, kwargs...)
+    H = NH_WAVE_DEPTH
+    L = pi * H / kH
+    period = standing_wave_period(pi / L, H)
+    cfg = wd_experiment_config(; length=L, depth=H, nx=nx_per_half_wave, nz=nz, dt=period / steps_per_period, kwargs...)
+    model = Model(cfg)
+    initialize_water_level!(model, H .+ NH_WAVE_AMPLITUDE .* cos.(pi .* wd_x_centres(cfg) ./ L); rho=WD_RHO0)
+    return model, period
+end
+
+"Period (s) from the first zero crossing of eta at the left wall (a quarter period); NaN if none within 0.6 periods."
+function standing_wave_measured_period(model::Model, period_guess::Real)
+    dt = model.config.dt
+    t_prev, e_prev = 0.0, model.state.eta[1]
+    for n in 1:round(Int, 0.6 * period_guess / dt)
+        step_forward!(model)
+        e = model.state.eta[1]
+        if e <= 0.0
+            t = n * dt
+            return 4.0 * (t_prev + e_prev / (e_prev - e) * (t - t_prev))
+        end
+        t_prev, e_prev = n * dt, e
+    end
+    return NaN
+end
+
+# ---- Solitary wave runup on a plane beach (Synolakis 1987) ------------------------------------------------------------
+const SOL_DEPTH = 1.0            # m, offshore still water depth d
+const SOL_COT_BETA = 19.85       # -, beach slope 1:19.85 (Synolakis 1987)
+const SOL_HEIGHT = 0.019         # -, wave height H/d (non-breaking)
+const SOL_STILL_LEVEL = 1.0      # m, still water level above the grid bottom (offshore bed at the grid bottom)
+const SOL_GRID_DEPTH = 1.2       # m
+const SOL_OFFSHORE = 60.0        # m, offshore distance of the left wall from the still shoreline
+const SOL_ONSHORE = 5.0          # m, dry beach landward of the still shoreline
+const SOL_SHORE_DEPTH = 1e-3     # m, depth that marks the numerical shoreline
+
+"Maximum runup (m above the still level) of a non-breaking solitary wave on a plane beach, Synolakis (1987): R/d = 2.831 sqrt(cot beta) (H/d)^(5/4)."
+solitary_runup_law() = 2.831 * sqrt(SOL_COT_BETA) * SOL_HEIGHT^(5 / 4) * SOL_DEPTH
+
+"""
+    solitary_runup_model(dx, nz; kwargs...) -> model
+
+Plane beach 1:19.85 on the right (still shoreline at x = SOL_OFFSHORE), flat bed of depth d offshore, closed left wall.
+A solitary wave eta = H sech^2(gamma (x - x1)), gamma = sqrt(3H/(4d^3)), centred half its length (to 5 % of H) seaward
+of the toe of the beach, with the depth-uniform velocity u = c eta/(d + eta), c = sqrt(g (d + H)), towards the beach
+(Synolakis 1987). `kwargs` override configuration fields.
+"""
+function solitary_runup_model(dx::Real, nz::Int; dt::Real=0.01, kwargs...)
+    length = SOL_OFFSHORE + SOL_ONSHORE
+    nx = round(Int, length / dx)
+    cfg = wd_experiment_config(; length=length, depth=SOL_GRID_DEPTH, nx=nx, nz=nz, dt=dt, kwargs...)
+    x = wd_x_centres(cfg)
+    x_shore = SOL_OFFSHORE
+    x_toe = x_shore - SOL_DEPTH * SOL_COT_BETA
+    cfg.bed_level = [max(0.0, SOL_STILL_LEVEL - SOL_DEPTH + (xi - x_toe) / SOL_COT_BETA) for xi in x]
+    model = Model(cfg)
+    H = SOL_HEIGHT * SOL_DEPTH
+    gamma = sqrt(3H / (4SOL_DEPTH^3))
+    x1 = x_toe - acosh(sqrt(20.0)) / gamma
+    eta(xx) = H * sech(gamma * (xx - x1))^2
+    initialize_water_level!(model, [max(SOL_STILL_LEVEL + eta(xi), 0.0) for xi in x]; rho=WD_RHO0)
+    c = sqrt(cfg.g * (SOL_DEPTH + H))
+    for f in 2:nx, k in 1:nz
+        xf = (f - 1) * model.dx
+        model.state.u[k, f] = c * eta(xf) / (SOL_DEPTH + eta(xf))
+    end
+    return model
+end

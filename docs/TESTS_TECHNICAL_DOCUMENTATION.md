@@ -830,11 +830,23 @@ Froude limiter and the horizontal viscosity.
   periodic integral representation (64 points, exponential convergence). The sign convention was derived here and is
   verified by the residual test below; equation numbers of the original were not checked.
 
+**Order at the wet/dry front.** Both schemes are first order at the front, for three reasons: the depth has a kink there
+(linear vanishing on a beach, quadratic in the Ritter rarefaction), so any limited reconstruction clips; in runup the
+flow reverses at maximum runup and rundown (extremum of the velocity at the tip, switch of the upwind face depths); and
+each column has one bed level, so the shoreline moves cell by cell with a staircase error of order $\Delta x\tan\beta$ in
+elevation. The domain-integrated errors are hardly affected (O($\Delta x$) errors over an O($\Delta x$) region of small depth),
+but the front position and the runup converge at first order, the same for `upwind1` and `tvd2` (solitary runup
+0.80 ... 1.00 of the law for $\Delta x=0.2\ldots0.0125$ m, both schemes). A sloping bed within each column (sub-grid
+bathymetry, Casulli 2009: $V_i(\eta)$ piecewise quadratic, still convex and non-decreasing, so the Newton solve and the
+positivity proof carry over; Casulli & Zanolli 2012 for the iteration) would move the shoreline continuously and is the
+candidate to reduce the staircase error.
+
 References: Casulli & Cheng (1992), Int. J. Numer. Methods Fluids 15, 629-648; Casulli (1999), Int. J. Numer. Methods
 Fluids 30, 425-440; Casulli & Zanolli (2002), Math. Comput. Model. 36, 1131-1149; Stelling & Duinmeijer (2003), Int. J.
 Numer. Methods Fluids 43, 1329-1354; Brugnano & Casulli (2008), SIAM J. Sci. Comput. 30, 463-472; Casulli (2009), Int. J.
 Numer. Methods Fluids 60, 391-408; Ritter (1892), Z. Ver. Deutsch. Ing. 36, 947-954; Carrier & Greenspan (1958), J.
-Fluid Mech. 4, 97-109; Delestre et al. (2013), Int. J. Numer. Methods Fluids 72, 269-300 (SWASHES). Equation numbers were
+Fluid Mech. 4, 97-109; Synolakis (1987), J. Fluid Mech. 185, 523-545; Casulli & Zanolli (2012), SIAM J. Sci.
+Comput. 34, A2040-A2059; Delestre et al. (2013), Int. J. Numer. Methods Fluids 72, 269-300 (SWASHES). Equation numbers were
 not checked.
 
 ## Test-by-test documentation
@@ -1733,6 +1745,13 @@ Exactness, conservation and positivity tests run for the four variants hydrostat
 - `test_validate_wd_nonhydro_standing_wave_full_dispersion_{upwind1,tvd2}`: closed basin, $kH=\pi/2$ (the shallow-water
   and the full period differ by more than 25 %): period error below 2 % on 80 x 40 cells (observed 0.89 %), smaller than
   on 40 x 20 (1.75 %), closer to $\omega^2=gk\tanh(kH)$ than to the shallow-water relation.
+- `test_validate_wd_nonhydro_standing_wave_deep_water`: $kH=3$ (shallow-water period 42 % too short): period error
+  below 3 % on 40 x 40 cells (observed 1.9 %). Over $kH=0.25\ldots3$ the phase speed is within 0.0-1.9 % of the exact one
+  (`experiments/wetting_drying`, mode `dispersion`).
+- `test_validate_wd_solitary_wave_runup`: non-breaking solitary wave, $H/d=0.019$, beach 1:19.85, against the maximum
+  runup $R/d=2.831\sqrt{\cot\beta}\,(H/d)^{5/4}$ of Synolakis (1987): 1D within 10 % at $\Delta x=0.05$ m (observed 6.2 %) and
+  smaller than at 0.1 m (11.2 %); 2DV non-hydrostatic (12 layers, `tvd2`) within 15 % at 0.1 m (observed 12.9 %). The
+  runup converges at first order to the law (1.00 at 0.0125 m); it is set by the wet/dry front.
 
 ## Additional validation scripts and literature basis
 

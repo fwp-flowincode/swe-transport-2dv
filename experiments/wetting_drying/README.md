@@ -6,14 +6,16 @@ Issue #31: flows in which the water leaves cells, columns fall dry and dry beach
 (`src/wetting_drying.jl`). The bed may take any level, columns may be dry, and `nz = 1` gives the 1D (depth-averaged)
 model on the same code path. Method, decisions and status: [docs/plan_issue_31_wetting_drying.md](../../docs/plan_issue_31_wetting_drying.md).
 
-Four cases, each against an exact property or an analytical solution, in 1D and 2DV:
+Cases against exact properties or analytical solutions, in 1D and 2DV:
 
 | Case | Reference | Result |
 |---|---|---|
 | Lake at rest over a beach, an island and a bump | stagnant water stays stagnant | u = 0 and level unchanged exactly (500 steps), also stratified |
 | Ritter dam break on a dry bed | Ritter (1892) | L1 depth error 0.9 % at dx = 0.25 m, first-order convergence |
 | Standing wave on a planar beach | Carrier & Greenspan (1958) | shoreline within 9 % of the runup amplitude at dx = 0.05 m |
-| Sloshing over two beaches, two water masses | conservation | water volume and constituent mass to 7e-16, density within its bounds |
+| Sloshing over two beaches, two water masses | conservation | water volume and constituent mass to 9e-16, density within its bounds |
+| Standing waves, non-hydrostatic | omega² = g k tanh(k H) | phase speed within 1.9 % up to k H = 3 |
+| Solitary wave on a plane beach | Synolakis (1987) | maximum runup converges to the law (94 % at dx = 0.05 m, 100 % at 0.0125 m) |
 
 Run all cases and write the figures (about 1 min):
 
@@ -159,12 +161,48 @@ sharper; both stay within the initial density bounds and conserve the mass to ro
 
 ![Sloshing schemes animation](figures/schemes_sloshing.gif)
 
+Non-hydrostatic mode
+--------------------
+
+`use_hydrostatic=false`: the non-hydrostatic pressure is solved on the wet cells below the surface cell of each column,
+its gradient enters the momentum predictor, and the positive free-surface solve is repeated (method: section 18 of
+[docs/TESTS_TECHNICAL_DOCUMENTATION.md](../../docs/TESTS_TECHNICAL_DOCUMENTATION.md)).
+
+**Dispersion** (`plot_wetting_drying.jl dispersion`). Standing waves in a closed basin of depth 1 m, one half wavelength
+long, 40 cells and 40 layers. The non-hydrostatic phase speed follows the full relation omega² = g k tanh(k H) within
+0.0-1.9 % from k H = 0.25 to 3; the hydrostatic mode keeps the shallow-water speed (42 % error in the period at k H = 3).
+At k H = pi/2 the period error converges at first order (3.4, 1.75, 0.89, 0.45 % for 20 x 10 ... 160 x 80 cells): the
+condition q = 0 in the surface cell is first order in its thickness. The amplitude decays by about 5 % per period at 400
+steps per period, the damping of the fully implicit free surface (about 2 pi² / N per period with N steps; not specific
+to wetting and drying).
+
+![Dispersion](figures/nonhydro_dispersion.png)
+
+![Standing wave](figures/nonhydro_standing_wave.png)
+
+**Solitary wave runup** (`plot_wetting_drying.jl solitary`). The canonical non-breaking case of Synolakis (1987): a
+solitary wave of height H/d = 0.019 over a depth d = 1 m runs up a 1:19.85 beach; the maximum runup of the nonlinear
+shallow-water theory is R/d = 2.831 sqrt(cot beta) (H/d)^(5/4), i.e. 0.0890 m, which his laboratory data confirm for
+non-breaking waves. The wave starts as eta = H sech²(gamma (x - x1)) with u = c eta/(d + eta) (12 layers of 0.1 m in
+2DV). The runup converges at first order to the law (0.80, 0.89, 0.94, 0.98, 1.00 for dx = 0.2 ... 0.0125 m, 1D); 2DV
+hydrostatic equals 1D, the non-hydrostatic runup is 1.5-2 % lower on the same grid (dispersion reduces the steepening).
+upwind1 and tvd2 give the same runup: it is set by the wet/dry front, where both are first order.
+
+![Runup convergence](figures/solitary_runup_convergence.png)
+
+![Shoreline](figures/solitary_shoreline.png)
+
+![Profiles](figures/solitary_profiles.png)
+
+![Solitary non-hydrostatic](figures/solitary_nonhydro.gif)
+
 Limitations
 -----------
 
-- The non-hydrostatic mode (`use_hydrostatic=false`) is supported and tested (`test/test_wetting_drying.jl`: full
-  dispersion of a standing wave within 0.45-1.75 %, first order; Ritter and Carrier-Greenspan within the hydrostatic
-  targets); its experiments are still to be added here.
+- The wet/dry front is first order with both schemes: the depth has a kink there, the flow reverses at maximum runup and
+  rundown (the limiter clips), and each column has one bed level, so the shoreline moves cell by cell (the staircase
+  error dominates the runup cases). A sloping bed within each column (sub-grid bathymetry, Casulli 2009) is the
+  candidate to improve the shoreline; see the plan.
 - Not supported together with wetting and drying: periodic x, vegetation, k-epsilon, bed roughness, wind stress.
 
 References
@@ -177,4 +215,6 @@ References
 - Casulli (2009), Int. J. Numer. Methods Fluids 60, 391-408
 - Brugnano & Casulli (2008), SIAM J. Sci. Comput. 30, 463-472
 - van Leer (1977), J. Comput. Phys. 23, 276-299 (MC limiter)
+- Synolakis (1987), The runup of solitary waves, J. Fluid Mech. 185, 523-545
+- Casulli (1999), Int. J. Numer. Methods Fluids 30, 425-440 (non-hydrostatic pressure)
 - Delestre et al. (2013), SWASHES, Int. J. Numer. Methods Fluids 72, 269-300

@@ -3,7 +3,8 @@
 # Usage (any working directory):
 #   julia --project=<repository> experiments/wetting_drying/plot_wetting_drying.jl [mode ...]
 # Modes: lake, ritter, runup, sloshing, mms (manufactured solution of the momentum advection), schemes (upwind1 against
-# tvd2); default: all. Each takes about a minute or less.
+# tvd2), dispersion (non-hydrostatic standing waves), solitary (solitary wave runup, Synolakis 1987); default: all.
+# Each takes a few minutes or less.
 # Output: output_barotropic/wetting_drying_figures/; the PNG and GIF files are copied to figures/.
 
 # WHY: batch run without a display; same GR workstation choice as src/visualization.jl.
@@ -15,7 +16,7 @@ using Printf
 
 include(joinpath(@__DIR__, "cases.jl"))
 
-const MODES = isempty(ARGS) ? ["lake", "ritter", "runup", "sloshing", "mms", "schemes"] : ARGS
+const MODES = isempty(ARGS) ? ["lake", "ritter", "runup", "sloshing", "mms", "schemes", "dispersion", "solitary"] : ARGS
 const OUTPUT_DIR = joinpath(@__DIR__, "..", "..", "output_barotropic", "wetting_drying_figures")
 const FIGURE_DIR = joinpath(@__DIR__, "figures")
 
@@ -471,6 +472,153 @@ function plot_schemes()
     save_gif(anim, "schemes_sloshing.gif")
 end
 
+# ---- Non-hydrostatic: dispersion of a standing wave ------------------------------------------------------------------
+const DISP_KH = (0.25, 0.5, 1.0, 1.5, 2.0, 3.0)   # -, relative depths of the dispersion curve
+const DISP_GRIDS = ((20, 10), (40, 20), (80, 40), (160, 80))   # (cells per half wavelength, layers) at k H = pi/2
+const DISP_TIMESERIES_PERIODS = 2.0                 # -, length of the surface time series
+
+function plot_dispersion()
+    println("\n=== Non-hydrostatic: dispersion of a standing wave ===")
+    g = 9.81
+    H = NH_WAVE_DEPTH
+    kh_curve = range(0.05, 3.2, length=300)
+    fig = plot(kh_curve, sqrt.(tanh.(kh_curve) ./ kh_curve); color=:black, linewidth=2, label="exact: ω² = g k tanh(k H)",
+        xlabel="k H (-)", ylabel="phase speed c / √(g H) (-)", legend=:bottomleft, size=LINE_SIZE_PX,
+        left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM, title="Standing wave, 40 cells per half wavelength, 40 layers")
+    hline!(fig, [1.0]; color=:gray, linestyle=:dash, label="shallow water")
+    for (hydro, label, marker) in ((true, "hydrostatic", :square), (false, "non-hydrostatic", :circle))
+        speeds = Float64[]
+        for kH in DISP_KH
+            model, period = standing_wave_model(kH; use_hydrostatic=hydro, momentum_advection_scheme="tvd2", transport_advection_scheme="tvd2")
+            # WHY a longer search window for the hydrostatic mode: its period is the shallow-water one
+            measured = standing_wave_measured_period(model, hydro ? 2pi / (pi / model.config.length * sqrt(g * H)) : period)
+            k = pi / model.config.length
+            push!(speeds, 2pi / (measured * k) / sqrt(g * H))
+            @printf("%-15s kH = %.2f | period %.4f s, exact %.4f s, error %+.2f %%\n", label, kH, measured, period, 100(measured - period) / period)
+        end
+        scatter!(fig, collect(DISP_KH), speeds; marker=marker, markersize=6, label=label)
+    end
+    save_figure(fig, "nonhydro_dispersion.png")
+
+    # convergence at k H = pi/2 and surface time series at the wall
+    kH = pi / 2
+    errs, dxs = Float64[], Float64[]
+    for (nxh, nz) in DISP_GRIDS
+        model, period = standing_wave_model(kH; nx_per_half_wave=nxh, nz=nz, use_hydrostatic=false)
+        measured = standing_wave_measured_period(model, period)
+        push!(errs, abs(measured - period) / period)
+        push!(dxs, model.dx)
+        @printf("k H = pi/2, %3d x %2d cells | period error %.3f %%\n", nxh, nz, 100errs[end])
+    end
+    fig_c = plot(dxs, errs; xscale=:log10, yscale=:log10, marker=:circle, label="non-hydrostatic (upwind1)", xlabel="dx (m)",
+        ylabel="relative period error (-)", legend=:bottomright, title="k H = π/2: convergence (dz = dx / 2)")
+    plot!(fig_c, dxs, errs[1] .* dxs ./ dxs[1]; color=:gray, linestyle=:dot, label="first order")
+    fig_t = plot(xlabel="t / T (-)", ylabel="η at the wall / a (-)", legend=:bottomleft, title="Surface at the left wall, k H = π/2")
+    for (hydro, label) in ((true, "hydrostatic"), (false, "non-hydrostatic"))
+        model, period = standing_wave_model(kH; use_hydrostatic=hydro)
+        n = round(Int, DISP_TIMESERIES_PERIODS * period / model.config.dt)
+        series = [model.state.eta[1]]
+        for _ in 1:n
+            step_forward!(model)
+            push!(series, model.state.eta[1])
+        end
+        plot!(fig_t, (0:n) .* model.config.dt ./ period, series ./ NH_WAVE_AMPLITUDE; linewidth=2, label=label)
+    end
+    ts = range(0.0, DISP_TIMESERIES_PERIODS, length=500)
+    plot!(fig_t, ts, cos.(2pi .* ts); color=:black, linestyle=:dash, label="exact (linear)")
+    save_figure(plot(fig_t, fig_c; layout=(1, 2), size=(1200, 420), left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM),
+        "nonhydro_standing_wave.png")
+end
+
+# ---- Solitary wave runup on a plane beach ------------------------------------------------------------------------------
+const SOL_T_END = 22.0                       # s, past the maximum runup (about 18.5 s)
+const SOL_DX_1D = (0.2, 0.1, 0.05, 0.025, 0.0125)   # m
+const SOL_DX_2DV = (0.2, 0.1, 0.05)          # m
+const SOL_NZ = 12                            # -, layers of 0.1 m
+const SOL_DT_DX = 0.1                        # s/m, time step per grid spacing
+const SOL_DOC_DX = 0.05                      # m, grid of the time series, profiles and animation
+const SOL_PROFILE_TIMES = (6.0, 12.0, 16.0, 18.5)   # s
+const SOL_FRAME_INTERVAL = 0.2               # s
+const SOL_XLIMS = (20.0, SOL_OFFSHORE + SOL_ONSHORE)   # m
+
+"Runs the solitary-wave case; returns times (s), shoreline elevation (m above the still level), the maximum runup and the model."
+function run_solitary(dx, nz; hydro=true, scheme="upwind1", on_step=nothing)
+    model = solitary_runup_model(dx, nz; dt=SOL_DT_DX * dx, use_hydrostatic=hydro, momentum_advection_scheme=scheme,
+        transport_advection_scheme=scheme)
+    n = round(Int, SOL_T_END / model.config.dt)
+    ts, shore = Float64[], Float64[]
+    for s in 1:n
+        step_forward!(model)
+        i = findlast(>(SOL_SHORE_DEPTH), water_depth(model))
+        push!(ts, s * model.config.dt)
+        push!(shore, wd_water_level(model)[i] - SOL_STILL_LEVEL)
+        on_step === nothing || on_step(model, s * model.config.dt)
+    end
+    return ts, shore, maximum(shore), model
+end
+
+function plot_solitary()
+    println("\n=== Solitary wave runup on a plane beach (Synolakis 1987) ===")
+    R = solitary_runup_law()
+    @printf("runup law: R = %.4f m (H/d = %.3f, cot beta = %.2f)\n", R, SOL_HEIGHT, SOL_COT_BETA)
+    fig_c = plot(xscale=:log10, xlabel="dx (m)", ylabel="maximum runup / law (-)", legend=:bottomleft, size=LINE_SIZE_PX,
+        left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM, ylims=(0.75, 1.05),
+        title=@sprintf("Solitary wave runup, H/d = %.3f, slope 1:%.2f", SOL_HEIGHT, SOL_COT_BETA))
+    hline!(fig_c, [1.0]; color=:black, linestyle=:dash, label="Synolakis (1987)")
+    for (label, nz, hydro, scheme, dxs, color, style) in (("1D upwind1", 1, true, "upwind1", SOL_DX_1D, 1, :solid),
+            ("1D tvd2", 1, true, "tvd2", SOL_DX_1D, 2, :solid),
+            ("2DV hydrostatic, tvd2", SOL_NZ, true, "tvd2", SOL_DX_2DV, 3, :dash),
+            ("2DV non-hydrostatic, tvd2", SOL_NZ, false, "tvd2", SOL_DX_2DV, 4, :dash))
+        ratios = Float64[]
+        for dx in dxs
+            _, _, rmax, _ = run_solitary(dx, nz; hydro=hydro, scheme=scheme)
+            push!(ratios, rmax / R)
+            @printf("%-26s dx = %.4f m | max runup %.4f m = %.3f of the law\n", label, dx, rmax, rmax / R)
+        end
+        plot!(fig_c, collect(dxs), ratios; marker=:circle, color=color, linestyle=style, label=label)
+    end
+    save_figure(fig_c, "solitary_runup_convergence.png")
+
+    # time series, profiles and animation at SOL_DOC_DX: 2DV hydrostatic against non-hydrostatic
+    fig_s = plot(xlabel="t (s)", ylabel="shoreline elevation (m)", legend=:topleft, size=LINE_SIZE_PX, left_margin=FIGURE_MARGIN_MM,
+        bottom_margin=FIGURE_MARGIN_MM, title=@sprintf("Shoreline, dx = %.2f m, %d layers", SOL_DOC_DX, SOL_NZ))
+    hline!(fig_s, [R]; color=:black, linestyle=:dash, label="maximum runup, Synolakis (1987)")
+    profiles = Dict{Tuple{Bool,Float64},Vector{Float64}}()
+    anim = Animation()
+    x = Float64[]
+    bed = Float64[]
+    for (hydro, label) in ((true, "hydrostatic"), (false, "non-hydrostatic"))
+        profile_steps = Dict(round(Int, t / (SOL_DT_DX * SOL_DOC_DX)) => t for t in SOL_PROFILE_TIMES)
+        frame_stride = round(Int, SOL_FRAME_INTERVAL / (SOL_DT_DX * SOL_DOC_DX))
+        function record(m, t)
+            s = round(Int, t / m.config.dt)
+            surface = [h > PLOT_MIN_THICKNESS ? z - SOL_STILL_LEVEL : NaN for (h, z) in zip(water_depth(m), wd_water_level(m))]
+            haskey(profile_steps, s) && (profiles[(hydro, profile_steps[s])] = surface)
+            if !hydro && s % frame_stride == 0
+                frame(anim, plot(section(m, cell_velocity(m); clims=(-0.2, 0.2), color=:balance, colorbar_title="u (m/s)",
+                    xlims=SOL_XLIMS, ylims=(0.0, SOL_GRID_DEPTH), title=@sprintf("Solitary wave runup, non-hydrostatic, t = %.1f s", t));
+                    size=SECTION_SIZE_PX, left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM))
+            end
+        end
+        ts, shore, rmax, m = run_solitary(SOL_DOC_DX, SOL_NZ; hydro=hydro, scheme="tvd2", on_step=record)
+        plot!(fig_s, ts, shore; linewidth=2, label=@sprintf("%s (max %.1f %% of the law)", label, 100rmax / R))
+        x = wd_x_centres(m.config)
+        bed = m.wetdry.bed .- SOL_STILL_LEVEL
+    end
+    save_figure(fig_s, "solitary_shoreline.png")
+    panels = []
+    for t in SOL_PROFILE_TIMES
+        p = plot(x, bed; fillrange=-1.0, color=BED_COLOR, linewidth=0, label="", xlims=SOL_XLIMS, ylims=(-0.05, 0.12),
+            title=@sprintf("t = %.1f s", t), titlefontsize=10, xlabel="x (m)", ylabel="η (m)", legend=t == first(SOL_PROFILE_TIMES) ? :topleft : false)
+        plot!(p, x, profiles[(true, t)]; color=1, linewidth=2, label="hydrostatic")
+        plot!(p, x, profiles[(false, t)]; color=2, linewidth=2, linestyle=:dash, label="non-hydrostatic")
+        push!(panels, p)
+    end
+    save_figure(plot(panels...; layout=(2, 2), size=(1100, 600), left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM),
+        "solitary_profiles.png")
+    save_gif(anim, "solitary_nonhydro.gif")
+end
+
 mkpath(OUTPUT_DIR)
 mkpath(FIGURE_DIR)
 for mode in MODES
@@ -479,5 +627,8 @@ for mode in MODES
     mode == "runup" ? plot_runup() :
     mode == "sloshing" ? plot_sloshing() :
     mode == "mms" ? plot_mms() :
-    mode == "schemes" ? plot_schemes() : error("unknown mode '$(mode)'; use lake, ritter, runup, sloshing, mms or schemes")
+    mode == "schemes" ? plot_schemes() :
+    mode == "dispersion" ? plot_dispersion() :
+    mode == "solitary" ? plot_solitary() :
+    error("unknown mode '$(mode)'; use lake, ritter, runup, sloshing, mms, schemes, dispersion or solitary")
 end

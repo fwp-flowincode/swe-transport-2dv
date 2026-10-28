@@ -517,4 +517,78 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         @test err_fine < NH_DISPERSION_REL_MAX
         @test abs(period_fine - period_exact) < abs(period_fine - period_shallow)
     end
+
+    # Deep water: k H = 3, where the shallow-water period is 42 % too short (measured: 1.9 % error on 40 x 40 cells).
+    NH_DEEP_KH = 3.0              # -
+    NH_DEEP_REL_MAX = 0.03        # -, accepted relative period error
+    @testset "test_validate_wd_nonhydro_standing_wave_deep_water" begin
+        H, g = 1.0, 9.81
+        L = pi * H / NH_DEEP_KH
+        k_wave = pi / L
+        period_exact = 2pi / sqrt(g * k_wave * tanh(k_wave * H))
+        cfg = wd_config(length=L, depth=H, nx=40, nz=40, dt=period_exact / 400, use_hydrostatic=false)
+        model = Model(cfg)
+        initialize_water_level!(model, H .+ NH_WAVE_AMPLITUDE .* cos.(pi .* wd_x_centres(cfg) ./ L); rho=1000.0)
+        t_prev, e_prev, period = 0.0, model.state.eta[1], NaN
+        for n in 1:round(Int, 0.6 * period_exact / cfg.dt)
+            step_forward!(model)
+            e = model.state.eta[1]
+            if e <= 0.0
+                period = 4.0 * (t_prev + e_prev / (e_prev - e) * (n * cfg.dt - t_prev))
+                break
+            end
+            t_prev, e_prev = n * cfg.dt, e
+        end
+        @test abs(period - period_exact) / period_exact < NH_DEEP_REL_MAX
+    end
+
+    # ---- Solitary wave runup on a plane beach (Synolakis 1987) ----------------------------------------------------
+    # Non-breaking solitary wave, H/d = 0.019 on a 1:19.85 beach: maximum runup R/d = 2.831 sqrt(cot beta) (H/d)^(5/4)
+    # (0.0890 m for d = 1 m). Measured (experiments/wetting_drying, mode solitary): 1D 0.888 and 0.938 of the law at
+    # dx = 0.1 and 0.05 m, converging at first order to 1.00 at dx = 0.0125 m; 2DV non-hydrostatic 0.871 at dx = 0.1 m
+    # (dispersion lowers the runup slightly).
+    SOL_DEPTH = 1.0               # m, offshore depth d
+    SOL_COT_BETA = 19.85          # -
+    SOL_HEIGHT = 0.019            # -, H/d
+    SOL_RUNUP_REL_MAX = 0.10      # -, accepted runup error at dx = 0.05 m (1D)
+    SOL_RUNUP_NH_REL_MAX = 0.15   # -, accepted runup error at dx = 0.1 m (2DV non-hydrostatic)
+    SOL_SHORE_DEPTH = 1e-3        # m, depth that marks the numerical shoreline
+    SOL_T_END = 22.0              # s, past the maximum runup (about 18.5 s)
+
+    function solitary_runup(dx, nz; kwargs...)
+        offshore, onshore, still = 60.0, 5.0, 1.0   # m: left wall to still shoreline, dry beach, still level
+        nx = round(Int, (offshore + onshore) / dx)
+        cfg = wd_config(; length=offshore + onshore, depth=1.2, nx=nx, nz=nz, dt=0.1 * dx, kwargs...)
+        x = wd_x_centres(cfg)
+        x_toe = offshore - SOL_DEPTH * SOL_COT_BETA
+        cfg.bed_level = [max(0.0, still - SOL_DEPTH + (xi - x_toe) / SOL_COT_BETA) for xi in x]
+        model = Model(cfg)
+        H = SOL_HEIGHT * SOL_DEPTH
+        gamma = sqrt(3H / (4SOL_DEPTH^3))
+        x1 = x_toe - acosh(sqrt(20.0)) / gamma
+        eta(xx) = H * sech(gamma * (xx - x1))^2
+        initialize_water_level!(model, [still + eta(xi) for xi in x]; rho=1000.0)
+        c = sqrt(cfg.g * (SOL_DEPTH + H))
+        for f in 2:nx, k in 1:nz
+            model.state.u[k, f] = c * eta((f - 1) * model.dx) / (SOL_DEPTH + eta((f - 1) * model.dx))
+        end
+        runup = -Inf
+        for _ in 1:round(Int, SOL_T_END / cfg.dt)
+            step_forward!(model)
+            i = findlast(>(SOL_SHORE_DEPTH), water_depth(model))
+            runup = max(runup, cfg.depth + model.state.eta[i] - still)
+        end
+        @test all(isfinite, model.state.u)
+        return runup
+    end
+
+    @testset "test_validate_wd_solitary_wave_runup" begin
+        law = 2.831 * sqrt(SOL_COT_BETA) * SOL_HEIGHT^(5 / 4) * SOL_DEPTH
+        err_coarse = abs(solitary_runup(0.1, 1) - law) / law
+        err_fine = abs(solitary_runup(0.05, 1) - law) / law
+        @test err_fine <= SOL_RUNUP_REL_MAX
+        @test err_fine < err_coarse
+        err_nh = abs(solitary_runup(0.1, 12; use_hydrostatic=false, momentum_advection_scheme="tvd2", transport_advection_scheme="tvd2") - law) / law
+        @test err_nh <= SOL_RUNUP_NH_REL_MAX
+    end
 end

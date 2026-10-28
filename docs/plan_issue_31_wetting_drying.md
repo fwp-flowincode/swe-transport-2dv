@@ -163,10 +163,21 @@ part of this issue (step 2). Documentation: section 18 of `docs/TESTS_TECHNICAL_
   front, convergence and layer velocities for both schemes, Carrier-Greenspan shoreline error, sloshing density).
 - **Documentation:** section 18 and the test entries in `docs/TESTS_TECHNICAL_DOCUMENTATION.md`, moved from `test/`.
 
+- **Non-hydrostatic experiments:** dispersion of standing waves (phase speed within 1.9 % of omega^2 = g k tanh(kH) up
+  to kH = 3) and solitary wave runup on a 1:19.85 beach against Synolakis (1987) (runup 0.80 ... 1.00 of the law for
+  dx = 0.2 ... 0.0125 m, first order; non-hydrostatic 1.5-2 % lower than hydrostatic on the same grid); tests added.
+- **Order at the front** (review question): first order with both schemes. The depth has a kink at the front, the flow
+  reverses at maximum runup and rundown (the limiter clips), and the one bed level per column moves the shoreline cell by
+  cell (staircase error of order dx tan(beta), dominant in the runup cases). Recommended next step instead of front
+  limiters: sub-grid bathymetry (sloping bed within a column, Casulli 2009), see section 8.
+
 8 Out of scope (proposed for later)
 -----------------------------------
 
-- Second-order momentum advection at the wet/dry front itself (tvd2 falls back to first order next to dry faces).
+- Sub-grid bathymetry (a sloping bed within each column; V_i(eta) piecewise quadratic, convex, so the Newton solve and
+  the positivity proof carry over): continuous shoreline motion instead of the cell-by-cell staircase, the main error of
+  the runup cases. Second-order reconstruction at the front itself is limited by the kink of the depth and the flow
+  reversals and is not proposed.
 - A non-hydrostatic surface condition at the free surface itself instead of q = 0 in the surface cell (first order in
   the surface-cell thickness).
 - Bed friction (Manning / log law) on the lowest wet layer, needed for laboratory runup cases.
