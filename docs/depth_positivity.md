@@ -56,12 +56,12 @@ is therefore the complete statement.
 The momentum predictor gives $\hat u_{k,f}$ on the wet face layers (and the boundary velocities). In every wet face layer
 the new velocity is
 
-$$u^{n+1}_{k,f} = \hat u_{k,f} - g\,\Delta t\,\frac{\eta_{i+1} - \eta_i}{\Delta x}, \qquad f = i+1/2 \text{ (interior)},$$
+$$u_{k,f}^{n+1} = \hat u_{k,f} - g\thinspace\Delta t\thinspace\frac{\eta_{i+1} - \eta_i}{\Delta x}, \qquad f = i+1/2 \text{ (interior)},$$
 
-so the column transport is $Q_f = \sum_k h_{k,f}u^{n+1}_{k,f} = \hat U_f - g\,\Delta t\,H_f(\eta_{i+1}-\eta_i)/\Delta x$ with
+so the column transport is $Q_f = \sum_k h_{k,f}u_{k,f}^{n+1} = \hat U_f - g\thinspace\Delta t\thinspace H_f(\eta_{i+1}-\eta_i)/\Delta x$ with
 $\hat U_f = \sum_k h_{k,f}\hat u_{k,f}$ (boundary faces: prescribed, no gradient term). The continuity of column $i$,
 
-$$V_i(\eta^{n+1}_i) = V_i(\eta^n_i) - \frac{\Delta t}{\Delta x}\bigl(Q_{i+1/2} - Q_{i-1/2}\bigr),$$
+$$V_i(\eta_i^{n+1}) = V_i(\eta^n_i) - \frac{\Delta t}{\Delta x}\bigl(Q_{i+1/2} - Q_{i-1/2}\bigr),$$
 
 is the system
 
@@ -69,7 +69,7 @@ $$F(\eta) := V(\eta) + T\eta - b = 0,\qquad
 (T\eta)_i = a_{i+1/2}(\eta_i - \eta_{i+1}) + a_{i-1/2}(\eta_i - \eta_{i-1}),\qquad
 b_i = V_i(\eta^n_i) - \frac{\Delta t}{\Delta x}\bigl(\hat U_{i+1/2} - \hat U_{i-1/2}\bigr),$$
 
-with $a_f = g\,\Delta t^2 H_f/\Delta x^2 \ge 0$ ($a = 0$ at closed faces and at the domain boundary faces). Casulli (2009)
+with $a_f = g\thinspace\Delta t^2 H_f/\Delta x^2 \ge 0$ ($a = 0$ at closed faces and at the domain boundary faces). Casulli (2009)
 introduced this volume formulation for sub-grid bathymetry; here each column has one bed level, so $V_i$ has a single kink.
 
 Properties used below:
@@ -87,17 +87,20 @@ Properties used below:
 3 Positivity and conservation
 -----------------------------
 
-**Theorem 1.** Let $\eta^*$ solve $F(\eta^*) = 0$ and let $u^{n+1}$ be the velocities of section 2 with $\eta = \eta^*$. Then
+**Theorem 1.** Let $\eta^{\ast}$ solve $F(\eta^{\ast}) = 0$ and let $u^{n+1}$ be the velocities of section 2 with $\eta = \eta^{\ast}$. Then
 the new depth from the flux divergence,
 
-$$V^{n+1}_i := V_i(\eta^n_i) - \frac{\Delta t}{\Delta x}\sum_k\bigl(h_{k,i+1/2}u^{n+1}_{k,i+1/2} - h_{k,i-1/2}u^{n+1}_{k,i-1/2}\bigr),$$
+$$V_i^{n+1} := V_i(\eta^n_i) - \frac{\Delta t}{\Delta x}\sum_k\bigl(h_{k,i+1/2}u_{k,i+1/2}^{n+1} - h_{k,i-1/2}u_{k,i-1/2}^{n+1}\bigr),$$
 
-equals $V_i(\eta^*_i) \ge 0$ for every column, for every $\Delta t > 0$; and $\sum_i V^{n+1}_i\Delta x$ changes only by the
+equals $V_i(\eta_i^{\ast}) \ge 0$ for every column, for every $\Delta t > 0$; and $\sum_i V_i^{n+1}\Delta x$ changes only by the
 boundary fluxes.
 
-*Proof.* By section 2, $\frac{\Delta t}{\Delta x}(Q_{i+1/2} - Q_{i-1/2}) = \frac{\Delta t}{\Delta x}(\hat U_{i+1/2} - \hat U_{i-1/2}) + (T\eta^*)_i$,
-since $-\frac{g\Delta t^2}{\Delta x^2}\bigl[H_{i+1/2}(\eta^*_{i+1}-\eta^*_i) - H_{i-1/2}(\eta^*_i-\eta^*_{i-1})\bigr] = (T\eta^*)_i$. Hence
-$V^{n+1}_i = b_i - (T\eta^*)_i = V_i(\eta^*_i) \ge 0$, by $F(\eta^*) = 0$ and the definition of $V_i$. Summing the flux form over
+*Proof.* By section 2 and the definition of $T$,
+
+$$\frac{\Delta t}{\Delta x}\bigl(Q_{i+1/2} - Q_{i-1/2}\bigr) = \frac{\Delta t}{\Delta x}\bigl(\hat U_{i+1/2} - \hat U_{i-1/2}\bigr) - \frac{g\Delta t^2}{\Delta x^2}\bigl[H_{i+1/2}(\eta_{i+1}^{\ast}-\eta_i^{\ast}) - H_{i-1/2}(\eta_i^{\ast}-\eta_{i-1}^{\ast})\bigr] = \frac{\Delta t}{\Delta x}\bigl(\hat U_{i+1/2} - \hat U_{i-1/2}\bigr) + (T\eta^{\ast})_i.$$
+
+Hence
+$V_i^{n+1} = b_i - (T\eta^{\ast})_i = V_i(\eta_i^{\ast}) \ge 0$, by $F(\eta^{\ast}) = 0$ and the definition of $V_i$. Summing the flux form over
 $i$ telescopes to the boundary fluxes. $\blacksquare$
 
 The positivity is a property of the solution of the system; no time-step condition enters. What remains is that the
@@ -134,11 +137,11 @@ $\eta^{m+1} \le \eta^m$ for $m \ge 1$, and the iteration reaches $F(\eta^m) = 0$
 $$V(\eta^m) \ge V(\eta^{m-1}) + P(\eta^{m-1})(\eta^m - \eta^{m-1}) = b - T\eta^m,$$
 i.e. $F(\eta^m) \ge 0$.
 
-(c) *Non-singularity for $m \ge 1$.* Suppose $P(\eta^m) + T$ were singular. By (M) there is a component $C$ with $p_i(\eta^m) = 0$
+(c) *Non-singularity* for $m \ge 1$. Suppose $P(\eta^m) + T$ were singular. By (M) there is a component $C$ with $p_i(\eta^m) = 0$
 for all $i \in C$ (all columns of $C$ dry in the iterate). Then $V_i(\eta^m) = 0$ on $C$ and, summing $F$ over $C$ with (T),
 $\sum_{i\in C}F_i(\eta^m) = -\sum_{i\in C} b_i$. By (b) the left side is $\ge 0$, so $\sum_C b_i \le 0$. For a component with an open
 face this contradicts (C). A single column without open faces has $T_{ii} = 0$, $b_i = V_i(\eta^n_i)$ and
-$F_i(\eta^0) = 0$; its Newton row reads $p_i\,\delta_i = -F_i$ with $p_i(\eta^0) = 1$, so $\delta_i = 0$, its level never changes
+$F_i(\eta^0) = 0$; its Newton row reads $p_i\thinspace\delta_i = -F_i$ with $p_i(\eta^0) = 1$, so $\delta_i = 0$, its level never changes
 and $p_i = 1$ throughout. Hence every matrix is non-singular and, by (M), $(P(\eta^m)+T)^{-1} \ge 0$.
 
 (d) *Monotonicity.* For $m \ge 1$: $(P(\eta^m)+T)(\eta^{m+1}-\eta^m) = -F(\eta^m) \le 0$, and the inverse is non-negative, so
@@ -152,9 +155,9 @@ equality, and the Newton equation of step $m-1$ gives $F(\eta^m) = 0$. Therefore
 $n_x + 1$ steps. In particular a solution exists. $\blacksquare$
 
 *Remarks.*
-- The volumes $V_i(\eta^*)$ are unique: if $\eta^*, \tilde\eta$ both solve the system,
-  $0 = (V(\eta^*) - V(\tilde\eta))^\top(\eta^*-\tilde\eta) + (\eta^*-\tilde\eta)^\top T(\eta^*-\tilde\eta)$, both terms are
-  $\ge 0$ (monotone $V$, semidefinite $T$), so $V(\eta^*) = V(\tilde\eta)$ wherever the columns are wet. The level of a column
+- The volumes $V_i(\eta^{\ast})$ are unique: if $\eta^{\ast}, \tilde\eta$ both solve the system,
+  $0 = (V(\eta^{\ast}) - V(\tilde\eta))^\top(\eta^{\ast}-\tilde\eta) + (\eta^{\ast}-\tilde\eta)^\top T(\eta^{\ast}-\tilde\eta)$, both terms are
+  $\ge 0$ (monotone $V$, semidefinite $T$), so $V(\eta^{\ast}) = V(\tilde\eta)$ wherever the columns are wet. The level of a column
   that ends dry is not unique (any level at or below its bed); it only enters the velocities at faces whose fluxes it
   balances, and the stored level is reset to the bed (section 5).
 - A lake at rest gives $F(\eta^n) = 0$ exactly (zero predictor transport, equal levels across every open face), so the
@@ -165,26 +168,26 @@ $n_x + 1$ steps. In particular a solution exists. $\blacksquare$
 5 Floating-point arithmetic and the run-time check
 --------------------------------------------------
 
-The iteration stops when $|F_i| \le$ `WD_NEWTON_RTOL` $\cdot\, s_i$ for all $i$ ($s_i$ = sum of the magnitudes in $F_i$,
+The iteration stops when $|F_i| \le$ `WD_NEWTON_RTOL` $\cdot\thinspace s_i$ for all $i$ ($s_i$ = sum of the magnitudes in $F_i$,
 `WD_NEWTON_RTOL` $= 10^{-13}$; by (e) the exact solution is reached in finitely many steps, so the final residual is
 round-off). The new level is then computed from the flux divergence (`_wd_update_level_from_fluxes!`), which conserves
 the volume to round-off. By Theorem 1 the computed depth is
 
-$$\widehat V^{n+1}_i = V_i(\eta^m_i) - F_i(\eta^m) + \text{(rounding)}, \qquad
-|\text{rounding}| \le \gamma_{2n_z+8}\,S_i,$$
+$$\widehat V_i^{n+1} = V_i(\eta^m_i) - F_i(\eta^m) + \text{(rounding)}, \qquad
+|\text{rounding}| \le \gamma_{2n_z+8}\thinspace S_i,$$
 
 with $\gamma_k = k\varepsilon/(1-k\varepsilon)$ (Higham 2002, Lemma 3.1 and Sec. 4.2: a sum of $2n_z$ discharges and a few further
-roundings) and $S_i = H + |\eta^n_i| + |\eta^{n+1}_i| + |z_{b,i}| + O_i$, where $O_i$ is the outflow volume of the step. Hence
+roundings) and $S_i = H + |\eta^n_i| + |\eta_i^{n+1}| + |z_{b,i}| + O_i$, where $O_i$ is the outflow volume of the step. Hence
 
-$$\widehat V^{n+1}_i \ \ge\ -\bigl(|F_i| + \gamma_{2n_z+8}\,S_i\bigr).$$
+$$\widehat V_i^{n+1} \ \ge\ -\bigl(|F_i| + \gamma_{2n_z+8}\thinspace S_i\bigr).$$
 
 The code (`_wd_depth_roundoff`) uses this bound with the safety factor `WD_POSITIVITY_ROUNDOFF_FACTOR = 2` on the
 rounding term:
 
-- $-(|F_i| + 2\gamma S_i) \le \widehat V^{n+1}_i < 0$: round-off; the column is stored as exactly dry and the volume added is
+- $-(|F_i| + 2\gamma S_i) \le \widehat V_i^{n+1} < 0$: round-off; the column is stored as exactly dry and the volume added is
   accumulated in `model.wetdry.clamped_volume` (m²; zero in all validation cases, $\le 3\cdot10^{-16}$ m² in the
   large-time-step tests);
-- $\widehat V^{n+1}_i < -(|F_i| + 2\gamma S_i)$: the solve did not satisfy its equations; the run stops with a `DomainError`.
+- $\widehat V_i^{n+1} < -(|F_i| + 2\gamma S_i)$: the solve did not satisfy its equations; the run stops with a `DomainError`.
 
 **Exactly dry levels.** A dry column stores the smallest float $\eta$ with $\mathrm{fl}(H + \eta) \ge z_b$ (`_wd_dry_eta`);
 $\eta = z_b - H$ alone can round to one ulp below the bed. IEEE subtraction gives $\mathrm{fl}(a - b) \ge 0 \iff a \ge b$, so
