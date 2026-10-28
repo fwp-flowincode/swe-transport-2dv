@@ -266,6 +266,21 @@ function _wd_open_layer_at_or_below(wd::WetDryState, k::Int, f::Int)
     return 0
 end
 
+# Column totals (m) of the advective weights at face f: Hbar_f (cell thicknesses averaged to the face) and Htilde_L,
+# Htilde_R (face thicknesses averaged to cells L and R); see `_wd_advection_tendency`.
+# PERF: independent of the layer, so the predictor computes them once per face (O(nx nz) instead of O(nx nz^2)).
+function _wd_advection_depth_totals(wd::WetDryState, f::Int)
+    Hbar = 0.0
+    HtL = 0.0
+    HtR = 0.0
+    @inbounds for kk in axes(wd.h, 1)
+        Hbar += 0.5 * (wd.h[kk, f - 1] + wd.h[kk, f])
+        HtL += 0.5 * (wd.hf[kk, f - 1] + wd.hf[kk, f])
+        HtR += 0.5 * (wd.hf[kk, f] + wd.hf[kk, f + 1])
+    end
+    return Hbar, HtL, HtR
+end
+
 # Advection tendency du/dt of face f, layer k: upwind, momentum conservative in the form of Stelling & Duinmeijer (2003,
 # Sec. 3; equation numbers not checked), horizontally with the cell discharges and vertically with the interface fluxes
 # W of time n:
@@ -295,19 +310,7 @@ end
 # the tendency next to a closed face).
 # WHY the cap: with C = dt * (sum of the inflow coefficients), the tendency is scaled by 1/C where C > 1; for upwind1 this
 # keeps the update a convex combination of the neighbours (thin layers stay stable).
-# Depth-integrated cell and face thicknesses used by every layer of the advection tendency at face f.
-function _wd_advection_depth_totals(wd::WetDryState, f::Int)
-    Hbar = 0.0
-    HtL = 0.0
-    HtR = 0.0
-    @inbounds for kk in axes(wd.h, 1)
-        Hbar += 0.5 * (wd.h[kk, f - 1] + wd.h[kk, f])
-        HtL += 0.5 * (wd.hf[kk, f - 1] + wd.hf[kk, f])
-        HtR += 0.5 * (wd.hf[kk, f] + wd.hf[kk, f + 1])
-    end
-    return Hbar, HtL, HtR
-end
-
+# `depth_totals` = (Hbar_f, Htilde_L, Htilde_R) of face f from `_wd_advection_depth_totals`.
 function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, second::Bool, depth_totals)
     u = model.state.u
     W = model.state.w

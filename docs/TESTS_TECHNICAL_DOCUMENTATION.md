@@ -1717,6 +1717,18 @@ Exactness, conservation and positivity tests run for the four variants hydrostat
   observed order of at least 0.8 per grid halving and stays within twice the 1D `upwind1` error (observed: 2DV 1.2e-2 ...
   1.3e-3, 1D 7.8e-3 ... 9.7e-4 for $\Delta x=1\ldots0.125$ m).
 - `test_verify_wd_negative_depth_is_rejected`: a level written below the bed stops the step with a `DomainError`.
+- `test_verify_wd_cut_cell_output_masking`: the plot masking blanks the cells above the water level and dry columns (cut
+  cells, fractional bed), and keeps the wet cells.
+- `test_verify_wd_boundary_profiles_and_wet_flux`: a constant inflow profile replaces an earlier time-dependent
+  callback; the `boundary_flux` diagnostic uses the wet face discharge ($-0.5$ m²/s for 1 m/s over 0.5 m of water in a
+  2 m grid); callback and right-profile lengths other than nz raise an `ArgumentError`.
+- `test_verify_wd_float32_dry_columns`: with `T=Float32` the dry levels are representable (depth $\ge0$ after
+  initialisation and five steps); the Newton and round-off tolerances use the precision of the state type.
+- `test_verify_wd_pressure_components_include_nonhydrostatic_correction`: in the non-hydrostatic mode `state.p` is the
+  cut-cell hydrostatic pressure plus the solved non-hydrostatic pressure, and `pressure_buoyancy_components` returns
+  these two components.
+- `test_verify_wd_nz1_pressure_diagnostics_output`: `run!` with one layer writes the pressure/buoyancy diagnostics (no
+  interior interface).
 - `test_verify_ritter_reference_solution`: the Ritter solution conserves the released volume (quadrature, $10^{-5}$), is
   $h_0$ behind the rarefaction and 0 ahead of the front, $h=4h_0/9$ and $u=2c_0/3$ at the dam.
 - `test_verify_carrier_greenspan_reference_solution`: the hodograph solution satisfies the nonlinear shallow-water
