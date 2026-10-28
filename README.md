@@ -35,7 +35,9 @@ Model
   - wind stress and wind-induced mixing;
   - Rayleigh damping and a Froude limiter for numerical stabilisation;
   - vegetation: canopy patches and individual stems, rigid or flexible (quasi-static elastica);
-  - a uniform body force (`body_force_x`, channel slope) and an absorbing sponge layer (`sponge_length`, `sponge_rate`).
+  - a uniform body force (`body_force_x`, channel slope) and an absorbing sponge layer (`sponge_length`, `sponge_rate`);
+  - wetting and drying (`wetting_drying=true`, hydrostatic): cells cut by the bed and the free surface, dry columns, any
+    bed level and a single layer (1D) allowed; see `docs/plan_issue_31_wetting_drying.md`.
 - Diagnostics: water volume, constituent mass, boundary fluxes, CFL numbers, reduced gravity and
   internal wave speed. Plots and animations are written to `output_barotropic/`.
 
@@ -157,8 +159,8 @@ volume change enters the top-layer budgets and the free surface is a material bo
 a moving surface that otherwise acts as a spurious density source in the top row. The non-hydrostatic mode keeps the legacy fixed
 (dz) grid for this bookkeeping; see the section below for what does and does not move there.
 
-The surface must stay inside the top layer (`top_layer_min_fraction`; the run stops with a clear error otherwise — there is no
-layer removal or wetting/drying). Set `ModelConfig(variable_top_layer=false)` explicitly for hydrostatic cases with a large
+The surface must stay inside the top layer (`top_layer_min_fraction`; the run stops with a clear error otherwise — this treatment
+has no layer removal; `wetting_drying=true` lets the surface cross layers and columns fall dry). Set `ModelConfig(variable_top_layer=false)` explicitly for hydrostatic cases with a large
 surface excursion relative to dz, such as the surface dam break or a large-amplitude forced wave; the affected experiment/
 validation scripts already do this (see the `variable_top_layer=false` comments there). Force it on for a specific case with
 `variable_top_layer=true` (rejected for `use_hydrostatic=false`). Details, the full per-step formulation and limitations: section

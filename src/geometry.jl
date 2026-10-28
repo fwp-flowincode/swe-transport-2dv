@@ -42,8 +42,9 @@ end
 Masks of a staircase bed. `bed_level` (m, length nx, or `nothing` for the flat bed) must be a whole number of cells
 `dz` (m) high and leave at least BED_MIN_WET_CELLS wet cells in every column (the bed stays below the top layer, so the
 variable top layer is unaffected; dry columns are not supported). `periodic_x=true` is not supported with a bed.
+`min_wet_cells` lowers that minimum (the wetting-drying mode builds flat masks with 1, so that nz = 1 is allowed).
 """
-function BedGeometry(bed_level::Union{Nothing,AbstractVector{<:Real}}, nz::Int, nx::Int, dz::Real; periodic_x::Bool=false)
+function BedGeometry(bed_level::Union{Nothing,AbstractVector{<:Real}}, nz::Int, nx::Int, dz::Real; periodic_x::Bool=false, min_wet_cells::Int=BED_MIN_WET_CELLS)
     has_bed = bed_level !== nothing
     levels = has_bed ? Float64.(collect(bed_level)) : zeros(Float64, nx)
     if has_bed
@@ -62,8 +63,8 @@ function BedGeometry(bed_level::Union{Nothing,AbstractVector{<:Real}}, nz::Int, 
         if levels[i] < 0.0 || abs(cells - nb) > BED_LEVEL_ALIGNMENT_TOL
             throw(ArgumentError(@sprintf("bed_level[%d] = %.6g m must be >= 0 and a whole number of cells (dz = %.6g m)", i, levels[i], dz)))
         end
-        if nz - nb < BED_MIN_WET_CELLS
-            throw(ArgumentError(@sprintf("bed_level[%d] = %.6g m leaves fewer than %d wet cells (depth = %d cells)", i, levels[i], BED_MIN_WET_CELLS, nz)))
+        if nz - nb < min_wet_cells
+            throw(ArgumentError(@sprintf("bed_level[%d] = %.6g m leaves fewer than %d wet cells (depth = %d cells)", i, levels[i], min_wet_cells, nz)))
         end
         k_bed[i] = nb + 1
     end

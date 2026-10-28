@@ -18,6 +18,8 @@ include("visualization.jl")
 include("turbulence.jl")
 include("model.jl")
 include("vegetation.jl")
+include("wetting_drying.jl")
+include("reference_solutions.jl")
 
 export State
 export copy_state, from_shape
@@ -39,9 +41,12 @@ export KEpsilonState, k_epsilon_step!, turbulent_viscosity_u!, implicit_vertical
 export KE_C_MU_VALUE, KE_C1_VALUE, KE_C2_VALUE
 export update_stem_posture!, vegetation_drag_rate, stem_tip_deflection, stem_deflected_height, VEGETATION_EXPLICIT_DRAG_LIMIT
 export attach_vegetation!, clear_vegetation!, vegetation_source!, copy_vegetation, vegetation_path, set_x_inflow_outflow!, clear_x_inflow_outflow!
+export WetDryState, layer_thicknesses!, water_depth, initialize_water_level!
+export ritter_dam_break, CarrierGreenspanWave, carrier_greenspan_time_scale, carrier_greenspan_rest_time
+export carrier_greenspan_shoreline, carrier_greenspan_solution
 export initialize_lock_exchange!, initialize_rayleigh_taylor!
 export initialize_rising_plume!, initialize_sinking_plume!, initialize_jet_impulse!
 export initialize_internal_seiche!, initialize_surface_dam_break!, initialize_kelvin_helmholtz!
 export output_case_tag, copy_config, compute_diagnostics, pressure_buoyancy_components, step_forward!, run!, refresh_density_metadata!
 
-end
+end
