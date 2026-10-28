@@ -2,7 +2,7 @@ Wetting and drying
 ==================
 
 Issue #31: flows in which the water leaves cells, columns fall dry and dry beaches flood. The model option
-`ModelConfig(wetting_drying=true)` uses a hydrostatic time step on z-level cells cut by the bed and by the free surface
+`ModelConfig(wetting_drying=true)` uses a time step on z-level cells cut by the bed and by the free surface
 (`src/wetting_drying.jl`). The bed may take any level, columns may be dry, and `nz = 1` gives the 1D (depth-averaged)
 model on the same code path. Method, decisions and status: [docs/plan_issue_31_wetting_drying.md](../../docs/plan_issue_31_wetting_drying.md).
 
@@ -31,12 +31,14 @@ Method in brief
 - Layer k of a column holds h_k = max(0, min(z_{k+1}, zeta) - max(z_k, z_b)); the top layer is open above.
 - Faces take the bed of the higher neighbour and the upwind water level (Stelling & Duinmeijer 2003); a face with less
   than `dry_depth_threshold` (1e-6 m) of water is closed.
-- Semi-implicit free surface (Casulli & Cheng 1992) solved for the increment of eta, so that a lake at rest gives an
-  exactly zero right-hand side.
-- Momentum-conservative first-order upwind advection (Stelling & Duinmeijer 2003), capped so that thin layers at the front
-  stay stable.
-- A positivity limiter scales the outflow of a column that would otherwise run dry below zero; eta follows from the flux
-  divergence, so the water volume is conserved to round-off.
+- Semi-implicit free surface (Casulli & Cheng 1992) in the volume formulation of Casulli (2009): the column volume
+  max(0, H + eta - z_b) is the unknown of a mildly nonlinear system, solved by Newton's method (Brugnano & Casulli 2008).
+  Every depth stays >= 0 for any time step, without correcting the solution afterwards (proof:
+  [docs/depth_positivity.md](../../docs/depth_positivity.md)); a lake at rest has a zero residual and does not change.
+  In these cases the solve takes one Newton iteration per step (no column is drained within a step).
+- Momentum-conservative upwind advection (Stelling & Duinmeijer 2003), first order (`upwind1`) or with limited MUSCL
+  values (`tvd2`), capped so that thin layers at the front stay stable.
+- eta follows from the flux divergence, so the water volume is conserved to round-off.
 - The constituent (density) is transported with the same fluxes and cell volumes, conservatively, without the global
   mass correction of the other modes.
 
@@ -112,8 +114,9 @@ initial bounds, in 1D and 2DV.
 Limitations (current step)
 --------------------------
 
-- Hydrostatic only; first-order momentum advection and density transport. Non-hydrostatic wetting and drying and the
-  `tvd2` schemes are the next step of issue #31.
+- The figures show the hydrostatic mode with `upwind1`. The non-hydrostatic mode (`use_hydrostatic=false`) and the
+  `tvd2` schemes are supported and tested (`test/test_wetting_drying.jl`; results in the plan, section 6); their
+  experiments are still to be added here.
 - Not supported together with wetting and drying: periodic x, vegetation, k-epsilon, bed roughness, wind stress.
 
 References

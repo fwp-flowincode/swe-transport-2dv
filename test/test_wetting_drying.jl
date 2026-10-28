@@ -13,6 +13,16 @@ function wd_config(; kwargs...)
     return ModelConfig(; merge(defaults, kwargs)...)
 end
 
+# Pressure modes and advection schemes of the wet/dry step; the exactness and conservation tests run for all of them.
+const WD_VARIANTS = (
+    (tag="hydro_upwind1", use_hydrostatic=true, momentum_advection_scheme="upwind1", transport_advection_scheme="upwind1"),
+    (tag="hydro_tvd2", use_hydrostatic=true, momentum_advection_scheme="tvd2", transport_advection_scheme="tvd2"),
+    (tag="nonhydro_upwind1", use_hydrostatic=false, momentum_advection_scheme="upwind1", transport_advection_scheme="upwind1"),
+    (tag="nonhydro_tvd2", use_hydrostatic=false, momentum_advection_scheme="tvd2", transport_advection_scheme="tvd2"),
+)
+wd_variant_kwargs(v) = (use_hydrostatic=v.use_hydrostatic, momentum_advection_scheme=v.momentum_advection_scheme,
+    transport_advection_scheme=v.transport_advection_scheme)
+
 # Cell-centre coordinates (m) of a configuration.
 wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
 
@@ -50,13 +60,13 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
     end
 
     @testset "test_verify_wd_configuration_checks" begin
-        @test_throws ArgumentError Model(wd_config(nx=20, nz=4, use_hydrostatic=false))
-        @test_throws ArgumentError Model(wd_config(nx=20, nz=4, momentum_advection_scheme="tvd2"))
+        @test_throws ArgumentError Model(wd_config(nx=20, nz=4, momentum_advection_scheme="weno5"))
         @test_throws ArgumentError Model(wd_config(nx=20, nz=4, periodic_x=true, pressure_solver_method="sparse"))
         @test_throws ArgumentError Model(wd_config(nx=20, nz=4, bed_level=fill(-0.1, 20)))
-        # a single layer (1D) and a bed that is not a whole number of cells are accepted
+        # a single layer (1D), a bed that is not a whole number of cells, the non-hydrostatic mode and tvd2 are accepted
         model = Model(wd_config(nx=20, nz=1, depth=2.0, bed_level=collect(range(0.0, 2.5, length=20))))
         @test model isa Model
+        @test Model(wd_config(nx=20, nz=4; wd_variant_kwargs(WD_VARIANTS[end])...)) isa Model
     end
 
     # Bed for the lake at rest (m above the grid bottom): a beach rising above the still water level on the right, an
@@ -70,11 +80,11 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         return @. 0.037 + beach + island + bump
     end
 
-    @testset "test_verify_wd_lake_at_rest_$(label)" for (label, nz, stratified) in
-            (("1d", 1, false), ("2dv", 10, false), ("2dv_stratified", 10, true))
+    @testset "test_verify_wd_lake_at_rest_$(label)_$(v.tag)" for (label, nz, stratified) in
+            (("1d", 1, false), ("2dv", 10, false), ("2dv_stratified", 10, true)), v in WD_VARIANTS
         NSTEPS = 500                 # -
         STILL_LEVEL_FRACTION = 0.8   # -, still water level / grid depth
-        cfg = wd_config(length=50.0, depth=2.0, nx=200, nz=nz, dt=0.05)
+        cfg = wd_config(length=50.0, depth=2.0, nx=200, nz=nz, dt=0.05; wd_variant_kwargs(v)...)
         cfg.bed_level = lake_bed(cfg)
         model = Model(cfg)
         level = STILL_LEVEL_FRACTION * cfg.depth
@@ -100,8 +110,8 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
     end
 
     # Closed basin with beaches on both sides; a tilted surface sloshes, floods the right beach and drains again.
-    function sloshing_model(nz)
-        cfg = wd_config(length=40.0, depth=1.5, nx=160, nz=nz, dt=0.02)
+    function sloshing_model(nz, v)
+        cfg = wd_config(length=40.0, depth=1.5, nx=160, nz=nz, dt=0.02; wd_variant_kwargs(v)...)
         x = wd_x_centres(cfg)
         cfg.bed_level = @. 0.013 + 1.6 * ((x - 0.5 * cfg.length) / (0.5 * cfg.length))^2
         model = Model(cfg)
@@ -113,9 +123,10 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         return model
     end
 
-    @testset "test_verify_wd_volume_and_constituent_conservation_$(label)" for (label, nz) in (("1d", 1), ("2dv", 10))
+    @testset "test_verify_wd_volume_and_constituent_conservation_$(label)_$(v.tag)" for (label, nz) in (("1d", 1), ("2dv", 10)),
+            v in WD_VARIANTS
         NSTEPS = 1000   # -, 20 s, more than half a sloshing period
-        model = sloshing_model(nz)
+        model = sloshing_model(nz, v)
         diag0 = compute_diagnostics(model)
         rho_lo, rho_hi = extrema(model.state.rho)
         wet0 = water_depth(model) .> WET_DEPTH
@@ -138,14 +149,17 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         @test all(isfinite, model.state.u)
     end
 
-    # Depth positivity (docs/depth_positivity.md): the limited continuity step keeps every depth >= 0 for any time step.
-    # Dam break onto a dry bed and the sloshing basin with time steps far beyond the advective CFL limit, where the
-    # limiter must act; the depth never becomes negative and volume and mass stay conserved.
-    @testset "test_verify_wd_depth_positivity_large_time_step_$(label)" for (label, nz) in (("1d", 1), ("2dv", 10))
-        CFL_TARGET = 3.0          # -, advective Courant number 2 c0 dt / dx of the dam break (positivity is unconditional)
+    # Depth positivity (docs/depth_positivity.md): the free-surface solve with the non-negative volume function V(eta)
+    # (Casulli 2009) keeps every depth >= 0 for any time step. Dam break onto a dry bed and beach with a time step far
+    # beyond the advective CFL limit, where the linear semi-implicit solve would drain columns below their bed: the
+    # Newton iteration of the nonlinear solve is needed (more than one iteration), the depth never becomes negative and
+    # volume and mass stay conserved.
+    @testset "test_verify_wd_depth_positivity_large_time_step_$(label)_$(v.tag)" for (label, nz) in (("1d", 1), ("2dv", 10)),
+            v in WD_VARIANTS
+        CFL_TARGET = 6.0          # -, advective Courant number 2 c0 dt / dx; from about 6 on, columns fall dry within the solve in 1D and 2DV
         NSTEPS = 200              # -
         CLAMP_REL_MAX = 1e-14     # -, volume added by setting round-off negative depths to zero, relative to the total
-        cfg = wd_config(length=40.0, depth=1.2, nx=80, nz=nz)
+        cfg = wd_config(length=40.0, depth=1.2, nx=80, nz=nz; wd_variant_kwargs(v)...)
         dx = cfg.length / cfg.nx
         cfg.dt = CFL_TARGET * dx / (2 * sqrt(cfg.g * 1.0))
         x = wd_x_centres(cfg)
@@ -156,14 +170,12 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         initialize_water_level!(model, [xi < 10.0 ? 1.0 : 0.0 for xi in x]; rho=rho)
         diag0 = compute_diagnostics(model)
         min_depth = Inf
-        theta_min = 1.0
         for _ in 1:NSTEPS
             step_forward!(model)
             min_depth = min(min_depth, minimum(cfg.depth .+ model.state.eta .- model.wetdry.bed))
-            theta_min = min(theta_min, minimum(model.wetdry.theta))
         end
         diag = compute_diagnostics(model)
-        @test theta_min < 1.0        # the limiter did act
+        @test model.wetdry.newton_iterations_max > 1   # columns fell dry within the solve
         @test min_depth >= 0.0
         @test model.wetdry.clamped_volume <= CLAMP_REL_MAX * diag0["water_volume"]
         @test abs(diag["water_volume"] - diag0["water_volume"]) <= TOL_VOLUME_REL * diag0["water_volume"]
@@ -240,9 +252,27 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
     RITTER_CONVERGENCE_RATIO = 0.8   # -, the L1 error must drop at least by this factor when dx is halved
     RITTER_2DV_VS_1D_MAX = 0.01      # -, relative L1 difference between the 2DV and the 1D depth
 
-    function run_ritter(nx, nz)
+    RITTER_LAYER_DEPTH_MIN = 1e-3    # m, layers thinner than this are left out of the vertical velocity spread
+
+    # Largest difference (m/s) between the layer velocities of a face (layers thicker than RITTER_LAYER_DEPTH_MIN);
+    # hydrostatic theory keeps an initially depth-uniform velocity depth-uniform.
+    function layer_velocity_spread(model)
+        spread = 0.0
+        for f in 2:model.config.nx
+            lo, hi = Inf, -Inf
+            for k in 1:model.config.nz
+                if model.wetdry.hf[k, f] > RITTER_LAYER_DEPTH_MIN
+                    lo, hi = min(lo, model.state.u[k, f]), max(hi, model.state.u[k, f])
+                end
+            end
+            hi > lo && (spread = max(spread, hi - lo))
+        end
+        return spread
+    end
+
+    function run_ritter(nx, nz; v=WD_VARIANTS[1])
         grid_depth = 1.2 * RITTER_H0
-        cfg = wd_config(length=100.0, depth=grid_depth, nx=nx, nz=nz, dt=0.005 * 200 / nx)
+        cfg = wd_config(length=100.0, depth=grid_depth, nx=nx, nz=nz, dt=0.005 * 200 / nx; wd_variant_kwargs(v)...)
         model = Model(cfg)
         x = wd_x_centres(cfg)
         initialize_water_level!(model, [xi < RITTER_X0 ? RITTER_H0 : 0.0 for xi in x]; rho=1000.0)
@@ -294,11 +324,11 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
 
     # One wave period on a planar beach, forced by the analytical velocity at the offshore boundary; returns the largest
     # shoreline-elevation error, surface-elevation error (m) and the runup amplitude (m).
-    function run_carrier_greenspan(nx, nz, dt)
+    function run_carrier_greenspan(nx, nz, dt; v=WD_VARIANTS[1])
         cg = CarrierGreenspanWave(amplitude=CG_AMPLITUDE, slope=CG_SLOPE, length_scale=CG_LENGTH)
         T = carrier_greenspan_time_scale(cg)
         amplitude = cg.amplitude / 4 * cg.slope * cg.length_scale   # m, vertical runup amplitude (linear)
-        cfg = wd_config(length=CG_LENGTH + CG_ONSHORE, depth=1.5, nx=nx, nz=nz, dt=dt)
+        cfg = wd_config(length=CG_LENGTH + CG_ONSHORE, depth=1.5, nx=nx, nz=nz, dt=dt; wd_variant_kwargs(v)...)
         x = wd_x_centres(cfg)
         x_off(xm) = CG_LENGTH - xm   # m, offshore distance from the still shoreline
         cfg.bed_level = @. CG_STILL_LEVEL - cg.slope * x_off(x)
@@ -332,6 +362,33 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         return shore_error, eta_error, amplitude
     end
 
+    variant(tag) = only(v for v in WD_VARIANTS if v.tag == tag)
+
+    # Measured at dx = 0.25 m: 1D L1 0.51 % (upwind1 0.91 %), front 5.6 % (11.3 %); 2DV L1 0.80 % (0.89 %), layer spread
+    # 0.18 m/s (0.29 m/s), front 11.3 % (10.3 %, one cell apart). In 2DV the upper layers still lag where the surface
+    # has dropped through several layers, and draining carries their slower fluid to the front (open point, plan).
+    @testset "test_validate_wd_ritter_tvd2_improves_on_upwind1" begin
+        for nz in (1, 12)
+            model_up, _, l1_up, front_up = run_ritter(400, nz; v=variant("hydro_upwind1"))
+            model_tvd, _, l1_tvd, front_tvd = run_ritter(400, nz; v=variant("hydro_tvd2"))
+            @test l1_tvd < l1_up
+            if nz == 1
+                @test front_tvd < front_up
+            else
+                @test front_tvd <= RITTER_FRONT_REL_MAX
+                # second-order momentum advection reduces the first-order layer-velocity error of the draining surface layer
+                @test layer_velocity_spread(model_tvd) < layer_velocity_spread(model_up)
+            end
+        end
+    end
+
+    @testset "test_validate_wd_ritter_dry_dam_break_2dv_$(tag)" for tag in ("nonhydro_upwind1", "nonhydro_tvd2")
+        model, h, l1, front_error = run_ritter(400, 12; v=variant(tag))
+        @test l1 <= RITTER_L1_REL_MAX
+        @test front_error <= RITTER_FRONT_REL_MAX
+        @test all(isfinite, model.state.u)
+    end
+
     @testset "test_validate_wd_carrier_greenspan_runup_1d" begin
         shore_coarse, _, _ = run_carrier_greenspan(240, 1, 0.02)
         shore_fine, eta_fine, amplitude = run_carrier_greenspan(480, 1, 0.01)
@@ -344,5 +401,64 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         shore, eta, amplitude = run_carrier_greenspan(480, 15, 0.01)
         @test shore <= CG_SHORE_REL_MAX * amplitude
         @test eta <= CG_ETA_REL_MAX * amplitude
+    end
+
+    # The shoreline improves slightly with tvd2 (13.6 mm vs 14.6 mm at dx = 0.1 m); the surface error away from the shore
+    # does not (3.8 mm vs 3.3 mm): both are dominated by the wet/dry front, where tvd2 falls back to first order.
+    @testset "test_validate_wd_carrier_greenspan_runup_tvd2" begin
+        shore_up, _, _ = run_carrier_greenspan(240, 1, 0.02; v=variant("hydro_upwind1"))
+        shore_tvd, eta_tvd, amplitude = run_carrier_greenspan(240, 1, 0.02; v=variant("hydro_tvd2"))
+        @test shore_tvd < shore_up
+        @test eta_tvd <= CG_ETA_REL_MAX * amplitude
+    end
+
+    @testset "test_validate_wd_carrier_greenspan_runup_2dv_nonhydro" begin
+        # a long wave (k H << 1): the non-hydrostatic model must stay as close to the shallow-water solution
+        shore, eta, amplitude = run_carrier_greenspan(480, 15, 0.01; v=variant("nonhydro_tvd2"))
+        @test shore <= CG_SHORE_REL_MAX * amplitude
+        @test eta <= CG_ETA_REL_MAX * amplitude
+    end
+
+    # ---- Non-hydrostatic: dispersion of a standing surface wave --------------------------------------------------
+    # Same domain as test_validate_nonhydrostatic_dirichlet_surface_wave_matches_full_dispersion (k H = pi/2, where the
+    # shallow-water and the full relation omega^2 = g k tanh(k H) differ by more than 25 %).
+    NH_DISPERSION_REL_MAX = 0.02    # -, accepted relative period error on the finer grid
+    NH_DISPERSION_GAP_MIN = 0.25    # -, relative difference of the two periods that the domain must resolve
+    NH_WAVE_AMPLITUDE = 4e-5        # m, linear regime
+
+    @testset "test_validate_wd_nonhydro_standing_wave_full_dispersion_$(scheme)" for scheme in ("upwind1", "tvd2")
+        L, H, g = 8.0, 4.0, 9.81
+        k_wave = pi / L
+        period_shallow = 2pi / (k_wave * sqrt(g * H))
+        period_exact = 2pi / sqrt(g * k_wave * tanh(k_wave * H))
+        @test (period_exact - period_shallow) / period_shallow > NH_DISPERSION_GAP_MIN
+
+        function wd_wave_period(nx, nz, dt)
+            cfg = wd_config(length=L, depth=H, nx=nx, nz=nz, dt=dt, use_hydrostatic=false,
+                momentum_advection_scheme=scheme, transport_advection_scheme=scheme)
+            model = Model(cfg)
+            x = wd_x_centres(cfg)
+            initialize_water_level!(model, H .+ NH_WAVE_AMPLITUDE .* cos.(pi .* x ./ L); rho=1000.0)
+            # first zero crossing of eta at the left wall: a quarter period
+            t_prev, e_prev = 0.0, model.state.eta[1]
+            for n in 1:round(Int, 0.6 * period_exact / dt)
+                step_forward!(model)
+                e = model.state.eta[1]
+                if e <= 0.0
+                    t = n * dt
+                    return 4.0 * (t_prev + e_prev / (e_prev - e) * (t - t_prev))
+                end
+                t_prev, e_prev = n * dt, e
+            end
+            return NaN
+        end
+
+        period_coarse = wd_wave_period(40, 20, 0.004)
+        period_fine = wd_wave_period(80, 40, 0.002)
+        err_coarse = abs(period_coarse - period_exact) / period_exact
+        err_fine = abs(period_fine - period_exact) / period_exact
+        @test err_fine < err_coarse
+        @test err_fine < NH_DISPERSION_REL_MAX
+        @test abs(period_fine - period_exact) < abs(period_fine - period_shallow)
     end
 end

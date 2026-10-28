@@ -74,9 +74,10 @@ Base.@kwdef mutable struct ModelConfig
     # columns). nothing (default) = flat bed, legacy code paths. An explicit vector (also all zeros) uses the masked
     # code paths; see BedGeometry in src/geometry.jl.
     bed_level::Union{Nothing,Vector{Float64}} = nothing
-    # Wetting and drying (issue #31, src/wetting_drying.jl): hydrostatic time step on cells cut by the bed and the free
-    # surface, with dry columns. bed_level may then take any value >= 0 (not only whole cells) and nz = 1 (1D) is allowed.
-    # Requires use_hydrostatic=true, momentum_advection_scheme="upwind1" and a closed or prescribed lateral boundary.
+    # Wetting and drying (issue #31, src/wetting_drying.jl): time step on cells cut by the bed and the free surface, with
+    # dry columns, hydrostatic or non-hydrostatic, momentum and transport advection "upwind1" or "tvd2"; the free-surface
+    # solve keeps every depth >= 0 (docs/depth_positivity.md). bed_level may then take any value >= 0 (not only whole
+    # cells) and nz = 1 (1D) is allowed. Requires a closed or prescribed lateral boundary (no periodic_x).
     wetting_drying::Bool = false
     # Wetting and drying: smallest upwind water depth (m) at which a u-face is open; shallower faces carry no flow.
     dry_depth_threshold::Float64 = 1e-6
@@ -820,9 +821,8 @@ function _check_model_config(cfg::ModelConfig)
 end
 
 function _check_wetting_drying_config(cfg::ModelConfig)
-    cfg.use_hydrostatic || throw(ArgumentError("wetting_drying=true is implemented for the hydrostatic mode only (use_hydrostatic=true)"))
     cfg.periodic_x && throw(ArgumentError("wetting_drying=true does not support periodic_x=true"))
-    cfg.momentum_advection_scheme == "upwind1" || throw(ArgumentError("wetting_drying=true requires momentum_advection_scheme=\"upwind1\" (momentum-conservative first-order upwind near the wet/dry front)"))
+    cfg.momentum_advection_scheme in ("upwind1", "tvd2") || throw(ArgumentError("momentum_advection_scheme must be \"upwind1\" or \"tvd2\", got \"$(cfg.momentum_advection_scheme)\""))
     turbulence_closure(cfg) == "none" || throw(ArgumentError("wetting_drying=true does not support a turbulence closure"))
     cfg.bed_roughness_length == 0.0 || throw(ArgumentError("wetting_drying=true does not support bed_roughness_length"))
     cfg.wind_stress_x == 0.0 || throw(ArgumentError("wetting_drying=true does not support wind_stress_x"))

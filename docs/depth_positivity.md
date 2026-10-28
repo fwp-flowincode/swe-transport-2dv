@@ -2,211 +2,247 @@ Depth positivity of the wetting-drying scheme
 =============================================
 
 This note proves that the wetting-drying time step (`ModelConfig(wetting_drying=true)`, `src/wetting_drying.jl`,
-issue #31) never produces a negative water depth, states the time-step conditions that are, and are not, needed, and
-describes the run-time check. Notation follows the plan `docs/plan_issue_31_wetting_drying.md`.
+issue #31) never produces a negative water depth, states the conditions under which this holds, and describes the
+run-time check. Notation follows the plan `docs/plan_issue_31_wetting_drying.md`.
 
 Summary
 -------
 
-1. **Positivity holds for every time step $\Delta t > 0$** (Theorem 1). It is guaranteed by the outflow limiter in the
-   final continuity step, not by the semi-implicit free-surface solve (which can go below the bed, section 4). The proof uses only the structure of that last
-   step, so it holds for any way the velocities $u^{n+1}$ are computed (hydrostatic or non-hydrostatic, first- or
-   second-order advection), as long as the step ends with the limited continuity update.
-2. **The free-surface solve alone is not positive.** Without the limiter, the semi-implicit scheme with face depths at
-   time level $n$ can produce negative depths when $\Delta t$ is large or the flow reverses at a face (section 4). This is
-   flagged on purpose: positivity is bought by modifying the outflow where the limiter acts.
-3. **The limiter is inactive** (the scheme is the unmodified semi-implicit scheme) if the flow does not reverse at
-   the outflow faces of a column during the step and the Courant-type condition
-   $\frac{\Delta t}{\Delta x}\max_k\left(u^{+}_{k,i+1/2} + u^{-}_{k,i-1/2}\right) \le 1$ holds (Lemma 2). In all validation
-   cases (Ritter, Carrier-Greenspan, sloshing; 1D and 2DV) it never acted.
-4. **Floating point:** a computed depth can fall below zero by round-off only, bounded by
-   $\gamma_{2n_z+8}\,S_i$ (section 5). Such a depth is set to an exact zero; anything below the bound stops the run with a
-   `DomainError`, as does a negative depth found at the start of a step.
+1. **Positivity is enforced inside the free-surface solve, not afterwards.** Following Casulli (2009), the unknown water
+   volume of a column is the non-negative function $V_i(\eta) = \max(0, H + \eta_i - z_{b,i})$ of its level, and the
+   free-surface equation becomes the mildly nonlinear system $V(\eta) + T\eta = b$. Its solution gives velocities whose
+   flux divergence reproduces $V(\eta^{n+1}) \ge 0$ exactly (Theorem 1). Nothing is corrected after the solve: the
+   final velocities satisfy the discrete momentum equations that produced the surface.
+2. **No time-step restriction.** Theorem 1 holds for every $\Delta t > 0$. The Newton iteration of Brugnano & Casulli
+   (2008) converges for every $\Delta t$ in at most $n_x + 1$ steps (Theorem 2).
+3. **The only condition** is that a prescribed outflow through a domain boundary does not exceed the water volume that is
+   connected to that boundary (section 4); otherwise no non-negative solution exists at all, and the run stops. Closed
+   boundaries and prescribed inflow always satisfy it.
+4. **Floating point:** the computed depth equals $V_i(\eta^{n+1})$ up to the final residual of the solve and the round-off
+   of the continuity sums, bounded in section 5. A depth below zero within this bound is stored as an exactly dry level;
+   a larger negative depth (or one found at the start of a step) stops the run with a `DomainError`.
+5. **Non-hydrostatic mode:** the non-hydrostatic pressure gradient enters the momentum predictor and the free-surface solve
+   is repeated, so the final velocities again come from the positive solve (section 6).
+6. In the validation cases (Ritter, Carrier-Greenspan, sloshing; 1D and 2DV) the solve takes exactly one Newton
+   iteration per step (the former linear solve). The nonlinear iteration acts only where a column would otherwise be
+   drained below its bed, e.g. at advective Courant numbers of 6 and more in the dam break of the positivity test
+   (2-4 iterations).
+
+History: a first version (commit 7d00172) solved the linear semi-implicit system and scaled the outflow of columns
+that would run dry afterwards. Positivity held, but the scaled velocities were no longer the solution of the discrete
+momentum equations where the limiter acted. The present formulation replaces that limiter.
 
 1 Setting
 ---------
 
 Columns $i = 1,\dots,n_x$ of width $\Delta x$, layers $k = 1,\dots,n_z$ on the fixed interfaces $z_k = (k-1)\Delta z$; the top
-layer is open above. Column $i$ has the bed level $z_{b,i}$ and the water level $\zeta_i = H + \eta_i$ ($H$ = grid depth). Its
-depth (water volume per unit area) is
+layer is open above. Column $i$ has the bed level $z_{b,i}$ and the level $\zeta_i = H + \eta_i$ ($H$ = grid depth). Its
+water volume per unit area (its depth) is
 
-$$V_i = \zeta_i - z_{b,i},$$
+$$V_i(\eta_i) = \max(0,\ H + \eta_i - z_{b,i}) \ \ge 0,$$
 
-and layer $k$ holds the thickness
+and layer $k$ holds $h_{k,i} = \max\bigl(0, \min(z_{k+1}, \zeta_i) - \max(z_k, z_{b,i})\bigr) \ge 0$, with
+$\sum_k h_{k,i} = V_i$. Face $f = i+1/2$ has the bed $z_{b,f} = \max(z_{b,i}, z_{b,i+1})$ and layer thicknesses $h_{k,f} \ge 0$
+from the upwind level of time $n$ (zero if the upwind depth is below `dry_depth_threshold`), and the total
+$H_f = \sum_k h_{k,f}$.
 
-$$h_{k,i} = \max\bigl(0,\ \min(z_{k+1}, \zeta_i) - \max(z_k, z_{b,i})\bigr) \ge 0, \qquad \sum_k h_{k,i} = \max(V_i, 0).$$
+**Layer thicknesses are non-negative by construction**, for cells and faces, whatever $\eta$ is. The only quantity whose
+sign is at stake is the column volume; the layer thicknesses are derived from the level. Positivity of the column depth
+is therefore the complete statement.
 
-Face $f = i+1/2$ between columns $i$ and $i+1$ has the bed $z_{b,f} = \max(z_{b,i}, z_{b,i+1})$ and the upwind level
-$\zeta_f$: $\zeta_i$ if $\sum_k u^n_{k,f} > 0$, $\zeta_{i+1}$ if $< 0$, $\max(\zeta_i,\zeta_{i+1})$ if $= 0$. Its layer thicknesses
-$h_{k,f}$ follow from the same formula with $(\zeta_f, z_{b,f})$, and are set to zero if $\zeta_f - z_{b,f}$ does not exceed
-`dry_depth_threshold`. Boundary faces use the adjacent column.
+2 The free-surface system
+-------------------------
 
-**Layer thicknesses are non-negative by construction**, for cells and faces, whatever $\zeta$ is. The only quantity whose
-sign is at stake is the column depth $V_i$; the layer thicknesses are derived from it. Positivity of $V_i$ is therefore the
-complete statement.
+The momentum predictor gives $\hat u_{k,f}$ on the wet face layers (and the boundary velocities). In every wet face layer
+the new velocity is
 
-2 The final continuity step
----------------------------
+$$u^{n+1}_{k,f} = \hat u_{k,f} - g\,\Delta t\,\frac{\eta_{i+1} - \eta_i}{\Delta x}, \qquad f = i+1/2 \text{ (interior)},$$
 
-After the velocities $u^{n+1}_{k,f}$ have been computed (momentum predictor, free-surface solve, velocity correction; in
-the non-hydrostatic variant also the pressure correction), the step ends with `_wd_limit_fluxes_and_update_level!`:
+so the column transport is $Q_f = \sum_k h_{k,f}u^{n+1}_{k,f} = \hat U_f - g\,\Delta t\,H_f(\eta_{i+1}-\eta_i)/\Delta x$ with
+$\hat U_f = \sum_k h_{k,f}\hat u_{k,f}$ (boundary faces: prescribed, no gradient term). The continuity of column $i$,
 
-1. Layer discharges $q_{k,f} = h_{k,f}\,u^{n+1}_{k,f}$ (m²/s).
-2. Outflow volume of column $i$ during the step (m):
-   $$O_i = \frac{\Delta t}{\Delta x}\sum_{k=1}^{n_z}\Bigl(q^{+}_{k,i+1/2} + q^{-}_{k,i-1/2}\Bigr), \qquad a^{+} = \max(a,0),\ a^{-} = \max(-a,0).$$
-3. Limiter, with $V^n_i = \max(\zeta^n_i - z_{b,i}, 0)$:
-   $$\theta_i = \begin{cases} 1, & O_i \le V^n_i,\\ V^n_i / O_i, & O_i > V^n_i,\end{cases} \qquad 0 \le \theta_i \le 1,\quad \theta_i O_i \le V^n_i.$$
-4. Limited discharges: an outflowing face-layer discharge is multiplied by the limiter of the column it leaves,
-   $$\tilde q_{k,f} = \begin{cases}\theta_{L(f)}\,q_{k,f}, & q_{k,f} > 0,\\ \theta_{R(f)}\,q_{k,f}, & q_{k,f} < 0,\end{cases}$$
-   with $L(f), R(f)$ the columns left and right of $f$. A discharge entering through a boundary face from outside the
-   domain is not limited ($\theta := 1$ there); one leaving through a boundary face is limited by the adjacent column.
-   The velocities are scaled in the same way, $\tilde u_{k,f} = \tilde q_{k,f}/h_{k,f}$.
-5. New level from the flux divergence:
-   $$\eta^{n+1}_i = \eta^n_i - \frac{\Delta t}{\Delta x}\sum_{k}\bigl(\tilde q_{k,i+1/2} - \tilde q_{k,i-1/2}\bigr).$$
+$$V_i(\eta^{n+1}_i) = V_i(\eta^n_i) - \frac{\Delta t}{\Delta x}\bigl(Q_{i+1/2} - Q_{i-1/2}\bigr),$$
 
-The same limited discharges are used for the vertical fluxes and the constituent transport, so the step is
-conservative: summing step 5 over $i$ telescopes to the boundary fluxes.
+is the system
 
-3 Proof of positivity
----------------------
+$$F(\eta) := V(\eta) + T\eta - b = 0,\qquad
+(T\eta)_i = a_{i+1/2}(\eta_i - \eta_{i+1}) + a_{i-1/2}(\eta_i - \eta_{i-1}),\qquad
+b_i = V_i(\eta^n_i) - \frac{\Delta t}{\Delta x}\bigl(\hat U_{i+1/2} - \hat U_{i-1/2}\bigr),$$
 
-**Theorem 1.** Let $V^n_i \ge 0$ for all $i$. Then, in exact arithmetic, $V^{n+1}_i = \zeta^{n+1}_i - z_{b,i} \ge 0$ for all
-$i$, for every $\Delta t > 0$, every velocity field $u^{n+1}$ and every bed.
+with $a_f = g\,\Delta t^2 H_f/\Delta x^2 \ge 0$ ($a = 0$ at closed faces and at the domain boundary faces). Casulli (2009)
+introduced this volume formulation for sub-grid bathymetry; here each column has one bed level, so $V_i$ has a single kink.
 
-*Proof.* Fix a column $i$. Split the sum in step 5 into the discharges that leave $i$ and those that enter it. A face-layer
-discharge leaves $i$ through its right face if $q_{k,i+1/2} > 0$ and through its left face if $q_{k,i-1/2} < 0$; in both
-cases column $i$ is the column it leaves, so it is multiplied by $\theta_i$. All other non-zero discharges at the faces of
-$i$ enter $i$; they are multiplied by the limiter of the neighbour (or by 1 at an inflow boundary). Hence
+Properties used below:
 
-$$V^{n+1}_i = V^n_i - \theta_i O_i + I_i, \qquad
-I_i = \frac{\Delta t}{\Delta x}\sum_k\Bigl(\theta_{i-1}\,q^{+}_{k,i-1/2} + \theta_{i+1}\,q^{-}_{k,i+1/2}\Bigr) \ge 0,$$
+- **(T)** $T$ is symmetric, $T_{ij} \le 0$ for $i \ne j$, and every row sums to zero: $T$ is a positive semidefinite
+  Z-matrix. Call two columns *connected* if they share a face with $a_f > 0$; this splits the columns into components $C$.
+  Within a component $T$ is irreducible, and $\sum_{i\in C}(T\eta)_i = 0$ for every $\eta$.
+- **(M)** If $D$ is a non-negative diagonal matrix with $D_{ii} > 0$ for at least one column of every component, then $D + T$
+  is an irreducibly diagonally dominant Z-matrix on each component, hence a non-singular M-matrix with
+  $(D+T)^{-1} \ge 0$ elementwise (Varga 2000, Sec. 3.5; Berman & Plemmons 1994, ch. 6).
+- **(V)** Each $V_i$ is convex, non-decreasing and piecewise linear. With the right derivative
+  $p_i(\eta) = 1$ if $H + \eta_i \ge z_{b,i}$, else $0$, and $P(\eta) = \mathrm{diag}(p_i)$, convexity gives the subgradient
+  inequality $V(y) \ge V(x) + P(x)(y - x)$ for all $x, y$ (componentwise).
 
-since all $\theta \ge 0$ and $q^{\pm} \ge 0$ (with $\theta_0 = \theta_{n_x+1} := 1$ for unlimited boundary inflow). Because
-$V^n_i \ge 0$, the max in the definition of $V^n_i$ is inactive and $V^n_i$ is the true depth. By step 3, $\theta_i O_i \le V^n_i$
-in both cases: if $O_i \le V^n_i$ then $\theta_i O_i = O_i \le V^n_i$; otherwise $\theta_i O_i = V^n_i$. Therefore
+3 Positivity and conservation
+-----------------------------
 
-$$V^{n+1}_i \ge V^n_i - V^n_i + I_i = I_i \ge 0. \qquad\blacksquare$$
+**Theorem 1.** Let $\eta^*$ solve $F(\eta^*) = 0$ and let $u^{n+1}$ be the velocities of section 2 with $\eta = \eta^*$. Then
+the new depth from the flux divergence,
 
-**Corollary (induction).** The initial state has $V^0_i \ge 0$: `initialize_water_level!` sets a dry column to its bed and
-the `Model` constructor clamps generic initial states to the bed. By Theorem 1, $V^n_i \ge 0$ for all $n$.
+$$V^{n+1}_i := V_i(\eta^n_i) - \frac{\Delta t}{\Delta x}\sum_k\bigl(h_{k,i+1/2}u^{n+1}_{k,i+1/2} - h_{k,i-1/2}u^{n+1}_{k,i-1/2}\bigr),$$
+
+equals $V_i(\eta^*_i) \ge 0$ for every column, for every $\Delta t > 0$; and $\sum_i V^{n+1}_i\Delta x$ changes only by the
+boundary fluxes.
+
+*Proof.* By section 2, $\frac{\Delta t}{\Delta x}(Q_{i+1/2} - Q_{i-1/2}) = \frac{\Delta t}{\Delta x}(\hat U_{i+1/2} - \hat U_{i-1/2}) + (T\eta^*)_i$,
+since $-\frac{g\Delta t^2}{\Delta x^2}\bigl[H_{i+1/2}(\eta^*_{i+1}-\eta^*_i) - H_{i-1/2}(\eta^*_i-\eta^*_{i-1})\bigr] = (T\eta^*)_i$. Hence
+$V^{n+1}_i = b_i - (T\eta^*)_i = V_i(\eta^*_i) \ge 0$, by $F(\eta^*) = 0$ and the definition of $V_i$. Summing the flux form over
+$i$ telescopes to the boundary fluxes. $\blacksquare$
+
+The positivity is a property of the solution of the system; no time-step condition enters. What remains is that the
+system has a solution and that the solver finds it (Theorem 2).
+
+**Induction.** The initial depths are $\ge 0$ (`initialize_water_level!` sets dry columns to their bed; the `Model`
+constructor clamps generic initial states to the bed). By Theorem 1 the depths stay $\ge 0$ in every step.
+
+4 Existence and convergence of the Newton iteration
+---------------------------------------------------
+
+The solver (`_wd_free_surface_solve!`) is Newton's method with the right derivative (Brugnano & Casulli 2008):
+
+$$\bigl(P(\eta^m) + T\bigr)(\eta^{m+1} - \eta^m) = -F(\eta^m), \qquad \eta^0 = \eta^n.$$
+
+**Condition (C).** Every component $C$ that contains at least one face with $a_f > 0$ satisfies $\sum_{i\in C} b_i > 0$.
+
+Interpretation: faces between components are closed ($H_f = 0$, so $\hat U_f = 0$), hence
+$\sum_{i\in C} b_i = \sum_{i \in C}V_i(\eta^n_i) + \frac{\Delta t}{\Delta x}(\text{net prescribed inflow through the domain boundary faces of } C)$.
+A component with an open face holds water ($V > 0$ upwind of that face), so (C) holds for closed boundaries and for
+prescribed inflow, for every $\Delta t$. It fails only if a prescribed boundary *outflow* removes at least the whole volume of
+its component within one step; then the continuity equations have no solution with $V \ge 0$ at all (they would require
+a negative volume), and no scheme can satisfy them.
+
+**Theorem 2.** Under (C), every Newton matrix $P(\eta^m) + T$ is non-singular, the iterates satisfy
+$\eta^{m+1} \le \eta^m$ for $m \ge 1$, and the iteration reaches $F(\eta^m) = 0$ after at most $n_x + 1$ steps (exact arithmetic).
+
+*Proof.*
+
+(a) *First step.* The depths at time $n$ are $\ge 0$, so $H + \eta^n_i \ge z_{b,i}$ and $p_i(\eta^0) = 1$ for all $i$
+(right derivative at the kink). $I + T$ is non-singular by (M).
+
+(b) *Non-negative residual.* For $m \ge 1$, the Newton equation of step $m-1$ and (V) with $x = \eta^{m-1}$, $y = \eta^m$ give
+$$V(\eta^m) \ge V(\eta^{m-1}) + P(\eta^{m-1})(\eta^m - \eta^{m-1}) = b - T\eta^m,$$
+i.e. $F(\eta^m) \ge 0$.
+
+(c) *Non-singularity for $m \ge 1$.* Suppose $P(\eta^m) + T$ were singular. By (M) there is a component $C$ with $p_i(\eta^m) = 0$
+for all $i \in C$ (all columns of $C$ dry in the iterate). Then $V_i(\eta^m) = 0$ on $C$ and, summing $F$ over $C$ with (T),
+$\sum_{i\in C}F_i(\eta^m) = -\sum_{i\in C} b_i$. By (b) the left side is $\ge 0$, so $\sum_C b_i \le 0$. For a component with an open
+face this contradicts (C). A single column without open faces has $T_{ii} = 0$, $b_i = V_i(\eta^n_i)$ and
+$F_i(\eta^0) = 0$; its Newton row reads $p_i\,\delta_i = -F_i$ with $p_i(\eta^0) = 1$, so $\delta_i = 0$, its level never changes
+and $p_i = 1$ throughout. Hence every matrix is non-singular and, by (M), $(P(\eta^m)+T)^{-1} \ge 0$.
+
+(d) *Monotonicity.* For $m \ge 1$: $(P(\eta^m)+T)(\eta^{m+1}-\eta^m) = -F(\eta^m) \le 0$, and the inverse is non-negative, so
+$\eta^{m+1} \le \eta^m$.
+
+(e) *Finite termination.* $p_i$ can only switch from 1 to 0: at $m = 0$ all $p_i = 1$, and for $m \ge 1$ the levels do not
+increase while $p_i = 1 \iff \eta_i \ge z_{b,i} - H$. So $P$ changes at most $n_x$ times. If $P(\eta^m) = P(\eta^{m-1})$ for some
+$m \ge 1$, then $\eta^m$ and $\eta^{m-1}$ lie on the same linear piece of every $V_i$ (both at or above the kink, where $V_i$ has
+slope 1, or both below it, where $V_i = 0$), so $V(\eta^m) = V(\eta^{m-1}) + P(\eta^{m-1})(\eta^m - \eta^{m-1})$ holds with
+equality, and the Newton equation of step $m-1$ gives $F(\eta^m) = 0$. Therefore a solution is reached after at most
+$n_x + 1$ steps. In particular a solution exists. $\blacksquare$
 
 *Remarks.*
-- Nothing in the proof refers to how $u^{n+1}$ was computed. Any variant of the step (non-hydrostatic correction,
-  second-order advection, other forcing) keeps positivity provided it ends with steps 1-5 and uses the face
-  thicknesses $h_{k,f} \ge 0$. This is a structural invariant of the code: every wetting-drying step must end with
-  `_wd_limit_fluxes_and_update_level!`.
-- The limiter is a one-pass, local scaling; it uses only $V^n_i$ and ignores the inflow $I_i$ that would partly
-  compensate the outflow. It is therefore conservative in the sense of being sufficient, not minimal.
-- A column that is limited ($\theta_i < 1$) ends with $V^{n+1}_i = I_i$: it is emptied by its outflow, apart from what flows in.
+- The volumes $V_i(\eta^*)$ are unique: if $\eta^*, \tilde\eta$ both solve the system,
+  $0 = (V(\eta^*) - V(\tilde\eta))^\top(\eta^*-\tilde\eta) + (\eta^*-\tilde\eta)^\top T(\eta^*-\tilde\eta)$, both terms are
+  $\ge 0$ (monotone $V$, semidefinite $T$), so $V(\eta^*) = V(\tilde\eta)$ wherever the columns are wet. The level of a column
+  that ends dry is not unique (any level at or below its bed); it only enters the velocities at faces whose fluxes it
+  balances, and the stored level is reset to the bed (section 5).
+- A lake at rest gives $F(\eta^n) = 0$ exactly (zero predictor transport, equal levels across every open face), so the
+  iteration stops before the first step and $\eta$ does not change by round-off.
+- Without drying in the step, $P(\eta^1) = I$ and the solution is reached after one step: the linear semi-implicit
+  scheme of Casulli & Cheng (1992). This is the case in all validation runs.
 
-4 What is not positive: the free-surface solve alone
-----------------------------------------------------
+5 Floating-point arithmetic and the run-time check
+--------------------------------------------------
 
-The semi-implicit free-surface equation (step 3 of the time step, Casulli & Cheng 1992) solves
+The iteration stops when $|F_i| \le$ `WD_NEWTON_RTOL` $\cdot\, s_i$ for all $i$ ($s_i$ = sum of the magnitudes in $F_i$,
+`WD_NEWTON_RTOL` $= 10^{-13}$; by (e) the exact solution is reached in finitely many steps, so the final residual is
+round-off). The new level is then computed from the flux divergence (`_wd_update_level_from_fluxes!`), which conserves
+the volume to round-off. By Theorem 1 the computed depth is
 
-$$\eta^{n+1}_i - \eta^n_i + \frac{\Delta t}{\Delta x}\Bigl(\hat U_{i+1/2} - \hat U_{i-1/2}\Bigr)
-- \frac{g\,\Delta t^2}{\Delta x^2}\Bigl(H_{i+1/2}(\eta^{n+1}_{i+1}-\eta^{n+1}_i) - H_{i-1/2}(\eta^{n+1}_i-\eta^{n+1}_{i-1})\Bigr) = 0,$$
+$$\widehat V^{n+1}_i = V_i(\eta^m_i) - F_i(\eta^m) + \text{(rounding)}, \qquad
+|\text{rounding}| \le \gamma_{2n_z+8}\,S_i,$$
 
-with the face depths $H_f = \sum_k h_{k,f}$ taken at time level $n$. Its solution need not satisfy $\zeta^{n+1}_i \ge z_{b,i}$:
+with $\gamma_k = k\varepsilon/(1-k\varepsilon)$ (Higham 2002, Lemma 3.1 and Sec. 4.2: a sum of $2n_z$ discharges and a few further
+roundings) and $S_i = H + |\eta^n_i| + |\eta^{n+1}_i| + |z_{b,i}| + O_i$, where $O_i$ is the outflow volume of the step. Hence
 
-- the system is linear in $\eta^{n+1}$ with depths frozen at time $n$; nothing couples the outflow to the depth that is
-  left at time $n+1$. A column with a small depth and a large implicit gravity-driven outflow (large $\Delta t$, steep
-  surface gradient) is drained below its bed. The test `test_verify_wd_depth_positivity_large_time_step_*` runs a dam
-  break at an advective Courant number of 3, where the limiter acts ($\min\theta < 1$). Measured in that case: the level of
-  the free-surface solve itself falls $6.8\cdot10^{-8}$ m below the bed in 1D (the limited step keeps it at or above the
-  bed); in 2DV it stays at or above the bed in this case. The counterexample is small but real, so positivity cannot be
-  claimed for the solve alone;
-- the upwind direction of the face depth is taken from $u^n$; if the flow reverses during the step, the face depth comes
-  from the column the water now flows *into*, and the outflow of the other column is computed with a depth that it may
-  not have.
+$$\widehat V^{n+1}_i \ \ge\ -\bigl(|F_i| + \gamma_{2n_z+8}\,S_i\bigr).$$
 
-Casulli (2009) obtains positivity within the solve by a nonlinear (Newton-type) system for the wet volume; the present
-scheme instead restores it after the solve with the limiter. **Consequence:** where the limiter acts, the final
-velocities differ from those of the free-surface solve (they are scaled down), so momentum and the surface gradient are
-locally inconsistent for that step. This is a first-order local modification, confined to columns that would otherwise
-run dry within one step.
+The code (`_wd_depth_roundoff`) uses this bound with the safety factor `WD_POSITIVITY_ROUNDOFF_FACTOR = 2` on the
+rounding term:
 
-5 Floating-point arithmetic
----------------------------
+- $-(|F_i| + 2\gamma S_i) \le \widehat V^{n+1}_i < 0$: round-off; the column is stored as exactly dry and the volume added is
+  accumulated in `model.wetdry.clamped_volume` (m²; zero in all validation cases, $\le 3\cdot10^{-16}$ m² in the
+  large-time-step tests);
+- $\widehat V^{n+1}_i < -(|F_i| + 2\gamma S_i)$: the solve did not satisfy its equations; the run stops with a `DomainError`.
 
-In floating point, $\theta_i O_i \le V^n_i$ and the cancellation in step 5 hold only up to rounding. With unit roundoff
-$\varepsilon$ and $\gamma_m = m\varepsilon/(1-m\varepsilon)$ (Higham 2002, Lemma 3.1 and Sec. 4.2):
+**Exactly dry levels.** A dry column stores the smallest float $\eta$ with $\mathrm{fl}(H + \eta) \ge z_b$ (`_wd_dry_eta`);
+$\eta = z_b - H$ alone can round to one ulp below the bed. IEEE subtraction gives $\mathrm{fl}(a - b) \ge 0 \iff a \ge b$, so
+the computed depth of a dry column is exactly $\ge 0$, and with it every depth the model computes.
 
-- $O_i$ is a sum of $2n_z$ non-negative terms times $\Delta t/\Delta x$: $\hat O_i = O_i(1+\delta_1)$, $|\delta_1| \le \gamma_{2n_z+1}$;
-- $\hat\theta_i = (V^n_i/\hat O_i)(1+\delta_2)$, $|\delta_2| \le \varepsilon$, hence the limited outflow is
-  $\hat\theta_i O_i \le V^n_i(1+\gamma_{2n_z+3})$;
-- the divergence is a sum of $2n_z$ terms; forming $\eta^{n+1}$ and $\zeta^{n+1} - z_b$ adds a few roundings.
+**Start-of-step check.** `_wd_check_depth_positivity` stops the run if a column enters a step with a negative depth
+beyond round-off; this can only happen if the state was modified from outside (test
+`test_verify_wd_negative_depth_is_rejected`). It also guarantees the premise of Theorem 2 (a): all $p_i(\eta^0) = 1$.
 
-Altogether the computed depth satisfies
+**Singular matrix.** If (C) is violated, step (c) of the proof fails and a pivot of the tridiagonal elimination becomes
+$\le 0$; the solver then stops with a `DomainError` naming the column.
 
-$$\widehat{V}^{n+1}_i \ \ge\ -\,\gamma_{m}\,S_i, \qquad m = 2n_z + 8, \qquad S_i = H + |\eta^n_i| + |\eta^{n+1}_i| + |z_{b,i}| + O_i,$$
-
-i.e. it can be negative by a few ulps of the magnitudes involved, never more. The code (`_wd_depth_roundoff`) uses this
-bound with the safety factor `WD_POSITIVITY_ROUNDOFF_FACTOR = 2`:
-
-- $-2\gamma_m S_i \le \widehat V^{n+1}_i < 0$: round-off; the column is set to an exactly dry level and the (ulp-sized)
-  volume added is accumulated in `model.wetdry.clamped_volume` (m²; zero in all validation cases);
-- $\widehat V^{n+1}_i < -2\gamma_m S_i$: violates Theorem 1, so it indicates a defect; the run stops with a `DomainError`.
-
-**Exactly dry levels.** A dry column stores $\eta_i = z_{b,i} - H$; in floating point $H + \eta_i$ can round to one ulp below
-$z_{b,i}$, i.e. a computed depth of $-10^{-16}$ m. `_wd_dry_eta` therefore stores the smallest float $\eta$ with
-$\mathrm{fl}(H+\eta) \ge z_b$, so that the computed depth of a dry column is exactly $\ge 0$ (IEEE subtraction gives
-$\mathrm{fl}(a-b) \ge 0 \iff a \ge b$). With this, every depth the model computes is $\ge 0$, not only $\ge -$round-off.
-
-**Start-of-step check.** `_wd_check_depth_positivity` stops the run if a column enters a step with a depth below
-$-2\gamma_m S_i$; this can only happen if the state was modified from outside (test
-`test_verify_wd_negative_depth_is_rejected`).
-
-6 Time-step conditions
+6 Non-hydrostatic mode
 ----------------------
 
-**(a) Positivity:** none. Theorem 1 holds for every $\Delta t > 0$.
+The non-hydrostatic pressure $q$ is obtained from a projection of the velocities of a first free-surface solve on the
+wet cells below the surface cell of each column ($q = 0$ in the surface cell). Its gradient $-\frac{\Delta t}{\rho_0}\partial_x q$ is
+then **added to the predictor** $\hat u$, and the free-surface solve of section 2 is repeated
+(`_wd_nonhydrostatic_correction!`). The final velocities are those of this second solve, so Theorems 1 and 2 apply
+unchanged. Correcting the velocities directly after the solve (as in Casulli 1999) would change the column transports
+after the solve and void Theorem 1. The price is that the continuity of the cells below the surface holds only
+approximately (the two solves differ by a depth-uniform change of the surface gradient); the vertical velocity then
+follows from the exact layer continuity.
 
-**(b) Limiter inactive** (the scheme is the unmodified semi-implicit scheme with upwind face depths).
+7 Time-step conditions
+----------------------
 
-*Lemma 2.* Suppose that at every outflow face of column $i$ the face depth is upwinded from $i$ (the flow direction of the
-step agrees with that of $u^n$ used for the upwinding). Then
+**(a) Depth positivity and volume conservation:** none (Theorems 1 and 2), apart from condition (C) for prescribed
+boundary outflow.
 
-$$\frac{\Delta t}{\Delta x}\max_k\Bigl(u^{n+1,+}_{k,i+1/2} + u^{n+1,-}_{k,i-1/2}\Bigr) \le 1 \quad\Longrightarrow\quad \theta_i = 1.$$
-
-*Proof.* For an outflow face $f$ of $i$ the upwind level is $\zeta_f = \zeta_i$, and $z_{b,f} \ge z_{b,i}$ (the face bed is
-the higher neighbour). Hence for every layer
-$h_{k,f} = \max(0, \min(z_{k+1},\zeta_i) - \max(z_k, z_{b,f})) \le \max(0, \min(z_{k+1},\zeta_i) - \max(z_k, z_{b,i})) = h_{k,i}$.
-Then
-
-$$O_i = \frac{\Delta t}{\Delta x}\sum_k\bigl(h_{k,i+1/2}u^{+}_{k,i+1/2} + h_{k,i-1/2}u^{-}_{k,i-1/2}\bigr)
-\le \frac{\Delta t}{\Delta x}\sum_k h_{k,i}\bigl(u^{+}_{k,i+1/2} + u^{-}_{k,i-1/2}\bigr)
-\le \frac{\Delta t}{\Delta x}\max_k\bigl(u^{+}_{k,i+1/2} + u^{-}_{k,i-1/2}\bigr)\,V^n_i \le V^n_i. \qquad\blacksquare$$
-
-This is the usual advective Courant condition, written for a column with outflow on both sides. It is **not** required
-for positivity; it only tells when the limiter cannot act. If the flow reverses at a face during the step, the face
-depth is taken from the other column and the limiter may act at any $\Delta t$ (rarely, and only at the front).
-Measured: in the Ritter (Courant number 0.06), Carrier-Greenspan and sloshing runs, 1D and 2DV, $\theta_i = 1$ in every
-column and step, and no depth was clamped.
-
-**(c) Other conditions of the step** (not related to depth positivity, listed for completeness):
-- explicit momentum advection: stable without condition because the update is capped to a convex combination
-  (`_wd_advection_tendency`), but accurate only for $|u|\Delta t/\Delta x \lesssim 1$;
-- constituent transport: conservative for every $\Delta t$; it is monotone (no new extrema) only if the outflow of each
-  cell does not exceed its old volume, $\Delta t\,(\text{outflow of cell } (k,i)) \le h^n_{k,i}\Delta x$, which thin cut cells can
-  violate at any $\Delta t$; values outside the initial bounds are then clipped and the clipped mass redistributed
-  (plan, section 2.2). Unlike the depth, the density bounds are therefore enforced, not proven;
+**(b) Other conditions of the step** (not related to the depth, for completeness):
+- explicit momentum advection: stable without condition because the update is capped (`_wd_advection_tendency`), but
+  accurate only for $|u|\Delta t/\Delta x \lesssim 1$;
+- constituent transport: conservative for every $\Delta t$; monotone (no new extrema) only if the outflow of each cell does
+  not exceed its old volume, which thin cut cells can violate at any $\Delta t$; values outside the initial bounds are then
+  clipped and the clipped mass redistributed. The density bounds are enforced, not proven;
 - free surface: implicit, no gravity-wave Courant limit (Casulli & Cheng 1992).
 
-7 Tests
+8 Tests
 -------
 
 | Test | Checks |
 |---|---|
-| `test_verify_wd_depth_positivity_large_time_step_{1d,2dv}` | dam break onto a dry bed and beach at Courant number 3: limiter acts, depth $\ge 0$ in every step, clamped volume $\le 10^{-14}$ of the total, volume and mass conserved to round-off |
+| `test_verify_wd_depth_positivity_large_time_step_{1d,2dv}_{hydro,nonhydro}_{upwind1,tvd2}` | dam break onto a dry bed and beach at advective Courant number 6: the Newton iteration is needed (columns fall dry within the solve), depth $\ge 0$ in every step, clamped volume $\le 10^{-14}$ of the total, volume and mass conserved to round-off |
 | `test_verify_wd_negative_depth_is_rejected` | a state with a negative depth stops the step with a `DomainError` |
-| `test_verify_wd_volume_and_constituent_conservation_{1d,2dv}` | depth $\ge 0$ over 1000 steps of sloshing with flooding and drying |
+| `test_verify_wd_volume_and_constituent_conservation_*` | depth $\ge 0$ over 1000 steps of sloshing with flooding and drying |
+| `test_verify_wd_lake_at_rest_*` | $F(\eta^n) = 0$: no iteration, level and velocity unchanged exactly |
 
 References
 ----------
 
 - Casulli & Cheng (1992), Int. J. Numer. Methods Fluids 15, 629-648
+- Casulli (1999), A semi-implicit finite difference method for non-hydrostatic, free-surface flows, Int. J. Numer.
+  Methods Fluids 30, 425-440
+- Brugnano & Casulli (2008), Iterative solution of piecewise linear systems, SIAM J. Sci. Comput. 30, 463-472
 - Casulli (2009), A high-resolution wetting and drying algorithm for free-surface hydrodynamics, Int. J. Numer. Methods
   Fluids 60, 391-408
+- Varga (2000), Matrix Iterative Analysis, 2nd ed., Springer (irreducibly diagonally dominant M-matrices)
+- Berman & Plemmons (1994), Nonnegative Matrices in the Mathematical Sciences, SIAM (M-matrices, monotone inverse)
+- Higham (2002), Accuracy and Stability of Numerical Algorithms, 2nd ed., SIAM (summation error)
 - Stelling & Duinmeijer (2003), Int. J. Numer. Methods Fluids 43, 1329-1354
-- Higham (2002), Accuracy and Stability of Numerical Algorithms, 2nd ed., SIAM (Lemma 3.1, Sec. 4.2: summation error)

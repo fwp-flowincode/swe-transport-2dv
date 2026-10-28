@@ -40,18 +40,22 @@ all existing cases stay unchanged. Hydrostatic mode only in this issue.
 ### 2.2 Time step (semi-implicit, Casulli & Cheng 1992 with variable layer thicknesses)
 
 1. Momentum predictor on the wet face layers: advection, baroclinic pressure, viscosity, body force, damping.
-   - Advection: first-order upwind, momentum conservative (Stelling & Duinmeijer 2003), horizontal and vertical;
-     written as a sum over inflow terms, capped so the update is a convex combination (stable in thin layers).
+   - Advection: upwind, momentum conservative (Stelling & Duinmeijer 2003), horizontal and vertical; first order
+     (`upwind1`: a sum over inflow terms) or with limited MUSCL values (`tvd2`); capped so that thin layers stay stable.
    - Baroclinic pressure: p' = g * integral from z to zeta of (rho - rho0), evaluated at the nominal layer centres, so
      that a horizontally uniform stratification at rest has exactly no gradient (lake at rest with stratification).
-2. Free-surface solve for the increment of eta (tridiagonal, symmetric positive definite, face depths at time n).
-   Solving for the increment makes the lake at rest exact: its right-hand side is exactly zero.
-3. Velocity correction u = u_hat - g dt d(eta)/dx on the wet face layers.
-4. Positivity: outflow fluxes of a cell are scaled down if they would remove more than its volume (one pass; the
-   inflow only adds). eta^{n+1} is then taken from the flux divergence, so the water volume is conserved to round-off.
-   Proof (any dt), floating-point bound, run-time check and time-step conditions: `docs/depth_positivity.md`.
+2. Free-surface solve in the volume formulation of Casulli (2009): V(eta) + T eta = b with the non-negative column
+   volumes V_i = max(0, H + eta_i - z_b,i), face depths at time n, Newton's method of Brugnano & Casulli (2008) started
+   from eta^n (a lake at rest has a zero residual and stays exact). Depth positivity holds for any dt by construction
+   of the solve; proof, existence and convergence, floating-point bound and run-time check: `docs/depth_positivity.md`.
+   (Step 1 used a linear solve and an outflow limiter afterwards; replaced in step 2 because the limited velocities no
+   longer solved the discrete momentum equations.)
+3. Velocity correction u = u_hat - g dt d(eta)/dx on the wet face layers. Non-hydrostatic mode: pressure q from a
+   projection on the cells below the surface cell, its gradient added to u_hat, steps 2-3 repeated.
+4. eta^{n+1} from the flux divergence (volume conserved to round-off; equal to V(eta^{n+1}) of the solve).
 5. Vertical fluxes through the fixed interfaces from the layer continuity, using the new layer thicknesses.
-6. Constituent transport: conservative finite volumes with the same fluxes and layer volumes (first-order upwind). Cells
+6. Constituent transport: conservative finite volumes with the same fluxes and layer volumes (`upwind1`, or `tvd2`:
+   flux-limited Lax-Wendroff with the Courant number of the cut cell). Cells
    that empty pass their residual mass to the column; values outside the initial bounds (possible in thin cells)
    are clipped and the clipped mass is redistributed, so the transport stays exactly conservative. No global mass
    correction.
@@ -63,8 +67,8 @@ forcing.
 
 ### 2.4 Not supported with wetting and drying (rejected with a clear error)
 
-Non-hydrostatic mode, periodic x, vegetation, k-epsilon, bed roughness, wind stress, the second-order momentum
-advection (`momentum_advection_scheme` must be "upwind1"). Candidates for later steps, see section 5.
+Periodic x, vegetation, k-epsilon, bed roughness, wind stress. Candidates for later steps, see section 6.
+(Non-hydrostatic mode and `tvd2`: supported since step 2.)
 
 3 Reference solutions and tests (`test/test_wetting_drying.jl`)
 ---------------------------------------------------------------
@@ -121,11 +125,33 @@ Experiments of section 4: done, `experiments/wetting_drying/` (README, figures, 
 Decided in review (2026-10-28): non-hydrostatic wetting and drying and the `tvd2` momentum and transport schemes are
 part of this issue (step 2). Still to do: the documentation in `test/TESTS_TECHNICAL_DOCUMENTATION.md`.
 
-6 Out of scope (proposed for later)
+6 Status (step 2, 2026-10-28)
+----------------------------
+
+- **Depth positivity inside the solve** (review request): the free surface is solved in the volume formulation of
+  Casulli (2009) with the Newton method of Brugnano & Casulli (2008); the outflow limiter of step 1 is removed. Proof
+  in `docs/depth_positivity.md`. In all validation cases the solve takes one Newton iteration per step (the former linear
+  solve, results unchanged); at advective Courant numbers >= 6 in the dam-break positivity test, 2-4 iterations, depths
+  >= 0, clamped round-off volume <= 3e-16 m^2.
+- **tvd2** for momentum (limited MUSCL values in the momentum-conservative form, including the outflow-side terms,
+  which the first-order form does not have) and transport (flux-limited Lax-Wendroff). Ritter at dx = 0.25 m: 1D L1
+  0.51 % (upwind1 0.91 %), front 5.6 % (11.3 %); 2DV L1 0.80 % (0.89 %), layer-velocity spread 0.18 m/s (0.29 m/s), front
+  11.3 % (10.3 %, one cell). Carrier-Greenspan shoreline 13.6 mm (14.6 mm) at dx = 0.1 m; surface error 3.8 mm (3.3 mm).
+- **Non-hydrostatic** (`use_hydrostatic=false`): w predictor, pressure q on the wet cells below the surface cell (q = 0
+  there), sparse Cholesky each step, gradient added to the predictor and the free-surface solve repeated. Standing wave
+  at k H = pi/2: period error 1.75 %, 0.89 %, 0.45 % on 40 x 20, 80 x 40, 160 x 80 cells (first order) against
+  omega^2 = g k tanh(k H) (the shallow-water period is 24 % shorter). Ritter and Carrier-Greenspan in 2DV within the same
+  targets as hydrostatic. Lake at rest exact, conservation to round-off.
+- **2DV layer-velocity spread** (open): converges at first order in dx (mean 0.075, 0.043, 0.023, 0.012 m/s for dx = 0.5
+  ... 0.0625 m, upwind1) and grows with nz. A column-consistent weighting of the advection (each layer with the 1D
+  Stelling-Duinmeijer weight) was tried and was much worse (spread 3.8 m/s); not adopted.
+
+7 Out of scope (proposed for later)
 -----------------------------------
 
-- Non-hydrostatic wetting and drying (the projection on a changing wet domain).
-- Second-order momentum advection near the wet/dry front.
+- Second-order momentum advection at the wet/dry front itself (tvd2 falls back to first order next to dry faces).
+- A non-hydrostatic surface condition at the free surface itself instead of q = 0 in the surface cell (first order in
+  the surface-cell thickness).
 - Bed friction (Manning / log law) on the lowest wet layer, needed for laboratory runup cases.
 - Energy-head conserving advection at contractions (Stelling & Duinmeijer 2003), for flow over weirs.
 
