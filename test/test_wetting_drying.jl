@@ -69,6 +69,75 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         @test Model(wd_config(nx=20, nz=4; wd_variant_kwargs(WD_VARIANTS[end])...)) isa Model
     end
 
+    @testset "test_verify_wd_cut_cell_output_masking" begin
+        cfg = wd_config(nx=2, nz=2, depth=1.0)
+        cfg.bed_level = [0.25, 0.0]
+        model = Model(cfg)
+        initialize_water_level!(model, [0.4, 0.0]; rho=1000.0)
+        field = ones(cfg.nz, cfg.nx)
+        masked = SweTransport2DV._blank_solid_cells(field, cfg; eta=model.state.eta)
+        @test isfinite(masked[1, 1])
+        @test isnan(masked[2, 1])
+        @test all(isnan, masked[:, 2])
+    end
+
+    @testset "test_verify_wd_boundary_profiles_and_wet_flux" begin
+        cfg = wd_config(nx=2, nz=1, depth=2.0, dt=0.001)
+        cfg.bed_level = fill(0.2, cfg.nx)
+        model = Model(cfg)
+        initialize_water_level!(model, 0.7; rho=1000.0)
+        set_x_inflow_outflow!(model, t -> 1.0)
+        set_x_inflow_outflow!(model, [1.0]; open_right=false)
+        @test model.wetdry.left_velocity === nothing
+        step_forward!(model)
+        @test isapprox(compute_diagnostics(model)["boundary_flux"], -0.5; atol=1e-12)
+
+        vector_callback_model = Model(wd_config(nx=4, nz=2))
+        set_x_inflow_outflow!(vector_callback_model, t -> [1.0])
+        @test_throws ArgumentError step_forward!(vector_callback_model)
+        right_profile_model = Model(wd_config(nx=4, nz=2))
+        set_x_inflow_outflow!(right_profile_model, t -> 0.0; right_profile=[0.0])
+        @test_throws ArgumentError step_forward!(right_profile_model)
+    end
+
+    @testset "test_verify_wd_float32_dry_columns" begin
+        cfg = wd_config(nx=6, nz=2, depth=1.0, dt=0.001)
+        cfg.bed_level = fill(0.2, cfg.nx)
+        model = Model(cfg; T=Float32)
+        initialize_water_level!(model, [0.2, 0.2, 0.21, 0.25, 0.3, 0.35]; rho=1000.0)
+        @test all(>=(0.0), water_depth(model))
+        for _ in 1:5
+            step_forward!(model)
+        end
+        @test all(>=(0.0), water_depth(model))
+        @test all(isfinite, model.state.eta)
+    end
+
+    @testset "test_verify_wd_pressure_components_include_nonhydrostatic_correction" begin
+        cfg = wd_config(nx=20, nz=4, depth=1.0, dt=0.001, use_hydrostatic=false)
+        model = Model(cfg)
+        initialize_water_level!(model, 1.0 .+ 0.02 .* sin.(range(0, pi, length=cfg.nx)); rho=1000.0)
+        step_forward!(model)
+        p_hydro, p_corr, buoy_w = pressure_buoyancy_components(model)
+        @test p_hydro == model.last_p_hydro
+        @test p_corr == model.last_p_corr
+        @test isapprox(p_hydro .+ p_corr, model.state.p; atol=1e-10, rtol=1e-10)
+        @test maximum(abs, p_corr) > 0.0
+        @test size(buoy_w) == (cfg.nz - 1, cfg.nx)
+    end
+
+    @testset "test_verify_wd_nz1_pressure_diagnostics_output" begin
+        mktempdir() do output_dir
+            cfg = wd_config(nx=8, nz=1, depth=2.0, nt=1, output_dir=output_dir,
+                write_plots=false, write_animation=false, write_pressure_buoyancy_diagnostics=true)
+            cfg.bed_level = fill(0.2, cfg.nx)
+            model = Model(cfg)
+            run!(model)
+            @test isfile(joinpath(output_dir, "pressure_buoyancy_diagnostics.png"))
+            @test isfile(joinpath(output_dir, "pressure_buoyancy_diagnostics.npz"))
+        end
+    end
+
     # Bed for the lake at rest (m above the grid bottom): a beach rising above the still water level on the right, an
     # island and a submerged bump; none of the levels is a whole number of cells.
     function lake_bed(cfg)

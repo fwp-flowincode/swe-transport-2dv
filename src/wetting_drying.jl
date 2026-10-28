@@ -11,7 +11,7 @@
 # WetDryState / Model, and neighbour indices (f-1, f+1, k-1, k+1) are guarded by the loop ranges or explicit checks.
 
 const WD_EMPTY_CELL_THICKNESS = 1e-12   # m, a cell thinner than this is empty for the constituent transport
-const WD_NEWTON_RTOL = 1e-13          # -, Newton stops when |F_i| <= WD_NEWTON_RTOL * (magnitudes in F_i) for all i
+const WD_NEWTON_RTOL = 1e-13          # -, minimum relative Newton stopping tolerance
 const WD_NEWTON_EXTRA_ITERATIONS = 10 # -, iterations allowed beyond the nx + 1 of the finite-termination bound
 # -, safety factor on the round-off bound gamma_m S, m = 2 nz + 8, of a computed depth (docs/depth_positivity.md, section 5);
 # a depth below -WD_POSITIVITY_ROUNDOFF_FACTOR gamma_m S stops the run
@@ -104,10 +104,10 @@ end
 
 _wd_level(model::Model, i::Int) = model.config.depth + model.state.eta[i]   # m, water level zeta of column i
 
-# Surface elevation eta (m) of a dry column: the smallest float with fl(depth + eta) >= zb, so that the computed depth
-# zeta - zb is exactly >= 0 (eta = zb - depth alone can round to one ulp below the bed).
-function _wd_dry_eta(depth::Real, zb::Real)
-    eta = zb - depth
+# Surface elevation eta (m) of a dry column: the smallest state-type float with fl(depth + eta) >= zb, so that the
+# computed depth zeta - zb is exactly >= 0 (eta = zb - depth alone can round to one ulp below the bed).
+function _wd_dry_eta(depth::Real, zb::Real, ::Type{T}) where {T<:AbstractFloat}
+    eta = T(zb - depth)
     while depth + eta < zb
         eta = nextfloat(eta)
     end
@@ -142,7 +142,7 @@ function initialize_water_level!(model::Model, level::Union{Real,AbstractVector{
     levels = level isa Real ? fill(float(level), cfg.nx) : collect(float.(level))
     length(levels) == cfg.nx || throw(ArgumentError("level must have nx = $(cfg.nx) entries"))
     @inbounds for i in 1:cfg.nx
-        st.eta[i] = levels[i] > wd.bed[i] ? levels[i] - cfg.depth : _wd_dry_eta(cfg.depth, wd.bed[i])
+        st.eta[i] = levels[i] > wd.bed[i] ? levels[i] - cfg.depth : _wd_dry_eta(cfg.depth, wd.bed[i], eltype(st.eta))
     end
     if rho isa Real
         fill!(st.rho, rho)
@@ -163,7 +163,7 @@ function _wd_clamp_to_bed!(model::Model)
     wd = model.wetdry
     @inbounds for i in eachindex(model.state.eta)
         if model.config.depth + model.state.eta[i] < wd.bed[i]
-            model.state.eta[i] = _wd_dry_eta(model.config.depth, wd.bed[i])
+            model.state.eta[i] = _wd_dry_eta(model.config.depth, wd.bed[i], eltype(model.state.eta))
         end
     end
     return nothing
@@ -295,7 +295,20 @@ end
 # the tendency next to a closed face).
 # WHY the cap: with C = dt * (sum of the inflow coefficients), the tendency is scaled by 1/C where C > 1; for upwind1 this
 # keeps the update a convex combination of the neighbours (thin layers stay stable).
-function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, second::Bool)
+# Depth-integrated cell and face thicknesses used by every layer of the advection tendency at face f.
+function _wd_advection_depth_totals(wd::WetDryState, f::Int)
+    Hbar = 0.0
+    HtL = 0.0
+    HtR = 0.0
+    @inbounds for kk in axes(wd.h, 1)
+        Hbar += 0.5 * (wd.h[kk, f - 1] + wd.h[kk, f])
+        HtL += 0.5 * (wd.hf[kk, f - 1] + wd.hf[kk, f])
+        HtR += 0.5 * (wd.hf[kk, f] + wd.hf[kk, f + 1])
+    end
+    return Hbar, HtL, HtR
+end
+
+function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, second::Bool, depth_totals)
     u = model.state.u
     W = model.state.w
     nz = model.config.nz
@@ -311,14 +324,7 @@ function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, s
     tend = 0.0   # m/s^2
     @inbounds begin
         # advective velocities of cells L and R (m/s)
-        Hbar = 0.0
-        HtL = 0.0
-        HtR = 0.0
-        for kk in 1:nz
-            Hbar += 0.5 * (wd.h[kk, L] + wd.h[kk, R])
-            HtL += 0.5 * (wd.hf[kk, f - 1] + wd.hf[kk, f])
-            HtR += 0.5 * (wd.hf[kk, f] + wd.hf[kk, f + 1])
-        end
+        Hbar, HtL, HtR = depth_totals
         htL = 0.5 * (wd.hf[k, f - 1] + wd.hf[k, f])
         htR = 0.5 * (wd.hf[k, f] + wd.hf[k, f + 1])
         aL = htL > 0.0 ? 0.5 * (wd.q[k, f - 1] + wd.q[k, f]) / htL * HtL / Hbar : 0.0
@@ -372,6 +378,9 @@ function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, s
     return dt * csum > 1.0 ? tend / (dt * csum) : tend
 end
 
+_wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, second::Bool) =
+    _wd_advection_tendency(model, wd, k, f, second, _wd_advection_depth_totals(wd, f))
+
 # Implicit vertical viscosity nu (m^2/s) on the wet layers of face f (Thomas algorithm), zero stress at bed and surface:
 #   hf_k (u_k - uhat_k)/dt = nu (u_{k+1} - u_k)/dz_{k+1/2} - nu (u_k - u_{k-1})/dz_{k-1/2},  dz_{k+1/2} = (hf_k + hf_{k+1})/2.
 # WHY implicit: the cut layers at the bed and the surface can be arbitrarily thin.
@@ -408,12 +417,18 @@ end
 function _wd_boundary_velocities!(model::Model, wd::WetDryState, u::AbstractMatrix{<:Real}, t::Real)
     nz, nxp1 = size(u)
     left = wd.left_velocity !== nothing ? wd.left_velocity(t) : model.x_boundary_u_left_profile
+    if left !== nothing && !(left isa Real)
+        left isa AbstractVector || throw(ArgumentError("left boundary velocity must be a scalar or vector"))
+        length(left) == nz || throw(ArgumentError("left boundary velocity length must match nz"))
+    end
+    right_profile = model.x_boundary_u_right_profile
+    right_profile === nothing || length(right_profile) == nz || throw(ArgumentError("right outflow profile length must match nz"))
     @inbounds for k in 1:nz
         wet_left = wd.hf[k, 1] > 0.0
         u[k, 1] = (left === nothing || !wet_left) ? 0.0 : (left isa Real ? left : left[k])
         wet_right = wd.hf[k, nxp1] > 0.0
-        if model.x_boundary_u_right_profile !== nothing && wet_right
-            u[k, nxp1] = model.x_boundary_u_right_profile[k]
+        if right_profile !== nothing && wet_right
+            u[k, nxp1] = right_profile[k]
         elseif model.x_boundary_u_right_open && wet_right
             u[k, nxp1] = u[k, nxp1 - 1]
         else
@@ -425,11 +440,12 @@ end
 
 # Tolerance (m) of the depth of column i (docs/depth_positivity.md, section 5): the final residual |F_i| of the
 # free-surface solve (the flux-derived depth equals V_i(eta) - F_i) plus WD_POSITIVITY_ROUNDOFF_FACTOR * gamma_m * S with
-# gamma_m = m eps / (1 - m eps), m = 2 nz + 8 (rounding steps of the continuity update) and
-# S = depth + |eta^n| + |eta^{n+1}| + |z_b| + O_i (m) the magnitudes that enter it (Higham 2002, Lemma 3.1 and Sec. 4.2).
+# gamma_m = m eps(T) / (1 - m eps(T)), T the state type, and m = 2 nz + 8 (rounding steps of the continuity update).
+# S = depth + |eta^n| + |eta^{n+1}| + |z_b| + O_i are the magnitudes that enter it (Higham 2002, Lemma 3.1 and Sec. 4.2).
 function _wd_depth_roundoff(model::Model, wd::WetDryState, i::Int)
     m = 2 * model.config.nz + 8
-    gamma = m * eps(Float64) / (1 - m * eps(Float64))
+    machine_eps = eps(eltype(wd.h))
+    gamma = m * machine_eps / (1 - m * machine_eps)
     S = model.config.depth + abs(model.ws.eta_old[i]) + abs(model.state.eta[i]) + abs(wd.bed[i]) + wd.outflow[i]
     return abs(wd.rhs[i]) + WD_POSITIVITY_ROUNDOFF_FACTOR * gamma * S
 end
@@ -509,9 +525,9 @@ thicknesses of time n. Newton's method with the right derivative p_i = 1 if H + 
 
 where P(eta^0) = I (all depths >= 0), so the first matrix is non-singular. Because V is convex, the iterates m >= 1 are
 upper bounds of the solution and decrease monotonically, and the iteration ends with F = 0 after at most nx + 1 steps
-(exact arithmetic); WD_NEWTON_RTOL is the round-off stopping test. The velocities are then corrected with the solved
-eta (step 4), and their flux divergence reproduces V(eta^{n+1}) >= 0: depth positivity and volume conservation hold
-for any dt without changing the solution afterwards.
+(exact arithmetic); the stopping tolerance is max(WD_NEWTON_RTOL, eps(T)) for state type T. The velocities are then
+corrected with the solved eta (step 4), and their flux divergence reproduces V(eta^{n+1}) >= 0: depth positivity and
+volume conservation hold for any dt without changing the solution afterwards.
 For a lake at rest F(eta^n) = 0 exactly: no iteration, eta unchanged. The solved eta of a column that falls dry lies at
 or below its bed (only V = 0 matters); `_wd_update_level_from_fluxes!` stores it as an exactly dry level.
 """
@@ -547,7 +563,7 @@ function _wd_free_surface_solve!(model::Model, wd::WetDryState)
             Tr = a[i + 1] * (eta[i] - (i < nx ? eta[i + 1] : 0.0))
             F[i] = V + Tl + Tr - b[i]
             scale = H + V + abs(b[i]) + abs(Tl) + abs(Tr)   # m, magnitudes that enter F_i (round-off scale)
-            abs(F[i]) <= WD_NEWTON_RTOL * scale || (converged = false)
+            abs(F[i]) <= max(WD_NEWTON_RTOL, eps(eltype(wd.h))) * scale || (converged = false)
         end
         converged && break
         iterations += 1
@@ -623,7 +639,7 @@ function _wd_update_level_from_fluxes!(model::Model, wd::WetDryState)
                 throw(DomainError(depth, @sprintf("negative water depth %.3e m in column %d after the free-surface solve (outflow %.3e m); this violates the positivity of the solve (docs/depth_positivity.md)",
                     depth, i, wd.outflow[i])))
             end
-            st.eta[i] = _wd_dry_eta(cfg.depth, wd.bed[i])
+            st.eta[i] = _wd_dry_eta(cfg.depth, wd.bed[i], eltype(st.eta))
             wd.clamped_volume += (_wd_level(model, i) - wd.bed[i] - depth) * dx
         end
         ws.eta_t[i] = (st.eta[i] - ws.eta_old[i]) / dt
@@ -840,9 +856,10 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     second_order_momentum = cfg.momentum_advection_scheme == "tvd2"
     damp = cfg.rayleigh_damping > 0.0 ? max(0.0, 1.0 - cfg.rayleigh_damping * dt) : 1.0
     @inbounds for f in 2:nx
+        depth_totals = _wd_advection_depth_totals(wd, f)
         for k in 1:nz
             if wd.hf[k, f] > 0.0
-                tend = _wd_advection_tendency(model, wd, k, f, second_order_momentum) - (wd.p_anom[k, f] - wd.p_anom[k, f - 1]) / (cfg.rho0 * dx) + cfg.body_force_x
+                tend = _wd_advection_tendency(model, wd, k, f, second_order_momentum, depth_totals) - (wd.p_anom[k, f] - wd.p_anom[k, f - 1]) / (cfg.rho0 * dx) + cfg.body_force_x
                 ws.u_hat[k, f] = damp * (st.u[k, f] + dt * tend)
             else
                 ws.u_hat[k, f] = 0.0
@@ -894,14 +911,19 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     _wd_transport_density!(model, wd)
     wd.time += dt
 
-    # hydrostatic pressure (diagnostic): p = rho0 g (zeta - z_c) + p' in the wet cells
+    # Hydrostatic and non-hydrostatic pressure components in the wet cells.
     copyto!(wd.h, wd.h_new)
     _wd_baroclinic_pressure!(model, wd)
     @inbounds for i in 1:nx, k in 1:nz
-        st.p[k, i] = wd.h[k, i] > 0.0 ? cfg.rho0 * g * (_wd_level(model, i) - (k - 0.5) * model.dz) + wd.p_anom[k, i] : 0.0
+        p_hydro = wd.h[k, i] > 0.0 ? cfg.rho0 * g * (_wd_level(model, i) - (k - 0.5) * model.dz) + wd.p_anom[k, i] : 0.0
+        p_corr = cfg.use_hydrostatic ? 0.0 : wd.q_nh[k, i]
+        model.last_p_hydro[k, i] = p_hydro
+        model.last_p_corr[k, i] = p_corr
+        st.p[k, i] = p_hydro + p_corr
     end
-    copyto!(model.last_p_hydro, st.p)
     cfg.use_hydrostatic && (model.last_nonhydro_pcorr_max = 0.0)
+    @views @. ws.rho_w = 0.5 * (st.rho[2:end, :] + st.rho[1:end-1, :])
+    buoyancy!(model.last_buoy_w, ws.rho_w, model.rho_0_w_2d)
     return nothing
 end
 

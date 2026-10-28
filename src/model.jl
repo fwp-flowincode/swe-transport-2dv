@@ -748,6 +748,7 @@ function set_x_inflow_outflow!(
     open_right::Bool=true,
     right_profile::Union{Nothing,AbstractVector{<:Real}}=nothing,
 )
+    model.wetdry === nothing || (model.wetdry.left_velocity = nothing)
     model.x_boundary_u_left_profile = collect(left_profile)
     model.x_boundary_u_right_open = open_right
     model.x_boundary_u_right_profile = right_profile === nothing ? nothing : collect(right_profile)
@@ -918,7 +919,9 @@ function compute_diagnostics(model::Model)
         "froude" => froude_number(st.u, st.rho, cfg.rho0, cfg.g, cfg.depth),
         "water_volume" => model.wetdry === nothing ? water_volume(cfg.depth, st.eta, model.dx) - sum(model.geometry.bed_level) * model.dx : sum(water_depth(model)) * model.dx,
         "constituent_mass" => _constituent_mass(model),
-        "boundary_flux" => boundary_normal_flux(st.u, st.w, model.dx, model.dz),
+        "boundary_flux" => model.wetdry === nothing ?
+            boundary_normal_flux(st.u, st.w, model.dx, model.dz) :
+            -sum(@view model.wetdry.q[:, 1]) + sum(@view model.wetdry.q[:, end]),
         "div_max" => maximum(abs, div),
         "div_mean_abs" => mean(abs, div),
         "rho_min" => minimum(st.rho),
@@ -1005,6 +1008,10 @@ end
 function pressure_buoyancy_components(model::Model)
     st = model.state
     cfg = model.config
+
+    if model.wetdry !== nothing
+        return copy(model.last_p_hydro), copy(model.last_p_corr), copy(model.last_buoy_w)
+    end
 
     p_hydro = solve_hydrostatic_pressure(st.p, st.rho, cfg.g, model.dz; top_half_layer=use_variable_top_layer(cfg))
     p_corr = cfg.use_hydrostatic ? zeros(size(st.p)) : (st.p .- p_hydro)
