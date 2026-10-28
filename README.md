@@ -87,8 +87,9 @@ clockwise cell in the upper layer and a counter-rotating cell in the lower layer
 Folder layout
 -------------
 - `src/`: Julia package source.
-- `test/`: test suite (`runtests.jl`, which includes one `test_*.jl` file per functional area) and technical
-  documentation (`TESTS_TECHNICAL_DOCUMENTATION.md`).
+- `test/`: test suite (`runtests.jl`, which includes one `test_*.jl` file per functional area).
+- `docs/`: technical documentation of the methods and tests (`TESTS_TECHNICAL_DOCUMENTATION.md`), plans of the issues,
+  the depth-positivity proof of the wetting-drying scheme (`depth_positivity.md`) and the validation catalogue.
 - `experiments/`: one folder per experiment (scripts, README, `figures/`), plus `validation/`,
   `benchmarks/` and `common/`.
 - `analysis/`: Python evaluation tools, e.g. `analysis/lock_exchange/` (bulk reference values and
@@ -110,7 +111,7 @@ julia --project=. -e "using Pkg; Pkg.test()"
 ```
 
 Technical test documentation:
-- `test/TESTS_TECHNICAL_DOCUMENTATION.md`
+- `docs/TESTS_TECHNICAL_DOCUMENTATION.md`
 
 Run experiments
 ---------------
@@ -166,7 +167,7 @@ has no layer removal; `wetting_drying=true` lets the surface cross layers and co
 surface excursion relative to dz, such as the surface dam break or a large-amplitude forced wave; the affected experiment/
 validation scripts already do this (see the `variable_top_layer=false` comments there). Force it on for a specific case with
 `variable_top_layer=true` (rejected for `use_hydrostatic=false`). Details, the full per-step formulation and limitations: section
-13 of `test/TESTS_TECHNICAL_DOCUMENTATION.md`.
+13 of `docs/TESTS_TECHNICAL_DOCUMENTATION.md`.
 
 Non-hydrostatic free surface
 -----------------------------
@@ -179,7 +180,7 @@ it already did in hydrostatic mode, with no change to either mode's continuity/k
 By default this does NOT make free-surface gravity waves dispersive: a pure surface wave (uniform density, so no baroclinic
 forcing) still follows the shallow-water relation `T = 2L/sqrt(gH)`, not the full `omega^2 = g*k*tanh(k*H)` relation, because the
 barotropic surface force is applied outside the elliptic (non-hydrostatic) solve rather than coupled into it as a Dirichlet
-condition. Details: section 14 of `test/TESTS_TECHNICAL_DOCUMENTATION.md`.
+condition. Details: section 14 of `docs/TESTS_TECHNICAL_DOCUMENTATION.md`.
 
 Set `ModelConfig(nonhydro_surface_dirichlet=true, pressure_solver_method="sparse")` (non-hydrostatic mode only) to fix this: the
 pressure correction's top condition becomes Dirichlet `p'=0` instead of Neumann, and the resulting surface waves are genuinely
@@ -189,7 +190,7 @@ spectral one cannot represent a Dirichlet condition) and is implemented for the 
 1500x200 grid took about 1.9 s to factorize once and about 0.095 s per step for the pressure solve alone, comparable to or exceeding
 a full spectral-method step's total cost. Details, the physical derivation, and a second defect found and fixed while validating
 this (a "trivial" reference-density pressure contribution that otherwise dominates the correction's magnitude): section 15 of
-`test/TESTS_TECHNICAL_DOCUMENTATION.md`.
+`docs/TESTS_TECHNICAL_DOCUMENTATION.md`.
 
 Plotting backend note
 ---------------------

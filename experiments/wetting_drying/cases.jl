@@ -55,8 +55,8 @@ end
 
 Lake at rest over `lake_bed`; with `stratified` a two-layer density in z (interface at half the still water depth).
 """
-function lake_model(nz::Int; stratified::Bool=false, nx::Int=200, dt::Real=0.05)
-    cfg = wd_experiment_config(length=LAKE_LENGTH, depth=LAKE_GRID_DEPTH, nx=nx, nz=nz, dt=dt)
+function lake_model(nz::Int; stratified::Bool=false, nx::Int=200, dt::Real=0.05, kwargs...)
+    cfg = wd_experiment_config(; length=LAKE_LENGTH, depth=LAKE_GRID_DEPTH, nx=nx, nz=nz, dt=dt, kwargs...)
     cfg.bed_level = lake_bed(cfg)
     model = Model(cfg)
     dz = cfg.depth / cfg.nz
@@ -74,13 +74,15 @@ const RITTER_DT_DX = 0.01        # s/m, time step per grid spacing (CFL u dt/dx 
 const RITTER_FRONT_DEPTH = 0.01  # m, depth that marks the front
 
 """
-    ritter_model(nx, nz) -> Model
+    ritter_model(nx, nz; scheme="upwind1", kwargs...) -> Model
 
-Dam at RITTER_X0 with depth RITTER_H0 behind it and a dry, flat, frictionless bed in front of it.
+Dam at RITTER_X0 with depth RITTER_H0 behind it and a dry, flat, frictionless bed in front of it. `scheme` sets the
+momentum and the transport advection; `kwargs` override other configuration fields (e.g. use_hydrostatic=false).
 """
-function ritter_model(nx::Int, nz::Int)
+function ritter_model(nx::Int, nz::Int; scheme::AbstractString="upwind1", kwargs...)
     dx = RITTER_LENGTH / nx
-    cfg = wd_experiment_config(length=RITTER_LENGTH, depth=RITTER_GRID_DEPTH, nx=nx, nz=nz, dt=RITTER_DT_DX * dx)
+    cfg = wd_experiment_config(; length=RITTER_LENGTH, depth=RITTER_GRID_DEPTH, nx=nx, nz=nz, dt=RITTER_DT_DX * dx,
+        momentum_advection_scheme=scheme, transport_advection_scheme=scheme, kwargs...)
     model = Model(cfg)
     initialize_water_level!(model, [x < RITTER_X0 ? RITTER_H0 : 0.0 for x in wd_x_centres(cfg)]; rho=WD_RHO0)
     return model
@@ -113,13 +115,14 @@ cg_offshore(x::Real) = CG_LENGTH - x
 cg_runup_amplitude() = CG_AMPLITUDE / 4 * CG_SLOPE * CG_LENGTH
 
 """
-    cg_model(nx, nz, dt) -> (model, t0)
+    cg_model(nx, nz, dt; scheme="upwind1", kwargs...) -> (model, t0)
 
 Planar beach, started at the phase of maximum runup (u = 0 everywhere, analytical time t0 in s) and forced by the
 analytical velocity at the offshore (left) boundary. Model time t corresponds to analytical time t0 + t.
 """
-function cg_model(nx::Int, nz::Int, dt::Real)
-    cfg = wd_experiment_config(length=CG_LENGTH + CG_ONSHORE, depth=CG_GRID_DEPTH, nx=nx, nz=nz, dt=dt)
+function cg_model(nx::Int, nz::Int, dt::Real; scheme::AbstractString="upwind1", kwargs...)
+    cfg = wd_experiment_config(; length=CG_LENGTH + CG_ONSHORE, depth=CG_GRID_DEPTH, nx=nx, nz=nz, dt=dt,
+        momentum_advection_scheme=scheme, transport_advection_scheme=scheme, kwargs...)
     x = wd_x_centres(cfg)
     cfg.bed_level = @. CG_STILL_LEVEL - CG_SLOPE * cg_offshore(x)
     model = Model(cfg)
@@ -161,8 +164,9 @@ Closed basin with a parabolic bed rising above the water on both sides; the surf
 water sloshes, floods the right beach and drains again. Two water masses of different density (left / right) with a
 weak stratification.
 """
-function sloshing_model(nz::Int; nx::Int=160, dt::Real=0.02)
-    cfg = wd_experiment_config(length=SLOSH_LENGTH, depth=SLOSH_GRID_DEPTH, nx=nx, nz=nz, dt=dt)
+function sloshing_model(nz::Int; nx::Int=160, dt::Real=0.02, scheme::AbstractString="upwind1", kwargs...)
+    cfg = wd_experiment_config(; length=SLOSH_LENGTH, depth=SLOSH_GRID_DEPTH, nx=nx, nz=nz, dt=dt,
+        momentum_advection_scheme=scheme, transport_advection_scheme=scheme, kwargs...)
     x = wd_x_centres(cfg)
     L = cfg.length
     cfg.bed_level = @. 0.013 + 1.6 * ((x - 0.5L) / (0.5L))^2
@@ -172,4 +176,77 @@ function sloshing_model(nz::Int; nx::Int=160, dt::Real=0.02)
     rho = [(x[i] < 0.4L ? SLOSH_RHO_DENSE : WD_RHO0) + ((k - 0.5) * dz < 0.5 ? SLOSH_RHO_BOTTOM : 0.0) for k in 1:nz, i in 1:nx]
     initialize_water_level!(model, level; rho=rho)
     return model
+end
+
+# ---- Manufactured solution for the momentum advection (depth-uniform velocity) ---------------------------------------
+# A depth-uniform u(x) under a surface zeta(x) that crosses several layer interfaces, with the interface fluxes W from the
+# discrete layer continuity; hydrostatic theory gives the same tendency -u du/dx in every layer. Mirrored by
+# test_verify_wd_advection_depth_uniform_mms_* (docs/TESTS_TECHNICAL_DOCUMENTATION.md).
+const MMS_LENGTH = 100.0        # m
+const MMS_GRID_DEPTH = 1.2      # m
+const MMS_LAYER_MIN = 1e-3      # m, face layers thinner than this are left out
+mms_zeta(x) = 0.6 + 0.3 * (1 - tanh((x - 50) / 15))    # m, from 1.2 m down to 0.6 m
+mms_u(x) = 1.0 + 2.0 * tanh((x - 50) / 15)             # m/s, changes sign
+mms_dudx(x) = 2.0 / 15 * (1 - tanh((x - 50) / 15)^2)   # 1/s
+
+"""
+    mms_advection_state(nx, nz) -> (model, x_faces)
+
+Model in the manufactured state: geometry, discharges and interface fluxes set as in the time step.
+"""
+function mms_advection_state(nx::Int, nz::Int)
+    cfg = wd_experiment_config(length=MMS_LENGTH, depth=MMS_GRID_DEPTH, nx=nx, nz=nz, dt=0.001)
+    model = Model(cfg)
+    wd = model.wetdry
+    dx = model.dx
+    xf = [(f - 1) * dx for f in 1:(nx + 1)]
+    model.state.eta .= mms_zeta.(wd_x_centres(cfg)) .- cfg.depth
+    for f in 2:nx, k in 1:nz
+        model.state.u[k, f] = mms_u(xf[f])
+    end
+    SweTransport2DV._wd_cell_thicknesses!(wd.h, model, wd)
+    SweTransport2DV._wd_face_thicknesses!(model, wd)
+    model.state.u .*= wd.hf .> 0.0
+    wd.q .= wd.hf .* model.state.u
+    fill!(model.state.w, 0.0)
+    for i in 1:nx
+        zeta_t = -(sum(@view wd.q[:, i + 1]) - sum(@view wd.q[:, i])) / dx
+        s = findlast(>(0.0), @view wd.h[:, i])
+        for k in 1:nz
+            model.state.w[k + 1, i] = model.state.w[k, i] - ((k == s ? zeta_t : 0.0) + (wd.q[k, i + 1] - wd.q[k, i]) / dx)
+        end
+    end
+    return model, xf
+end
+
+# First-order tendency with the layer-wise weights qbar_k / hbar_k of the first version (horizontal part; the vertical part
+# vanishes for a depth-uniform u), kept for the comparison figure.
+function mms_layerwise_tendency(model::Model, k::Int, f::Int)
+    wd = model.wetdry
+    u = model.state.u
+    hbar = 0.5 * (wd.h[k, f - 1] + wd.h[k, f])
+    hbar > 1e-12 || return 0.0
+    tend = 0.0
+    ql = 0.5 * (wd.q[k, f - 1] + wd.q[k, f])
+    ql > 0.0 && (tend += ql / (model.dx * hbar) * (u[k, f - 1] - u[k, f]))
+    qr = 0.5 * (wd.q[k, f] + wd.q[k, f + 1])
+    qr < 0.0 && (tend += -qr / (model.dx * hbar) * (u[k, f + 1] - u[k, f]))
+    return tend
+end
+
+"""
+    mms_advection_tendencies(nx, nz; method) -> (x_faces, tendency nz x (nx+1) (NaN where left out), exact)
+
+method: "upwind1", "tvd2" (the model kernel) or "layerwise" (the first-version weights, upwind1).
+"""
+function mms_advection_tendencies(nx::Int, nz::Int; method::AbstractString="upwind1")
+    model, xf = mms_advection_state(nx, nz)
+    wd = model.wetdry
+    tend = fill(NaN, nz, nx + 1)
+    for f in 3:(nx - 1), k in 1:nz
+        wd.hf[k, f] > MMS_LAYER_MIN || continue
+        tend[k, f] = method == "layerwise" ? mms_layerwise_tendency(model, k, f) :
+            SweTransport2DV._wd_advection_tendency(model, wd, k, f, method == "tvd2")
+    end
+    return xf, tend, [-mms_u(x) * mms_dudx(x) for x in xf]
 end

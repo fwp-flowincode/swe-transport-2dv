@@ -65,15 +65,13 @@ The time step is dt = 0.01 s/m * dx (Courant number about 0.06).
 
 The depth converges at first order (L1 error 2.1 %, 1.4 %, 0.9 %, 0.6 %, 0.3 % from dx = 1 m to 1/16 m). The thin tip of
 the rarefaction (h proportional to (x_f - x)^2) lags by numerical diffusion: the position of h = 1 cm is 11 % of the
-travelled distance behind at dx = 0.25 m and 5 % at dx = 1/16 m. 2DV and 1D agree within 1 %.
+travelled distance behind at dx = 0.25 m and 5 % at dx = 1/16 m. 2DV and 1D give the same depth to the printed digits
+(the 2DV front differs by one cell at dx = 0.125 m).
 
 ![Ritter convergence](figures/ritter_convergence.png)
 
-Velocity in 2DV (400 x 12 cells). Hydrostatic theory keeps u uniform over the depth; the model does so where the surface
-has not crossed a layer interface, but where it has dropped through several layers the upper layers lag (at t = 5 s up to
-0.29 m/s, 6 % of the largest velocity; e.g. 3.40 m/s at the bed and 3.20 m/s in the top layer at x = 50 m). The depth is
-hardly affected (within 1 % of 1D). This is an open point of the momentum advection in the draining surface layer (see
-the plan):
+Velocity in 2DV (400 x 12 cells). Hydrostatic theory keeps u uniform over the depth; the layer velocities differ by at
+most 0.0013 m/s at t = 5 s (first-order convergent; a first version had 0.29 m/s, see "Depth-uniform velocity" below):
 
 ![Ritter 2DV](figures/ritter_2dv.gif)
 
@@ -89,8 +87,8 @@ forced by the analytical velocity at the offshore boundary (20 m from the still 
 ![Shoreline](figures/runup_shoreline.png)
 
 The shoreline (the last cell deeper than 1 mm) follows the analytical one within 14.6 mm at dx = 0.1 m and 9.2 mm
-at dx = 0.05 m (first order); 2DV (15 layers) gives 9.4 mm. The largest error occurs during the rundown, when the thin film
-on the beach drains; the steps at dx = 0.1 m are the cells of the beach becoming wet one by one.
+at dx = 0.05 m (first order); 2DV (15 layers) gives the same 9.2 mm. The largest error occurs during the rundown, when the
+thin film on the beach drains; the steps at dx = 0.1 m are the cells of the beach becoming wet one by one.
 
 ![Surface profiles](figures/runup_profiles.png)
 
@@ -111,12 +109,62 @@ initial bounds, in 1D and 2DV.
 
 ![Conservation](figures/sloshing_conservation.png)
 
-Limitations (current step)
---------------------------
+Depth-uniform velocity: manufactured solution of the momentum advection
+----------------------------------------------------------------------
 
-- The figures show the hydrostatic mode with `upwind1`. The non-hydrostatic mode (`use_hydrostatic=false`) and the
-  `tvd2` schemes are supported and tested (`test/test_wetting_drying.jl`; results in the plan, section 6); their
-  experiments are still to be added here.
+`plot_wetting_drying.jl mms`. In hydrostatic flow an initially depth-uniform velocity stays depth-uniform, so the
+advection must give every layer the same tendency, -u du/dx. The figure evaluates the advection operator alone for a
+prescribed depth-uniform u(x) (changing sign) under a surface that drops through six layer interfaces (dz = 0.1 m), with
+the vertical fluxes from the discrete continuity. A first version, the direct layer-wise transcription of the 1D
+momentum-conservative scheme, erred by about dx |d zeta/dx| / h_k in the layer that the surface cuts thinly: up to five
+times the exact tendency, and not convergent (top panel; 0.17-0.87 m/s² on all grids). The present scheme gives each layer
+its own velocity times the column factor of the 1D scheme, takes the inflow of a layer that ends at the far face from the
+layer below, and uses second order only on complete stencils (analysis: section 18 of
+[docs/TESTS_TECHNICAL_DOCUMENTATION.md](../../docs/TESTS_TECHNICAL_DOCUMENTATION.md)). Its error converges at first order
+in every layer, as in 1D. The 2DV `tvd2` curve coincides with 2DV `upwind1`: at faces where a layer ends, tvd2 falls
+back to first order, and these faces set the maximum.
+
+![MMS layers](figures/mms_advection_layers.png)
+
+![MMS convergence](figures/mms_advection_convergence.png)
+
+upwind1 against tvd2
+--------------------
+
+`plot_wetting_drying.jl schemes`. `tvd2` uses limited MUSCL values (MC limiter) in the momentum advection and the
+flux-limited Lax-Wendroff scheme for the density, falling back to first order next to dry faces.
+
+Ritter dam break at t = 5 s, dx = 0.25 m: tvd2 halves the depth error (L1 0.51 % against 0.91 % in 1D, 0.54 % against
+0.91 % in 2DV) and the front lag (5.6 % against 11.3 % in 1D, 6.6 % against 11.3 % in 2DV), and converges faster at the
+front (1.8 % at dx = 1/16 m in 1D).
+
+![Ritter front](figures/schemes_ritter_front.png)
+
+![Ritter convergence](figures/schemes_ritter_convergence.png)
+
+The layer velocities of both schemes (2DV): all twelve layers lie on one curve.
+
+![Ritter layers](figures/schemes_ritter_layers.png)
+
+Carrier-Greenspan runup at dx = 0.05 m: the shoreline error is set by the wet/dry front, where both schemes are first
+order; tvd2 reduces it slightly (8.6 against 9.2 mm). The fast oscillation is the numerical shoreline jumping from cell to
+cell (the last cell deeper than 1 mm).
+
+![Runup shoreline](figures/schemes_runup_shoreline.png)
+
+Sloshing basin (2DV, 160 x 10 cells): tvd2 keeps the front between the two water masses and the stratification visibly
+sharper; both stay within the initial density bounds and conserve the mass to round-off.
+
+![Sloshing schemes](figures/schemes_sloshing.png)
+
+![Sloshing schemes animation](figures/schemes_sloshing.gif)
+
+Limitations
+-----------
+
+- The non-hydrostatic mode (`use_hydrostatic=false`) is supported and tested (`test/test_wetting_drying.jl`: full
+  dispersion of a standing wave within 0.45-1.75 %, first order; Ritter and Carrier-Greenspan within the hydrostatic
+  targets); its experiments are still to be added here.
 - Not supported together with wetting and drying: periodic x, vegetation, k-epsilon, bed roughness, wind stress.
 
 References
@@ -126,4 +174,7 @@ References
 - Carrier & Greenspan (1958), J. Fluid Mech. 4, 97-109
 - Casulli & Cheng (1992), Int. J. Numer. Methods Fluids 15, 629-648
 - Stelling & Duinmeijer (2003), Int. J. Numer. Methods Fluids 43, 1329-1354
+- Casulli (2009), Int. J. Numer. Methods Fluids 60, 391-408
+- Brugnano & Casulli (2008), SIAM J. Sci. Comput. 30, 463-472
+- van Leer (1977), J. Comput. Phys. 23, 276-299 (MC limiter)
 - Delestre et al. (2013), SWASHES, Int. J. Numer. Methods Fluids 72, 269-300

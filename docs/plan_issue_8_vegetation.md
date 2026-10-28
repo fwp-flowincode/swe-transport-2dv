@@ -117,7 +117,7 @@ and `figures/`. The experiments:
 4. lock exchange through a canopy (R9).
 
 The old run scripts are replaced. The new parameters and models are documented in
-`test/TESTS_TECHNICAL_DOCUMENTATION.md`.
+`docs/TESTS_TECHNICAL_DOCUMENTATION.md`.
 
 5 Out of scope (proposed for later)
 -----------------------------------

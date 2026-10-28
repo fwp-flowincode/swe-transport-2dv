@@ -186,7 +186,7 @@ Setting up the case exposed three defects; all are fixed and covered by tests:
   because the predictor's wall faces entered the barotropic solve. The wall boundary values are now enforced before
   the solve in all modes (same test).
 
-Details: sections 5, 9 and 10 of `test/TESTS_TECHNICAL_DOCUMENTATION.md`. The regression test
+Details: sections 5, 9 and 10 of `docs/TESTS_TECHNICAL_DOCUMENTATION.md`. The regression test
 `test_validate_wind_driven_double_gyre` (`test/test_model.jl`) checks the double gyre in a smaller 10 m basin in both
 modes.
 

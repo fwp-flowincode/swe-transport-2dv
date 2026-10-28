@@ -123,7 +123,7 @@ Open questions for review:
 Experiments of section 4: done, `experiments/wetting_drying/` (README, figures, animations).
 
 Decided in review (2026-10-28): non-hydrostatic wetting and drying and the `tvd2` momentum and transport schemes are
-part of this issue (step 2). Still to do: the documentation in `test/TESTS_TECHNICAL_DOCUMENTATION.md`.
+part of this issue (step 2). Documentation: section 18 of `docs/TESTS_TECHNICAL_DOCUMENTATION.md` (moved from `test/`).
 
 6 Status (step 2, 2026-10-28)
 ----------------------------
@@ -134,19 +134,36 @@ part of this issue (step 2). Still to do: the documentation in `test/TESTS_TECHN
   solve, results unchanged); at advective Courant numbers >= 6 in the dam-break positivity test, 2-4 iterations, depths
   >= 0, clamped round-off volume <= 3e-16 m^2.
 - **tvd2** for momentum (limited MUSCL values in the momentum-conservative form, including the outflow-side terms,
-  which the first-order form does not have) and transport (flux-limited Lax-Wendroff). Ritter at dx = 0.25 m: 1D L1
-  0.51 % (upwind1 0.91 %), front 5.6 % (11.3 %); 2DV L1 0.80 % (0.89 %), layer-velocity spread 0.18 m/s (0.29 m/s), front
-  11.3 % (10.3 %, one cell). Carrier-Greenspan shoreline 13.6 mm (14.6 mm) at dx = 0.1 m; surface error 3.8 mm (3.3 mm).
+  which the first-order form does not have) and transport (flux-limited Lax-Wendroff). Ritter at dx = 0.25 m (after the
+  step-3 fix below): 1D L1 0.51 % (upwind1 0.91 %), front 5.6 % (11.3 %); 2DV L1 0.54 % (0.91 %), front 6.6 % (11.3 %).
+  Carrier-Greenspan shoreline 14.3 mm (14.6 mm) at dx = 0.1 m; surface error 3.5 mm (3.3 mm), both set by the wet/dry
+  front, where tvd2 falls back to first order.
 - **Non-hydrostatic** (`use_hydrostatic=false`): w predictor, pressure q on the wet cells below the surface cell (q = 0
   there), sparse Cholesky each step, gradient added to the predictor and the free-surface solve repeated. Standing wave
   at k H = pi/2: period error 1.75 %, 0.89 %, 0.45 % on 40 x 20, 80 x 40, 160 x 80 cells (first order) against
   omega^2 = g k tanh(k H) (the shallow-water period is 24 % shorter). Ritter and Carrier-Greenspan in 2DV within the same
   targets as hydrostatic. Lake at rest exact, conservation to round-off.
-- **2DV layer-velocity spread** (open): converges at first order in dx (mean 0.075, 0.043, 0.023, 0.012 m/s for dx = 0.5
-  ... 0.0625 m, upwind1) and grows with nz. A column-consistent weighting of the advection (each layer with the 1D
-  Stelling-Duinmeijer weight) was tried and was much worse (spread 3.8 m/s); not adopted.
+- **2DV layer-velocity spread:** resolved in step 3.
 
-7 Out of scope (proposed for later)
+7 Status (step 3, 2026-10-28): depth-uniform velocity, tvd2 figures, documentation
+----------------------------------------------------------------------------------
+
+- **Analysis** with an operator-level manufactured solution (depth-uniform u under a surface that crosses six layer
+  interfaces, W from the discrete continuity; exact tendency -u du/dx in every layer). The layer-wise weights
+  qbar_k/hbar_k err by dx |zeta_x| / h_k: O(1) in thinly cut surface layers, not convergent in the maximum norm (0.46 ...
+  0.17 m/s^2 for dx = 0.5 ... 0.0625 m). Three defects were found and fixed (details: section 18 of
+  `docs/TESTS_TECHNICAL_DOCUMENTATION.md`): column-consistent weights (layer velocity times the 1D Stelling-Duinmeijer
+  factor), the closed far face of an inflow cell (water from the layer below instead of u = 0), consistent tvd2 stencils.
+  Newly opened face layers take the velocity of the layer below. The maximum error now converges at first order in every
+  layer, as in 1D (test `test_verify_wd_advection_depth_uniform_mms_*`).
+- **Result:** 2DV Ritter layer spread 0.29 -> 0.0013 m/s (upwind1), 0.18 -> 0.0028 m/s (tvd2); 2DV upwind1 equals 1D to
+  the printed digits; tvd2 2DV front 11.3 -> 6.6 %. The earlier attempt at column weights (step 2, spread 3.8 m/s) failed
+  because of the new-face-layer effect, which the layer-wise weights had hidden.
+- **Figures:** `experiments/wetting_drying/` modes `mms` and `schemes` (MMS convergence and layer tendencies, Ritter
+  front, convergence and layer velocities for both schemes, Carrier-Greenspan shoreline error, sloshing density).
+- **Documentation:** section 18 and the test entries in `docs/TESTS_TECHNICAL_DOCUMENTATION.md`, moved from `test/`.
+
+8 Out of scope (proposed for later)
 -----------------------------------
 
 - Second-order momentum advection at the wet/dry front itself (tvd2 falls back to first order next to dry faces).

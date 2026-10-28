@@ -459,8 +459,8 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         @test eta <= CG_ETA_REL_MAX * amplitude
     end
 
-    # The shoreline improves slightly with tvd2 (13.6 mm vs 14.6 mm at dx = 0.1 m); the surface error away from the shore
-    # does not (3.8 mm vs 3.3 mm): both are dominated by the wet/dry front, where tvd2 falls back to first order.
+    # The shoreline improves slightly with tvd2 (14.3 mm vs 14.6 mm at dx = 0.1 m); the surface error away from the shore
+    # does not (3.5 mm vs 3.3 mm): both are dominated by the wet/dry front, where tvd2 falls back to first order.
     @testset "test_validate_wd_carrier_greenspan_runup_tvd2" begin
         shore_up, _, _ = run_carrier_greenspan(240, 1, 0.02; v=variant("hydro_upwind1"))
         shore_tvd, eta_tvd, amplitude = run_carrier_greenspan(240, 1, 0.02; v=variant("hydro_tvd2"))

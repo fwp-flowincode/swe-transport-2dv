@@ -1214,7 +1214,7 @@ function step_forward!(model::Model)
     # the previous step's w_hat predictor copy above, never touched by the projection's interior-only correction),
     # i.e. eta^{n+1} ~= eta^n + dt*eta_t^n: a homogeneous recursion with eta=0 as a self-consistent fixed point. That
     # silently made the non-hydrostatic mode a rigid lid (eta stayed at round-off regardless of real internal
-    # forcing; see test/TESTS_TECHNICAL_DOCUMENTATION.md section 14) even though the same barotropic solve and
+    # forcing; see docs/TESTS_TECHNICAL_DOCUMENTATION.md section 14) even though the same barotropic solve and
     # surface-slope correction as the hydrostatic branch were already being computed. Moving them here (before the
     # projection, exactly as the hydrostatic branch already had them relative to its own -- absent -- projection)
     # decouples eta from the projection in both modes; nothing changes for the hydrostatic branch, whose projection

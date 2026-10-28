@@ -2,7 +2,8 @@
 #
 # Usage (any working directory):
 #   julia --project=<repository> experiments/wetting_drying/plot_wetting_drying.jl [mode ...]
-# Modes: lake, ritter, runup, sloshing (default: all four); each takes well under a minute.
+# Modes: lake, ritter, runup, sloshing, mms (manufactured solution of the momentum advection), schemes (upwind1 against
+# tvd2); default: all. Each takes about a minute or less.
 # Output: output_barotropic/wetting_drying_figures/; the PNG and GIF files are copied to figures/.
 
 # WHY: batch run without a display; same GR workstation choice as src/visualization.jl.
@@ -14,7 +15,7 @@ using Printf
 
 include(joinpath(@__DIR__, "cases.jl"))
 
-const MODES = isempty(ARGS) ? ["lake", "ritter", "runup", "sloshing"] : ARGS
+const MODES = isempty(ARGS) ? ["lake", "ritter", "runup", "sloshing", "mms", "schemes"] : ARGS
 const OUTPUT_DIR = joinpath(@__DIR__, "..", "..", "output_barotropic", "wetting_drying_figures")
 const FIGURE_DIR = joinpath(@__DIR__, "figures")
 
@@ -314,11 +315,169 @@ function plot_sloshing()
     save_gif(anim, "sloshing_2dv.gif")
 end
 
+
+# ---- Manufactured solution for the momentum advection ----------------------------------------------------------------
+const MMS_NX = (100, 200, 400, 800, 1600)   # -, grids of the convergence plot (dx = 1 ... 1/16 m)
+const MMS_NZ = 12                           # -, layers of 0.1 m
+const MMS_PROFILE_NX = 400                  # -, grid of the tendency profiles
+
+function plot_mms()
+    println("\n=== Manufactured solution: momentum advection of a depth-uniform velocity ===")
+    maxerr(xf, tend, exact) = maximum(abs(tend[k, f] - exact[f]) for f in axes(tend, 2), k in axes(tend, 1) if !isnan(tend[k, f]))
+    fig = plot(xscale=:log10, yscale=:log10, xlabel="dx (m)", ylabel="max |tendency error| (m/s²)", legend=:outerright,
+        size=(900, 420), left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM,
+        title="Advection of a depth-uniform u, maximum error over all layers", titlefontsize=11)
+    dxs = [MMS_LENGTH / nx for nx in MMS_NX]
+    for (label, nz, method, color, style) in (("1D, upwind1", 1, "upwind1", 1, :solid), ("1D, tvd2", 1, "tvd2", 2, :solid),
+            ("2DV, upwind1", MMS_NZ, "upwind1", 1, :dash), ("2DV, tvd2", MMS_NZ, "tvd2", 2, :dash),
+            ("2DV, layer-wise weights (first version)", MMS_NZ, "layerwise", 3, :dashdot))
+        errs = [maxerr(mms_advection_tendencies(nx, nz; method=method)...) for nx in MMS_NX]
+        @printf("%-42s max error %s\n", label, join([@sprintf("%.2e", e) for e in errs], " "))
+        plot!(fig, dxs, errs; marker=:circle, color=color, linestyle=style, label=label)
+    end
+    plot!(fig, dxs, 0.008 .* dxs; color=:gray, linestyle=:dot, label="first order")
+    save_figure(fig, "mms_advection_convergence.png")
+
+    # tendency of every layer along x (2DV): first-version weights against the present ones
+    panels = []
+    for (method, title) in (("layerwise", "layer-wise weights (first version)"), ("upwind1", "column-consistent weights (upwind1)"))
+        xf, tend, exact = mms_advection_tendencies(MMS_PROFILE_NX, MMS_NZ; method=method)
+        p = plot(xf, exact; color=:black, linewidth=3, label="exact -u du/dx", xlabel="x (m)", ylabel="du/dt (m/s²)",
+            title="2DV, dx = $(MMS_LENGTH / MMS_PROFILE_NX) m: $(title)", ylims=(-1.2, 0.4), legend=:bottomleft,
+            titlefontsize=10)
+        for k in 1:MMS_NZ
+            plot!(p, xf, tend[k, :]; color=k, linewidth=1, label=k == 1 ? "layers 1 ... $(MMS_NZ)" : "", seriestype=:scatter,
+                markersize=1.5, markerstrokewidth=0)
+        end
+        push!(panels, p)
+    end
+    save_figure(plot(panels...; layout=(2, 1), size=(900, 700), left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM),
+        "mms_advection_layers.png")
+end
+
+# ---- upwind1 against tvd2 ----------------------------------------------------------------------------------------------
+const SCHEMES = ("upwind1", "tvd2")
+const SCHEME_COLORS = Dict("upwind1" => 1, "tvd2" => 2)
+const SCHEME_SNAPSHOT_TIMES = (8.0, 20.0, 40.0)   # s, sloshing comparison
+
+layer_spread(m) = maximum((begin
+    us = [m.state.u[k, f] for k in 1:m.config.nz if m.wetdry.hf[k, f] > 1e-3]
+    length(us) > 1 ? maximum(us) - minimum(us) : 0.0
+end for f in 2:m.config.nx); init=0.0)
+
+function plot_schemes()
+    println("\n=== upwind1 against tvd2 ===")
+    # Ritter: profiles near the front, 1D and 2DV
+    fig_h = plot(xlabel="x (m)", ylabel="depth h (m)", xlims=(40.0, 75.0), ylims=(0.0, 0.45), legend=:topright,
+        title=@sprintf("Ritter dam break, t = %.0f s, dx = %.2f m", RITTER_T_END, RITTER_LENGTH / RITTER_PROFILE_NX))
+    xs = range(40.0, 75.0, length=2001)
+    plot!(fig_h, xs, [ritter_dam_break(x, RITTER_T_END; h0=RITTER_H0, x0=RITTER_X0)[1] for x in xs]; color=:black, linewidth=2,
+        linestyle=:dash, label="Ritter (1892)")
+    layer_panels = []
+    for scheme in SCHEMES, (nz, style, lab) in ((1, :solid, "1D"), (RITTER_NZ_2DV, :dot, "2DV"))
+        m = run_to!(ritter_model(RITTER_PROFILE_NX, nz; scheme=scheme), RITTER_T_END)
+        plot!(fig_h, wd_x_centres(m.config), water_depth(m); color=SCHEME_COLORS[scheme], linestyle=style, linewidth=2,
+            label="$(lab), $(scheme)")
+        if nz > 1
+            xf = [(f - 1) * m.dx for f in 1:(m.config.nx + 1)]
+            p = plot(xlabel="x (m)", ylabel="u (m/s)", xlims=(10.0, 75.0), legend=:topleft, titlefontsize=10,
+                title=@sprintf("2DV %s: velocity of every layer (spread %.3f m/s)", scheme, layer_spread(m)))
+            xa = range(10.0, 75.0, length=2001)
+            plot!(p, xa, [ritter_dam_break(x, RITTER_T_END; h0=RITTER_H0, x0=RITTER_X0)[1] > 0 ?
+                ritter_dam_break(x, RITTER_T_END; h0=RITTER_H0, x0=RITTER_X0)[2] : NaN for x in xa]; color=:black, linewidth=2,
+                linestyle=:dash, label="Ritter (1892)")
+            for k in 1:nz
+                plot!(p, xf, [m.wetdry.hf[k, f] > 1e-3 ? m.state.u[k, f] : NaN for f in eachindex(xf)]; color=k, linewidth=1,
+                    label=k == 1 ? "layers 1 ... $(nz)" : "")
+            end
+            push!(layer_panels, p)
+        end
+    end
+    save_figure(plot(fig_h; size=(820, 420), left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM), "schemes_ritter_front.png")
+    save_figure(plot(layer_panels...; layout=(2, 1), size=(820, 700), left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM),
+        "schemes_ritter_layers.png")
+
+    # Ritter: convergence of both schemes
+    fig_c = plot(xscale=:log10, yscale=:log10, xlabel="dx (m)", ylabel="relative error (-)", legend=:outerright, size=(950, 440),
+        left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM, title="Ritter dam break: upwind1 against tvd2")
+    for scheme in SCHEMES, (label, nz, nxs, style) in (("1D", 1, RITTER_NX_1D, :solid), ("2DV", RITTER_NZ_2DV, RITTER_NX_2DV, :dash))
+        dxs, l1s, fronts = Float64[], Float64[], Float64[]
+        for nx in nxs
+            m = run_to!(ritter_model(nx, nz; scheme=scheme), RITTER_T_END)
+            t = round(Int, RITTER_T_END / m.config.dt) * m.config.dt
+            h, ha = water_depth(m), ritter_depth(m, t)
+            push!(dxs, RITTER_LENGTH / nx)
+            push!(l1s, sum(abs, h .- ha) / sum(ha))
+            push!(fronts, abs(ritter_front(wd_x_centres(m.config), h) - ritter_front_exact(t)) / (ritter_front_exact(t) - RITTER_X0))
+            @printf("%-7s %-4s dx = %.4f m | L1 %.4f | front %.4f | layer spread %.4f m/s\n", scheme, label, dxs[end], l1s[end],
+                fronts[end], layer_spread(m))
+        end
+        plot!(fig_c, dxs, l1s; marker=:circle, linestyle=style, color=SCHEME_COLORS[scheme], label="$(label) $(scheme): L1 depth")
+        plot!(fig_c, dxs, fronts; marker=:square, linestyle=style, color=SCHEME_COLORS[scheme] + 2,
+            label="$(label) $(scheme): front (h = 1 cm)")
+    end
+    dx_ref = [RITTER_LENGTH / RITTER_NX_1D[1], RITTER_LENGTH / RITTER_NX_1D[end]]
+    plot!(fig_c, dx_ref, 0.02 .* dx_ref ./ dx_ref[1]; color=:gray, linestyle=:dot, label="first order")
+    save_figure(fig_c, "schemes_ritter_convergence.png")
+
+    # Carrier-Greenspan: shoreline error over one period
+    T = carrier_greenspan_time_scale(CG_WAVE)
+    period = pi * T
+    fig_s = plot(xlabel="t / period (-)", ylabel="shoreline elevation error (m)", legend=:outerright, size=(950, 420),
+        left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM, title="Carrier-Greenspan runup: upwind1 against tvd2")
+    for scheme in SCHEMES, (nx, nz, dt, lab, style) in ((480, 1, 0.01, "1D", :solid), (480, 15, 0.01, "2DV", :dash))
+        model, t0 = cg_model(nx, nz, dt; scheme=scheme)
+        n = round(Int, period / dt)
+        err = Float64[]
+        for s in 1:n
+            step_forward!(model)
+            push!(err, cg_shoreline(model)[1] - carrier_greenspan_shoreline(CG_WAVE, t0 + s * dt)[2])
+        end
+        @printf("%-7s %-3s dx = %.2f m | max shoreline error %.4f m\n", scheme, lab, (CG_LENGTH + CG_ONSHORE) / nx, maximum(abs, err))
+        plot!(fig_s, (1:n) .* dt ./ period, err; color=SCHEME_COLORS[scheme], linestyle=style, label="$(lab), $(scheme), dx = 0.05 m")
+    end
+    hline!(fig_s, [0.0]; color=:black, label="")
+    save_figure(fig_s, "schemes_runup_shoreline.png")
+
+    # Sloshing: density in 2DV, snapshots and side-by-side animation
+    models = Dict(scheme => sloshing_model(SLOSH_NZ_2DV; scheme=scheme) for scheme in SCHEMES)
+    cfg = models["upwind1"].config
+    nsteps = round(Int, SLOSH_T_END / cfg.dt)
+    frame_stride = round(Int, SLOSH_FRAME_INTERVAL / cfg.dt)
+    snapshot_steps = Dict(round(Int, t / cfg.dt) => t for t in SCHEME_SNAPSHOT_TIMES)
+    draw(scheme, t; colorbar=true) = section(models[scheme], models[scheme].state.rho; clims=SLOSH_CLIMS,
+        colorbar_title="ρ (kg/m³)", title=@sprintf("%s, t = %.1f s", scheme, t), titlefontsize=10, colorbar=colorbar)
+    anim = Animation()
+    panels = Dict{Tuple{String,Float64},Any}()
+    for n in 0:nsteps
+        if n > 0
+            foreach(step_forward!, values(models))
+        end
+        t = n * cfg.dt
+        n % frame_stride == 0 && frame(anim, plot(draw("upwind1", t), draw("tvd2", t); layout=(2, 1), size=(900, 560),
+            left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM))
+        if haskey(snapshot_steps, n)
+            for scheme in SCHEMES
+                panels[(scheme, snapshot_steps[n])] = draw(scheme, t; colorbar=snapshot_steps[n] == last(SCHEME_SNAPSHOT_TIMES))
+            end
+        end
+    end
+    for scheme in SCHEMES
+        rho = models[scheme].state.rho
+        @printf("sloshing %-7s t = %.0f s | density range [%.3f, %.3f] kg/m^3\n", scheme, SLOSH_T_END, extrema(rho)...)
+    end
+    save_figure(plot([panels[(scheme, t)] for scheme in SCHEMES for t in SCHEME_SNAPSHOT_TIMES]...; layout=grid(2, 3, widths=[0.3, 0.3, 0.4]),
+        size=(1500, 620), left_margin=6Plots.mm, bottom_margin=6Plots.mm), "schemes_sloshing.png")
+    save_gif(anim, "schemes_sloshing.gif")
+end
+
 mkpath(OUTPUT_DIR)
 mkpath(FIGURE_DIR)
 for mode in MODES
     mode == "lake" ? plot_lake() :
     mode == "ritter" ? plot_ritter() :
     mode == "runup" ? plot_runup() :
-    mode == "sloshing" ? plot_sloshing() : error("unknown mode '$(mode)'; use lake, ritter, runup or sloshing")
+    mode == "sloshing" ? plot_sloshing() :
+    mode == "mms" ? plot_mms() :
+    mode == "schemes" ? plot_schemes() : error("unknown mode '$(mode)'; use lake, ritter, runup, sloshing, mms or schemes")
 end
