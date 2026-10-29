@@ -359,6 +359,7 @@ mutable struct Model{T<:Real}
     x_boundary_eta_right::Any   # nothing, or the prescribed water level eta_R (m) at the right boundary face
     x_boundary_q_left::Any      # nothing, or the discharge q (m^2/s) of the left boundary face (profile = shape)
     x_boundary_eta_left::Any    # nothing, or the level eta_L (m) of the left boundary face (supercritical inflow, #46)
+    x_boundary_rho_left::Any    # nothing, or the density (kg/m^3) of the inflow at the left boundary face (#47)
     x_boundary_right_free::Bool # free outflow at the right boundary face (issue #46)
     x_boundary_eta_free::Float64  # m, radiated level of the free outflow face (_update_free_outflow_level!)
     x_boundary_free_dirichlet::Tuple{Float64,Float64}   # (m, -), effective level and weight of the free outflow this step
@@ -412,12 +413,23 @@ function _constituent_mass(model::Model)
     return constituent_mass(st.rho, model.dx, model.dz)
 end
 
+# WHY: the transport keeps rho within [rho_min_init, rho_max_init] (monotone schemes; clipped mass is redistributed);
+# a prescribed inflow density (left_rho) outside the initial range is a legitimate new extreme and must not be clipped
+function _include_inflow_density_in_bounds!(model::Model)
+    rho_in = model.x_boundary_rho_left
+    rho_in === nothing && return nothing
+    model.rho_min_init = min(model.rho_min_init, rho_in)
+    model.rho_max_init = max(model.rho_max_init, rho_in)
+    return nothing
+end
+
 function _refresh_density_metadata!(model::Model)
     st = model.state
     cfg = model.config
 
     model.rho_min_init = minimum(st.rho)
     model.rho_max_init = maximum(st.rho)
+    _include_inflow_density_in_bounds!(model)
     model.initial_constituent_mass = _constituent_mass(model)
 
     z_w = _linspace(0.0, cfg.depth, cfg.nz + 1)
@@ -839,6 +851,7 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
         nothing,
         nothing,
         nothing,
+        nothing,
         false,
         0.0,
         (0.0, 1.0),
@@ -860,8 +873,8 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
 end
 
 """
-    set_x_inflow_outflow!(model, left_profile; left_discharge=nothing, left_level=nothing, open_right=true,
-                          right_profile=nothing, right_level=nothing, right_free=false)
+    set_x_inflow_outflow!(model, left_profile; left_discharge=nothing, left_level=nothing, left_rho=nothing,
+                          open_right=true, right_profile=nothing, right_level=nothing, right_free=false)
 
 Lateral boundary conditions: velocity `left_profile` (m/s, one value per layer) at the left boundary face, or with
 `left_discharge` q (m^2/s) the profile shape scaled to the discharge, u_k = q * left_profile_k / sum_j dZ_j left_profile_j
@@ -870,7 +883,9 @@ layers; dry layers carry no flow), so that the inflow is q whatever the level at
 `left_discharge`; issue #46) also prescribes the level of the inlet face: the face layers are those of eta_L instead of
 the level of the first cell, so the inflow has the depth and velocity of the prescribed state (supercritical inflow,
 Fr > 1, needs both; for subcritical inflow prescribe the discharge only). Variable top layer or wetting and drying only
-(the fixed grid has the depth H at every face).
+(the fixed grid has the depth H at every face). `left_rho` (kg/m^3; issue #47, wetting and drying only): density of the
+inflowing water (otherwise the inflow takes the density of the first cell); it widens the bounds of the monotone
+transport, so a new extreme is not clipped.
 
 At the right boundary face a wall, a zero-gradient velocity (`open_right=true`), a prescribed velocity `right_profile`
 (m/s, length nz), a prescribed water level `right_level` (m, surface elevation eta at the boundary face x = L) or a free
@@ -895,6 +910,7 @@ function set_x_inflow_outflow!(
     left_profile::AbstractVector{<:Real};
     left_discharge::Union{Nothing,Real}=nothing,
     left_level::Union{Nothing,Real}=nothing,
+    left_rho::Union{Nothing,Real}=nothing,
     open_right::Bool=true,
     right_profile::Union{Nothing,AbstractVector{<:Real}}=nothing,
     right_level::Union{Nothing,Real}=nothing,
@@ -914,6 +930,7 @@ function set_x_inflow_outflow!(
     model.x_boundary_u_left_profile = collect(left_profile)
     model.x_boundary_q_left = left_discharge === nothing ? nothing : Float64(left_discharge)
     model.x_boundary_eta_left = left_level === nothing ? nothing : Float64(left_level)
+    _set_inflow_density!(model, left_rho)
     _set_right_boundary!(model, open_right, right_profile, right_level, right_free)
     # WHY: the discharge scaling uses the level of time n in ws.eta_old (set by every step); before the first step it
     # is the initial level
@@ -937,14 +954,29 @@ function set_x_inflow_outflow!(
     right_profile::Union{Nothing,AbstractVector{<:Real}}=nothing,
     right_level::Union{Nothing,Real}=nothing,
     right_free::Bool=false,
+    left_rho::Union{Nothing,Real}=nothing,
 )
     model.wetdry === nothing && throw(ArgumentError("a time-dependent boundary velocity requires ModelConfig(wetting_drying=true)"))
     model.wetdry.left_velocity = left_velocity
     model.x_boundary_u_left_profile = nothing
     model.x_boundary_q_left = nothing
     model.x_boundary_eta_left = nothing
+    _set_inflow_density!(model, left_rho)
     _set_right_boundary!(model, open_right, right_profile, right_level, right_free)
     return model
+end
+
+# Density (kg/m^3) of the water entering through the left boundary face (left_rho, issue #47); wetting-drying step only.
+# WHY only there: its transport has fluxes through the outer faces (upwind, the inflow takes the density of the first
+# cell without left_rho); the transport of the other modes has none (all outer faces closed for the constituent).
+function _set_inflow_density!(model::Model, left_rho)
+    if left_rho !== nothing
+        isfinite(left_rho) || throw(ArgumentError("left_rho must be finite"))
+        model.wetdry === nothing && throw(ArgumentError("left_rho needs wetting_drying=true (the other transport schemes have no flux through the outer faces)"))
+    end
+    model.x_boundary_rho_left = left_rho === nothing ? nothing : Float64(left_rho)
+    _include_inflow_density_in_bounds!(model)
+    return nothing
 end
 
 function _set_right_boundary!(model::Model, open_right::Bool, right_profile, right_level, right_free::Bool)
@@ -989,6 +1021,7 @@ function clear_x_inflow_outflow!(model::Model)
     model.x_boundary_u_left_profile = nothing
     model.x_boundary_q_left = nothing
     model.x_boundary_eta_left = nothing
+    model.x_boundary_rho_left = nothing
     model.x_boundary_u_right_open = false
     model.x_boundary_u_right_profile = nothing
     model.x_boundary_eta_right = nothing

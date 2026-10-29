@@ -235,3 +235,136 @@ function chezy_backwater_depth(x::Real, q::Real, C::Real, slope::Real, x_end::Re
     end
     return h
 end
+
+# Steady frictionless flow over a bed obstacle (issue #47): Bernoulli along the channel, q^2 / (2 g h^2) + h + z_b = E,
+# with the specific discharge q (m^2/s), depth h (m), bed z_b (m) and energy head E (m). Chow (1959), Open-Channel
+# Hydraulics, ch. 3 (specific energy) and 15 (hydraulic jump); test cases of SWASHES (Delestre et al. 2013), see
+# swashes_bump_bed.
+
+const BERNOULLI_BISECTION_STEPS = 200   # -, bisection steps of bernoulli_depth (interval halves to machine precision)
+const JUMP_SEARCH_SAMPLES = 100_000     # -, sample points of hydraulic_jump_position between the crest and x_max
+
+"""
+    critical_depth(q; g=9.81) -> Float64
+
+Critical depth h_c = (q^2/g)^(1/3) (m) of the specific discharge `q` (m^2/s): Fr = 1, the minimum 3/2 h_c of the specific
+energy q^2/(2 g h^2) + h. Source: Chow (1959), Open-Channel Hydraulics, ch. 3.
+"""
+critical_depth(q::Real; g::Real=9.81) = cbrt(q^2 / g)
+
+"""
+    bernoulli_depth(head, q; supercritical=false, g=9.81) -> Float64
+
+Depth h (m) with the specific energy q^2/(2 g h^2) + h = `head` (m, the energy head above the bed, E - z_b) for the
+specific discharge `q` (m^2/s, > 0): the subcritical root (h >= h_c) or, with `supercritical=true`, the supercritical
+root (h <= h_c). Requires head >= 3/2 h_c (otherwise the flow cannot pass with this energy). Bisection on the monotone
+branch, BERNOULLI_BISECTION_STEPS steps.
+"""
+function bernoulli_depth(head::Real, q::Real; supercritical::Bool=false, g::Real=9.81)
+    q > 0 || throw(ArgumentError("q must be > 0"))
+    hc = critical_depth(q; g=g)
+    specific_energy(h) = q^2 / (2g * h^2) + h
+    head >= specific_energy(hc) * (1 - eps()) || throw(DomainError(head, "energy head below the critical value 3/2 h_c = $(1.5hc) m"))
+    lo, hi = supercritical ? (hc * eps(), hc) : (hc, max(head, hc))
+    for _ in 1:BERNOULLI_BISECTION_STEPS
+        mid = 0.5 * (lo + hi)
+        # subcritical branch: E increases with h; supercritical branch: E decreases with h
+        too_high = specific_energy(mid) > head
+        if supercritical == too_high
+            lo = mid
+        else
+            hi = mid
+        end
+    end
+    return 0.5 * (lo + hi)
+end
+
+"""
+    conjugate_depth(h1, q; g=9.81) -> Float64
+
+Depth h2 (m) downstream of a hydraulic jump with the upstream depth `h1` (m) and the specific discharge `q` (m^2/s)
+(momentum conservation, Belanger): h2 / h1 = (sqrt(1 + 8 Fr1^2) - 1) / 2, Fr1^2 = q^2 / (g h1^3). Symmetric: the
+conjugate of a subcritical depth is the supercritical one. Source: Chow (1959), Open-Channel Hydraulics, ch. 15.
+"""
+function conjugate_depth(h1::Real, q::Real; g::Real=9.81)
+    Fr2 = q^2 / (g * h1^3)
+    return 0.5 * h1 * (sqrt(1 + 8 * Fr2) - 1)
+end
+
+"""
+    swashes_bump_bed(x) -> Float64
+
+Bed level z_b (m) of the SWASHES bump at the position `x` (m) of a 25 m channel: 0.2 - 0.05 (x - 10)^2 for 8 < x < 12,
+else 0 (crest 0.2 m at x = 10 m). Source: Delestre et al. (2013), SWASHES, Int. J. Numer. Methods Fluids 72, 269-300,
+section 3.1.1 (cases: subcritical q = 4.42 m^2/s with the outlet depth 2 m, transcritical q = 1.53 m^2/s, with shock
+q = 0.18 m^2/s and the outlet depth 0.33 m).
+"""
+swashes_bump_bed(x::Real) = 8 < x < 12 ? 0.2 - 0.05 * (x - 10)^2 : 0.0
+
+"""
+    bump_flow_depth(x, q; bed, x_crest, regime, outlet_depth=nothing, g=9.81) -> Float64
+
+Depth h (m) at `x` (m) of steady frictionless flow with the discharge `q` (m^2/s) over the bed `bed(x)` (m) whose crest
+is at `x_crest` (m), outlet bed 0. `regime`:
+- `:subcritical`: E = q^2/(2 g h_out^2) + h_out from `outlet_depth` h_out (m), subcritical root everywhere;
+- `:transcritical`: critical flow at the crest, E = 3/2 h_c + bed(x_crest); subcritical upstream, supercritical
+  downstream of the crest;
+- `:shock`: as `:transcritical` up to the hydraulic jump at `hydraulic_jump_position`, subcritical with the outlet energy
+  of `outlet_depth` downstream of it.
+"""
+function bump_flow_depth(x::Real, q::Real; bed::Function, x_crest::Real, regime::Symbol, outlet_depth=nothing,
+    g::Real=9.81)
+    if regime == :subcritical
+        E = q^2 / (2g * outlet_depth^2) + outlet_depth
+        return bernoulli_depth(E - bed(x), q; g=g)
+    end
+    E1 = 1.5 * critical_depth(q; g=g) + bed(x_crest)
+    regime in (:transcritical, :shock) || throw(ArgumentError("regime must be :subcritical, :transcritical or :shock"))
+    x <= x_crest && return bernoulli_depth(E1 - bed(x), q; g=g)
+    if regime == :shock
+        xs = hydraulic_jump_position(q; bed=bed, x_crest=x_crest, outlet_depth=outlet_depth, g=g)
+        if x >= xs
+            E2 = q^2 / (2g * outlet_depth^2) + outlet_depth
+            return bernoulli_depth(E2 - bed(x), q; g=g)
+        end
+    end
+    return bernoulli_depth(E1 - bed(x), q; supercritical=true, g=g)
+end
+
+"""
+    hydraulic_jump_position(q; bed, x_crest, outlet_depth, g=9.81, x_max=x_crest + 1e3) -> Float64
+
+Position (m) of the hydraulic jump downstream of the crest of `bed` for transcritical flow with the discharge `q`
+(m^2/s) and the subcritical outlet depth `outlet_depth` (m, outlet bed 0): where the conjugate depth of the supercritical
+depth (energy 3/2 h_c + bed(x_crest)) equals the subcritical depth of the outlet energy. Bisection between the crest and
+the downstream foot of the obstacle (searched up to `x_max`, m), where the subcritical outlet branch exists
+(E2 - bed >= 3/2 h_c); the first sign change of the depth mismatch on JUMP_SEARCH_SAMPLES points is refined by bisection.
+Throws if the jump is not on the obstacle.
+"""
+function hydraulic_jump_position(q::Real; bed::Function, x_crest::Real, outlet_depth::Real, g::Real=9.81,
+    x_max::Real=x_crest + 1e3)
+    hc = critical_depth(q; g=g)
+    E1 = 1.5 * hc + bed(x_crest)
+    E2 = q^2 / (2g * outlet_depth^2) + outlet_depth
+    exists(x) = E2 - bed(x) >= 1.5 * hc   # subcritical downstream depth with the outlet energy
+    mismatch(x) = conjugate_depth(bernoulli_depth(E1 - bed(x), q; supercritical=true, g=g), q; g=g) -
+                  bernoulli_depth(E2 - bed(x), q; g=g)
+    xs = range(x_crest, x_max, length=JUMP_SEARCH_SAMPLES)
+    previous = nothing
+    for (j, x) in enumerate(xs)
+        exists(x) || continue
+        m = mismatch(x)
+        if previous !== nothing && sign(m) != sign(previous[2])
+            lo, hi = previous[1], x
+            mlo = previous[2]
+            for _ in 1:BERNOULLI_BISECTION_STEPS
+                mid = 0.5 * (lo + hi)
+                sign(mismatch(mid)) == sign(mlo) ? (lo = mid) : (hi = mid)
+            end
+            return 0.5 * (lo + hi)
+        end
+        previous = (x, m)
+        bed(x) > 0 || j == 1 || break   # past the obstacle: both depths are constant, no jump position
+    end
+    throw(DomainError(outlet_depth, "no hydraulic jump on the obstacle for this outlet depth"))
+end

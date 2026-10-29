@@ -24,6 +24,7 @@ Structure
 - theta_scheme/: stability and accuracy of the theta time integration ([README](theta_scheme/README.md)).
 - advection_stability/: stability of the momentum advection with a mean flow, issue #37 ([README](advection_stability/README.md)).
 - sloped_channel/: uniform and gradually varied flow with Chezy friction, discharge and water-level boundaries, issue #14 ([README](sloped_channel/README.md)).
+- obstacles/: flow over a bump and a broad-crested weir, sub-, trans- and supercritical, hydraulic jump, tracer, issue #47 ([README](obstacles/README.md)).
 - validation/: scripts that compare selected cases to analytic/semianalytic references.
 - common/: helper utilities used by case scripts.
 
