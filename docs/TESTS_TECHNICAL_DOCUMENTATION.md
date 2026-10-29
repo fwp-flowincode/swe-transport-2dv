@@ -909,6 +909,35 @@ still decays at 1.4 times the bound); it is sharp for an advected surface (varia
 Physical damping (bed friction, turbulent viscosity) can hide the weak growth. Flows with larger Froude numbers need a
 larger $\theta$ (for example $\theta=1$).
 
+**Froude-bound warning (issue #39).** After every step `step_forward!` evaluates `surface_froude_number(model)`, the
+largest $|U|/\sqrt{gh}$ over the u-faces. Here $U$ is the depth-averaged velocity and $h$ the actual water depth of the
+face: bed and surface level included, or the cut face layers with wetting and drying. Faces shallower than
+`SURFACE_FROUDE_MIN_DEPTH` = 1 cm (a shoreline film) are left out. The largest value of the run is kept in
+`model.max_surface_froude` (diagnostics `"surface_froude"` and `"surface_froude_max"`). When it exceeds
+`theta_froude_max(theta)` by more than `SURFACE_FROUDE_WARNING_MARGIN` = 0.01, the model warns once and names the
+$\theta$ needed for that Froude number, `theta_for_froude(Fr)` $=(1+2\mathrm{Fr})/(2(1+\mathrm{Fr}))$.
+
+The margin avoids two false alarms:
+- at $\theta=1/2$ the bound is 0, so the orbital velocities of any small wave (Fr ≈ 1e-5) would warn;
+- runs exactly at the bound would warn on round-off.
+
+An excess of 0.01 needs $\theta$ at most 0.005 higher. In the test suite the warning comes from 48 runs with transient
+fast flow:
+- 35 wetting-drying tests (dam breaks and runup, Fr 0.68 to 1.2 at $\theta=0.7$);
+- the $\theta=0.5$ and $0.55$ cases of the θ tests;
+- a k-epsilon channel at Fr = 0.68.
+
+They stay stable because the excursion is short and the upwind and limited advection is diffusive. The internal Froude number `froude_number` (with $g'$) is a different
+quantity.
+
+Tests:
+- `test_verify_theta_for_froude_inverts_bound`: `theta_for_froude` inverts `theta_froude_max`.
+- `test_verify_surface_froude_number_of_uniform_flow`: $U/\sqrt{gH}$ exactly in a periodic channel, the depth $H+\eta$
+  with the variable top layer, the shallowest faces over a staircase bed, and the shoreline film left out with
+  wetting and drying.
+- `test_verify_froude_bound_warning`: Fr = 0.8 at $\theta=0.7$ warns once and names $\theta=0.72$. There is no warning
+  below the bound, at $\theta=0.75$ or $\theta=1$, within the margin, or for Fr = 1e-5 at $\theta=1/2$.
+
 The explicit momentum advection had Courant-number limits of its own, independent of $\theta$ (`upwind1` from
 $C=U\Delta t/\Delta x\approx0.3$ with 8 layers, `tvd2` already at $C=0.1$); they came from inconsistent discrete momentum
 fluxes and were removed in issue #37 (section 20).
@@ -922,11 +951,13 @@ form one tridiagonal matrix $A$ per u-face column (backward Euler, Casulli & Che
 effective depth $\sum_k\Delta Z_k r_k$ with the column response $r=A^{-1}\Delta Z$ (`src/implicit_vertical.jl`). $A$ is in
 flux form, so its columns sum to $\Delta Z$ and, without friction, the effective depth equals the water depth exactly.
 With the variable top layer the top row of the momentum advection carries the advective-form correction
-$-u_{\mathrm{top}}\nabla\cdot v$ (section 13). Its vertical part $u_{\mathrm{top}}W/\Delta z$ stays in the explicit
-predictor and is not put on the top diagonal of $A$: a diagonal term would change the effective depth by
-$O(\Delta t W/\Delta z)$ (−3 % at $\Delta t W/\Delta z=0.1$ in a single column, up to 0.01 m in the test below). The explicit
-term is stable for $\Delta t\lvert W\rvert/\Delta z<2$, i.e. as long as the surface moves less than two layer thicknesses per
-step, far beyond the accuracy range of the variable top layer.
+$-u_{\mathrm{top}}\nabla\cdot v$ (section 13). Its vertical part $u_{\mathrm{top}}W/h_{\mathrm{top}}$ stays in the
+explicit predictor and is not put on the top diagonal of $A$: a diagonal term would change the effective depth by
+$O(\Delta t W/\Delta z)$ (−3 % at $\Delta t W/\Delta z=0.1$ in a single column, up to 0.01 m in the test below). It is
+divided by the top-layer thickness $h_{\mathrm{top}}$, as the implicit column divides its vertical flux. Until issue #14
+it was divided by $\Delta z$, which gave a uniform flow with $W\ne0$ a spurious tendency (section 21). The explicit
+term is stable for $\Delta t\lvert W\rvert/h_{\mathrm{top}}<2$, i.e. as long as the surface moves less than two top-layer
+thicknesses per step, far beyond the accuracy range of the variable top layer.
 `test_verify_implicit_variable_top_effective_depth_equals_water_depth` checks $\sum_k\Delta Z_k r_k=(n_z-1)\Delta z+h_{\mathrm{top}}$
 on every interior face to $10^{-11}H$ in a standing wave with $\max\Delta t\lvert W\rvert/\Delta z\ge0.01$.
 

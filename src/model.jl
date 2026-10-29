@@ -19,9 +19,25 @@ waves, where the explicit advection adds the Doppler phase U k dt without dampin
 2 (1 - theta) Fr <= 2 theta - 1; the bound is sharp for Lax-Wendroff (the smooth limit of tvd2) and sufficient for
 upwind1, whose numerical diffusion lowers the required theta. Above Fr_max the growth per step is weak (slowly growing
 gravity waves on the mean flow), not an immediate blow-up. The bound concerns the theta coupling only; the explicit
-momentum advection has its own limits (advective Courant number, see the plan, section 3.3).
+momentum advection is stable up to the advective Courant number 1 (issue #37). In the full model the bound is sharp
+with the variable top layer and conservative on the fixed grid (a periodic channel decayed up to 1.4 times the bound;
+docs/TESTS_TECHNICAL_DOCUMENTATION.md, section 19). `step_forward!` warns once when the surface Froude number of the run
+exceeds it (`surface_froude_number`, issue #39).
 """
 theta_froude_max(theta::Real) = theta >= 1 ? Inf : (2 * theta - 1) / (2 * (1 - theta))
+
+"""
+    theta_for_froude(Fr)
+
+Smallest implicitness theta (-) for which a mean flow of Froude number `Fr` (-, >= 0) is linearly stable with explicit
+momentum advection, the inverse of `theta_froude_max`: theta = (1 + 2 Fr) / (2 (1 + Fr)), from 1/2 at Fr = 0 towards 1
+for Fr -> Inf (0.7 for Fr = 2/3, 0.75 for Fr = 1, 0.83 for Fr = 2). Source: docs/plan_issue_34_theta_scheme.md,
+section 3.3.
+"""
+function theta_for_froude(Fr::Real)
+    Fr >= 0 || throw(ArgumentError("Fr must be >= 0, got $(Fr)"))
+    return isinf(Fr) ? 1.0 : (1 + 2 * Fr) / (2 * (1 + Fr))
+end
 
 
 Base.@kwdef mutable struct ModelConfig
@@ -345,6 +361,8 @@ mutable struct Model{T<:Real}
     geometry::BedGeometry   # staircase bed masks (all cells wet for the flat bed)
     turbulence::Any         # KEpsilonState with turbulence_closure = "k_epsilon", else nothing
     wetdry::Any             # WetDryState with wetting_drying = true, else nothing
+    max_surface_froude::Float64   # -, largest surface_froude_number after any step so far (issue #39)
+    froude_warning_issued::Bool   # the theta Froude-bound warning has been given (once per model)
 end
 
 function _linspace(start::Real, stop::Real, n::Int)
@@ -818,6 +836,8 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
         geometry,
         turbulence_closure(cfg) == "k_epsilon" ? KEpsilonState(cfg.nz, cfg.nx; T=T) : nothing,
         cfg.wetting_drying ? WetDryState(cfg; T=T) : nothing,
+        0.0,
+        false,
     )
 
     initialize_lock_exchange!(model; rho_left=cfg.rho_left, rho_right=cfg.rho_right)
@@ -1081,6 +1101,86 @@ function _mask_w!(w::AbstractMatrix{<:Real}, geo::BedGeometry)
     return w
 end
 
+# Smallest water depth (m) of a u-face that counts for surface_froude_number. WHY: at a wetting-drying shoreline U/sqrt(g h)
+# of a film of water is meaningless for the stability of the theta scheme (the gravity-wave speed there is ~0), and the
+# wet/dry front is limited by the positivity of the solve, not by the Froude bound (issue #38).
+const SURFACE_FROUDE_MIN_DEPTH = 0.01
+# Margin (-) by which the surface Froude number must exceed theta_froude_max before the warning. WHY: at theta = 1/2 the
+# bound is 0, so the orbital velocities of any small wave (Fr ~ 1e-5, no mean flow) would warn, and runs at the bound
+# (Fr = 2/3 at theta = 0.7) warn on round-off; an excess below 0.01 needs theta at most 0.005 higher (d theta / d Fr =
+# 1/(2 (1 + Fr)^2) <= 1/2), the growth is negligible.
+const SURFACE_FROUDE_WARNING_MARGIN = 0.01
+
+"""
+    surface_froude_number(model) -> (Fr, face)
+
+Largest Froude number Fr = |U| / sqrt(g h) (-) of the depth-averaged flow over the u-faces, and the face where it occurs
+(0 if no face counts). U (m/s) is the depth-averaged velocity and h (m) the water depth of the face:
+- flat or staircase bed: h = depth - bed level of the face + eta averaged to the face, U = sum_k dZ_k u_k / sum_k dZ_k
+  over the open layers (top layer dz + eta with the variable top layer, dz on the fixed grid);
+- wetting and drying: the cut face layers hf of the last step, h = sum_k hf_k, U = sum_k hf_k u_k / h; faces shallower
+  than SURFACE_FROUDE_MIN_DEPTH are left out.
+The surface (barotropic) Froude number of the theta bound `theta_froude_max`; `froude_number` is the internal one.
+PERF: O(nz nx) without allocation; evaluated after every step by the Froude-bound check.
+"""
+function surface_froude_number(model::Model)
+    cfg = model.config
+    st = model.state
+    geo = model.geometry
+    wd = model.wetdry
+    nz, nx, dz, g = cfg.nz, cfg.nx, model.dz, cfg.g
+    variable_top = use_variable_top_layer(cfg)
+    fr_max = 0.0
+    face = 0
+    @inbounds for f in 1:(nx + 1)
+        if wd !== nothing
+            depth = 0.0       # m
+            transport = 0.0   # m^2/s
+            for k in 1:nz
+                depth += wd.hf[k, f]
+                transport += wd.hf[k, f] * st.u[k, f]
+            end
+            depth > SURFACE_FROUDE_MIN_DEPTH || continue
+            U = transport / depth
+        else
+            iL = f == 1 ? (cfg.periodic_x ? nx : 1) : f - 1
+            iR = f == nx + 1 ? (cfg.periodic_x ? 1 : nx) : f
+            eta_f = 0.5 * (st.eta[iL] + st.eta[iR])
+            depth = cfg.depth - geo.bed_face_level[f] + eta_f
+            depth > SURFACE_FROUDE_MIN_DEPTH || continue
+            kb = geo.has_bed ? geo.k_bed_face[f] : 1
+            transport = 0.0
+            thickness = 0.0
+            for k in kb:nz
+                dZ = (k == nz && variable_top) ? dz + eta_f : dz
+                transport += dZ * st.u[k, f]
+                thickness += dZ
+            end
+            U = transport / thickness
+        end
+        fr = abs(U) / sqrt(g * depth)
+        if fr > fr_max
+            fr_max = fr
+            face = f
+        end
+    end
+    return fr_max, face
+end
+
+# Records the largest surface Froude number of the run and warns once when it exceeds the theta bound by more than
+# SURFACE_FROUDE_WARNING_MARGIN (issue #39).
+function _check_surface_froude!(model::Model)
+    fr, face = surface_froude_number(model)
+    model.max_surface_froude = max(model.max_surface_froude, fr)
+    theta = model.config.theta
+    if !model.froude_warning_issued && fr > theta_froude_max(theta) + SURFACE_FROUDE_WARNING_MARGIN
+        model.froude_warning_issued = true
+        @warn @sprintf("surface Froude number %.3f (u-face %d) exceeds theta_froude_max(theta = %.3g) = %.3f: gravity waves on the mean flow can grow slowly. Use theta >= theta_for_froude(Fr) = %.3f. The bound is sharp with the variable top layer and conservative on the fixed grid (docs/TESTS_TECHNICAL_DOCUMENTATION.md, section 19). Warned once per model.",
+            fr, face, theta, theta_froude_max(theta), theta_for_froude(fr))
+    end
+    return nothing
+end
+
 function compute_diagnostics(model::Model)
     cfg = model.config
     st = model.state
@@ -1093,6 +1193,8 @@ function compute_diagnostics(model::Model)
         "cfl_z" => cfl_z,
         "cfl_total" => cfl_total,
         "froude" => froude_number(st.u, st.rho, cfg.rho0, cfg.g, cfg.depth),
+        "surface_froude" => surface_froude_number(model)[1],
+        "surface_froude_max" => model.max_surface_froude,
         "water_volume" => model.wetdry === nothing ? water_volume(cfg.depth, st.eta, model.dx) - sum(model.geometry.bed_level) * model.dx : sum(water_depth(model)) * model.dx,
         "constituent_mass" => _constituent_mass(model),
         "boundary_flux" => model.wetdry === nothing ?
@@ -1397,7 +1499,11 @@ function step_forward!(model::Model)
     if cfg.wetting_drying != (model.wetdry !== nothing)
         throw(ArgumentError("wetting_drying cannot be changed after Model construction"))
     end
-    cfg.wetting_drying && return _step_forward_wetting_drying!(model)
+    if cfg.wetting_drying
+        _step_forward_wetting_drying!(model)
+        _check_surface_froude!(model)
+        return nothing
+    end
     if (model.turbulence !== nothing) != (turbulence_closure(cfg) == "k_epsilon")
         throw(ArgumentError("turbulence_closure cannot be changed across the k_epsilon boundary after Model construction"))
     end
@@ -1811,6 +1917,7 @@ function step_forward!(model::Model)
         buoyancy!(model.last_buoy_w, ws.rho_w, model.rho_0_w_2d)
     end
 
+    @timeit model.timers "step/froude_check" _check_surface_froude!(model)
     return nothing
 end
 
