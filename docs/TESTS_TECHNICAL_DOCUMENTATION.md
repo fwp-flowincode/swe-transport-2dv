@@ -1167,6 +1167,57 @@ Limits:
 References: Orlanski (1976), J. Comput. Phys. 21, 251-269 (radiation condition); Chow (1959), Open-Channel Hydraulics,
 ch. 3 (critical flow). Equation numbers were not checked.
 
+### 23) Flow over obstacles (issue #47)
+
+Steady frictionless flow over a bed obstacle keeps the energy head $E=q^2/(2gh^2)+h+z_b$ except across a hydraulic
+jump, which keeps the momentum flux. `src/reference_solutions.jl` provides:
+- `critical_depth` $h_c=(q^2/g)^{1/3}$, the minimum $\tfrac32h_c$ of the specific energy;
+- `bernoulli_depth`, the sub- or supercritical root by bisection;
+- `conjugate_depth`, the Bélanger relation $h_2/h_1=\tfrac12(\sqrt{1+8\mathrm{Fr}_1^2}-1)$;
+- `hydraulic_jump_position`, the first point downstream of the crest where the conjugate of the supercritical depth
+  equals the subcritical depth of the outlet energy;
+- `bump_flow_depth`, the depth profile for the three regimes.
+
+The SWASHES jump lies at $x=11.6656$ m (Delestre et al. 2013).
+
+Cases, all in the wetting-drying step with the obstacle as a real bed (cut cells), $\theta=1$ for the transcritical
+cases and 0.75 for the subcritical case (`theta_for_froude` of the crest flow):
+
+| case | 1D error, nx = 125 / 250 / 500 | 2DV (nz = 8), nx = 125 |
+|---|---|---|
+| bump, subcritical ($q=4.42$ m²/s) | 9.0 / 4.5 / 2.2 mm | the same as 1D |
+| bump, transcritical ($q=1.53$ m²/s) | 22 / 12 / 6.1 mm | the same as 1D |
+| bump, jump ($q=0.18$ m²/s), 0.5 m away from it | 10 / 5.4 / 2.9 mm | 18 mm ($\nu=10^{-3}$ m²/s) |
+| jump position | 52 / 17 / 12 mm | about 0.15 m upstream |
+
+The convergence is first order, as expected for the depth at a critical point and with the first-order wet/dry
+geometry. In 2DV the hydrostatic jump forms a roller with backflow at the bed. With $\nu=10^{-4}$ m²/s it does not
+become steady (the discharge varies by 3 %), because the roller is resolved by only one or two layers of the 8 cm
+supercritical depth. With $\nu=10^{-3}$ m²/s it is steady, and the jump sits upstream of the depth-averaged one.
+
+**Broad-crested weir** (trapezoid, $p=0.5$ m, $q=1$ m²/s). In free flow the model head reproduces the weir law
+$q=(2/3)^{3/2}\sqrt g H^{3/2}$ within 1.25 % ($\Delta x=0.4$ m) and 0.45 % (0.2 m). The upstream energy is the same for
+every tailwater below the modular limit; above it, it equals the tailwater energy, as frictionless theory says
+($E_{up}=\max(E_t,\,p+\tfrac32h_c)$; figure in `experiments/obstacles`).
+
+**Start of a frictionless transcritical run.** Without friction and without an outlet level, a lake carrying $q$ is
+also a steady state. The free outflow keeps a lake as it is, because the radiation condition only lets waves out. The
+crest-controlled solution therefore needs water only upstream of the crest at the start.
+
+**Tracer** (`set_x_inflow_outflow!(...; left_rho)`, wetting-drying step). The face density of an inflow at the left
+boundary is the prescribed $\rho_{in}$; otherwise the density of the first cell is used. $\rho_{in}$ widens the bounds
+of the monotone transport (`_include_inflow_density_in_bounds!`), so a new extreme is not clipped away. Through all
+three bump cases, 1D and 2DV, the content $\sum h\rho\,\Delta x$ changes every step exactly by
+$\Delta t\,(q_{in}\rho_{in}-q_{out}\rho_{nx})$, and the values stay within $[\rho_0,\rho_{in}]$. The transport of the
+other modes has no flux through the outer faces, so `left_rho` is rejected there.
+
+Not covered: the sharp-crested (thin-plate) weir. Its curved nappe needs the non-hydrostatic pressure, and open
+boundaries in the non-hydrostatic mode are issue #49.
+
+References: Delestre et al. (2013), SWASHES, Int. J. Numer. Methods Fluids 72, 269-300, section 3.1.1; Chow (1959),
+Open-Channel Hydraulics, ch. 3, 14 and 15; Henderson (1966), Open Channel Flow, ch. 6 (weirs). Equation numbers were
+not checked.
+
 ## Test-by-test documentation
 
 ### test_verify_state_shapes
@@ -2197,6 +2248,27 @@ stated otherwise.
   - `left_level` without discharge, non-finite, or on the fixed grid;
   - `right_free` together with `right_level` or `right_profile`;
   - `right_free` with explicit vertical terms or in the non-hydrostatic mode.
+
+### Obstacle tests (`test_obstacles.jl`, section 23)
+
+- `test_verify_bump_reference_solutions`: properties of the reference functions.
+  - Critical depth has Fr = 1; both Bernoulli roots have the same specific energy.
+  - `conjugate_depth` is an involution, and a head below $\tfrac32h_c$ is rejected.
+  - The crest depth of the transcritical case is $h_c$, to $10^{-7}$: at the energy minimum round-off only fixes $h$
+    to $\sqrt\varepsilon$.
+  - The SWASHES jump position is 11.6656 m, with conjugate depths on both sides.
+- `test_validate_swashes_bump_subcritical`: 1D and 2DV within 1.5 cm (nx = 125); the discharge is steady; the observed
+  order from nx = 125 and 250 is above 0.8.
+- `test_validate_swashes_bump_transcritical`: 1D and 2DV within 3 cm, supercritical downstream of the bump.
+- `test_validate_swashes_bump_shock`: 0.5 m away from the jump within 2 cm (1D) or 3 cm (2DV, $\nu=10^{-3}$ m²/s);
+  jump position within 0.1 m (1D); steady discharge.
+- `test_verify_tracer_through_bump_monotone_and_conserved`: all three cases, 1D and 2DV. The tracer budget closes to
+  round-off every step, the values stay within the inflow and initial densities, and the front passes the crest.
+- `test_validate_broad_crested_weir_free_and_submerged`: 1D and 2DV. In free flow the weir law gives $q$ from the
+  upstream head within 2 % (measured 1.25 %), the same for two tailwaters; submerged, the upstream energy is the
+  tailwater energy within 3 mm.
+- `test_verify_inflow_density_config_checks`: `left_rho` is rejected without wetting and drying and when not finite,
+  and it widens the transport bounds.
 
 ## Additional validation scripts and literature basis
 

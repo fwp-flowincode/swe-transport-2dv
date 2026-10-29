@@ -1155,6 +1155,7 @@ function _wd_transport_density!(model::Model, wd::WetDryState)
     end
     second = cfg.transport_advection_scheme == "tvd2"
     wet(k, i) = wd.h[k, i] > WD_EMPTY_CELL_THICKNESS
+    rho_in = model.x_boundary_rho_left   # kg/m^3, density of the inflow at the left boundary (or nothing)
     @inbounds for f in 1:(nx + 1), k in 1:nz
         qf = q[k, f]
         qf == 0.0 && continue
@@ -1163,7 +1164,8 @@ function _wd_transport_density!(model::Model, wd::WetDryState)
         upup = qf > 0.0 ? f - 2 : f + 1
         has = 1 <= upup <= nx && 1 <= down <= nx && 1 < f <= nx && wet(k, upup) && wet(k, up) && wet(k, down)
         courant = has ? abs(qf) * dt / (dx * wd.h[k, up]) : 0.0
-        rho_f = _wd_face_density(rho[k, up], has ? rho[k, upup] : 0.0, has ? rho[k, down] : 0.0, courant, has, second)
+        rho_f = (f == 1 && qf > 0.0 && rho_in !== nothing) ? rho_in :
+            _wd_face_density(rho[k, up], has ? rho[k, upup] : 0.0, has ? rho[k, down] : 0.0, courant, has, second)
         flux = dt / dx * qf * rho_f
         f > 1 && (M[k, f - 1] -= flux)
         f <= nx && (M[k, f] += flux)
