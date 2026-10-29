@@ -158,6 +158,7 @@ function initialize_water_level!(model::Model, level::Union{Real,AbstractVector{
     fill!(st.u, 0.0)
     fill!(st.w, 0.0)
     fill!(st.p, 0.0)
+    _reset_nonhydrostatic_history!(model)
     wd.time = 0.0
     _refresh_density_metadata!(model)
     return nothing

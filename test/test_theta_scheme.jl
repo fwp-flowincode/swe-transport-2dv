@@ -34,6 +34,8 @@ function theta_wave_model(; theta::Real, dt::Real, nx::Int=20, nz::Int=4, L::Rea
     model.state.eta .= A .* cos.(k .* x)
     fill!(model.state.rho, 1000.0)
     refresh_density_metadata!(model)
+    model.rho_min_init = 900.0
+    model.rho_max_init = 1100.0
     c = sqrt(cfg.g * (H - bed))
     omega_h = 2c / model.dx * sin(k * model.dx / 2)
     return model, k, omega_h, A, x
@@ -72,6 +74,9 @@ end
         model = Model(ModelConfig(nx=10, nz=4, theta=0.6))
         model.config.theta = 0.7
         @test_throws ArgumentError step_forward!(model)   # the free-surface matrix was built for theta = 0.6
+
+        model32 = Model(ModelConfig(nx=10, nz=4); T=Float32)
+        @test_nowarn step_forward!(model32)
     end
 
     @testset "test_verify_theta_froude_bound_matches_linear_stability" begin

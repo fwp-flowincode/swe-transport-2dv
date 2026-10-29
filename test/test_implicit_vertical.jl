@@ -18,12 +18,12 @@ function random_column(rng, m)
     return dZ, W, nu, uhat
 end
 
-function solve_column(uhat, dZ, W, nu, gamma, dt; advective=false, h_adv=dZ)
+function solve_column(uhat, dZ, W, nu, gamma, dt; advective=false, h_adv=dZ, top_advection_rate=0.0)
     m = length(dZ)
     u, r = zeros(m), zeros(m)
     work = zeros(m, 3)
     SweTransport2DV.implicit_vertical_column!(u, r, uhat, dZ, W, nu, gamma, dt, m, view(work, :, 1), view(work, :, 2),
-        view(work, :, 3); advective=advective, h_adv=h_adv)
+        view(work, :, 3); advective=advective, h_adv=h_adv, top_advection_rate=top_advection_rate)
     return u, r
 end
 
@@ -82,6 +82,14 @@ end
             @test r[1] ≈ 1.0 / (1 + dt_gamma_over_dz) rtol = TOL_IDENTITY
             @test u[1] > 0.0
         end
+    end
+
+    @testset "test_verify_implicit_top_row_vertical_advection" begin
+        # The variable top-layer correction is an implicit top-cell source.
+        rate, dt = 2.0, 0.1
+        u, r = solve_column([2.0], [0.5], zeros(2), zeros(2), 0.0, dt; top_advection_rate=rate)
+        @test u[1] ≈ 2.0 / (1 + dt * rate) rtol = TOL_IDENTITY
+        @test r[1] ≈ 1.0 / (1 + dt * rate) rtol = TOL_IDENTITY
     end
 
     # Periodic channel of depth H with uniform flow, no viscosity: only the bed layer feels the friction.

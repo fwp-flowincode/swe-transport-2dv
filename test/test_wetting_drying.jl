@@ -126,6 +126,27 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         @test size(buoy_w) == (cfg.nz - 1, cfg.nx)
     end
 
+    @testset "test_verify_wd_reinitialization_clears_nonhydrostatic_history" begin
+        cfg = wd_config(nx=20, nz=4, depth=1.0, dt=0.001, use_hydrostatic=false)
+        model = Model(cfg)
+        x = wd_x_centres(cfg)
+        initialize_water_level!(model, 1.0 .+ 0.02 .* sin.(pi .* x ./ cfg.length); rho=1000.0)
+        for _ in 1:5
+            step_forward!(model)
+        end
+        @test maximum(abs, model.wetdry.q_nh) > 0.0
+        @test maximum(abs, model.wetdry.w_nh) > 0.0
+
+        initialize_water_level!(model, 1.0; rho=1000.0)
+        fresh = Model(copy_config(cfg))
+        initialize_water_level!(fresh, 1.0; rho=1000.0)
+        step_forward!(model)
+        step_forward!(fresh)
+        @test model.state.u ≈ fresh.state.u atol=TOL_IDENTITY rtol=0
+        @test model.state.w ≈ fresh.state.w atol=TOL_IDENTITY rtol=0
+        @test model.state.eta ≈ fresh.state.eta atol=TOL_IDENTITY rtol=0
+    end
+
     @testset "test_verify_wd_nz1_pressure_diagnostics_output" begin
         mktempdir() do output_dir
             cfg = wd_config(nx=8, nz=1, depth=2.0, nt=1, output_dir=output_dir,

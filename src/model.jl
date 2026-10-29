@@ -413,6 +413,15 @@ function refresh_density_metadata!(model::Model)
     return _refresh_density_metadata!(model)
 end
 
+function _reset_nonhydrostatic_history!(model::Model)
+    fill!(model.ws.p_corr, 0.0)
+    if model.wetdry !== nothing
+        fill!(model.wetdry.q_nh, 0.0)
+        fill!(model.wetdry.w_nh, 0.0)
+    end
+    return nothing
+end
+
 function initialize_lock_exchange!(model::Model; rho_left::Real=model.config.rho_left, rho_right::Real=model.config.rho_right)
     cfg = model.config
     st = model.state
@@ -424,6 +433,7 @@ function initialize_lock_exchange!(model::Model; rho_left::Real=model.config.rho
     fill!(st.w, 0.0)
     fill!(st.eta, 0.0)
     fill!(st.p, 0.0)
+    _reset_nonhydrostatic_history!(model)
 
     _refresh_density_metadata!(model)
 
@@ -472,6 +482,7 @@ function initialize_rayleigh_taylor!(
     fill!(st.w, 0.0)
     fill!(st.eta, 0.0)
     fill!(st.p, 0.0)
+    _reset_nonhydrostatic_history!(model)
 
     _refresh_density_metadata!(model)
 
@@ -521,6 +532,7 @@ function initialize_rising_plume!(
     fill!(st.w, 0.0)
     fill!(st.eta, 0.0)
     fill!(st.p, 0.0)
+    _reset_nonhydrostatic_history!(model)
 
     _refresh_density_metadata!(model)
 
@@ -573,6 +585,7 @@ function initialize_jet_impulse!(
     fill!(st.w, 0.0)
     fill!(st.eta, 0.0)
     fill!(st.p, 0.0)
+    _reset_nonhydrostatic_history!(model)
 
     x0 = x_center_fraction * cfg.length
     z0 = z_center_fraction * cfg.depth
@@ -635,6 +648,7 @@ function initialize_internal_seiche!(
     fill!(st.w, 0.0)
     fill!(st.eta, 0.0)
     fill!(st.p, 0.0)
+    _reset_nonhydrostatic_history!(model)
 
     _refresh_density_metadata!(model)
 
@@ -662,6 +676,7 @@ function initialize_surface_dam_break!(
     fill!(st.p, 0.0)
     @views st.eta[1:split_idx] .= 0.5 * eta_jump
     @views st.eta[(split_idx + 1):end] .= -0.5 * eta_jump
+    _reset_nonhydrostatic_history!(model)
 
     _refresh_density_metadata!(model)
 
@@ -718,6 +733,7 @@ function initialize_kelvin_helmholtz!(
     fill!(st.w, 0.0)
     fill!(st.eta, 0.0)
     fill!(st.p, 0.0)
+    _reset_nonhydrostatic_history!(model)
     # WHY: with periodic x the first and last u-faces are the same seam face and carry the shear like every other face
     # (x_u[1] = 0 and x_u[end] = L have the same perturbation phase); zeroing them would put a wall-like velocity
     # defect across the whole depth at the seam. Closed walls keep zero normal velocity.
@@ -1196,7 +1212,8 @@ function _implicit_vertical_terms!(model::Model, variable_top::Bool)
         end
         gamma = cb * abs(ws.u_old[kb, f])   # m/s
         implicit_vertical_column!(view(col, :, 1), view(col, :, 2), view(col, :, 3), view(col, :, 4), view(col, :, 5),
-            view(col, :, 6), gamma, dt, m, view(col, :, 7), view(col, :, 8), view(col, :, 9))
+            view(col, :, 6), gamma, dt, m, view(col, :, 7), view(col, :, 8), view(col, :, 9);
+            top_advection_rate=variable_top ? ws.advection_u_ws.vz_face[nz, f] / dz : 0.0)
         H = 0.0
         for k in 1:(kb - 1)
             ws.r_vert[k, f] = 0.0
@@ -1266,7 +1283,7 @@ function step_forward!(model::Model)
     end
     # WHY the type assertion: the Model field is untyped; a concrete solver type avoids boxing and dynamic dispatch
     bsolver = model.barotropic_solver::BarotropicSolver{eltype(st.eta)}
-    if cfg.theta != bsolver.theta
+    if typeof(bsolver.theta)(cfg.theta) != bsolver.theta
         throw(ArgumentError("theta cannot be changed after Model construction (the free-surface matrix depends on it)"))
     end
     geo = model.geometry

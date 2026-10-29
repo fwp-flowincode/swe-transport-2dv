@@ -385,6 +385,7 @@ function _top_row_advective_form!(
     dz::Real,
     ws::AdvectionWorkspace;
     periodic_x::Bool=false,
+    vertical::Bool=true,
 )
     nz, nx = size(phi)
     if nz < 2
@@ -394,7 +395,7 @@ function _top_row_advective_form!(
     @inbounds for i in 1:nx
         volume_flux_in = i >= 2 ? ws.vx_face[nz, i] : (periodic_x ? ws.vx_face[nz, 1] : 0.0)
         volume_flux_out = i + 1 <= nx ? ws.vx_face[nz, i + 1] : (periodic_x ? ws.vx_face[nz, nx + 1] : 0.0)
-        div_v = (volume_flux_out - volume_flux_in) / dx - ws.vz_face[nz, i] / dz   # zero volume flux through the top face
+        div_v = (volume_flux_out - volume_flux_in) / dx - (vertical ? ws.vz_face[nz, i] / dz : 0.0)
         out[nz, i] -= phi[nz, i] * div_v
     end
 
@@ -426,9 +427,9 @@ function advection_term_u!(
     end
     if top_row_advective_form
         if periodic_x
-            _top_row_advective_form!(@view(out[:, 1:(size(u, 2) - 1)]), @view(u[:, 1:(size(u, 2) - 1)]), dx, dz, ws_adv; periodic_x=true)
+            _top_row_advective_form!(@view(out[:, 1:(size(u, 2) - 1)]), @view(u[:, 1:(size(u, 2) - 1)]), dx, dz, ws_adv; periodic_x=true, vertical=vertical)
         else
-            _top_row_advective_form!(out, u, dx, dz, ws_adv)
+            _top_row_advective_form!(out, u, dx, dz, ws_adv; vertical=vertical)
         end
     end
     return out
