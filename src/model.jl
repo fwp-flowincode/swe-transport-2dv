@@ -45,6 +45,13 @@ Base.@kwdef mutable struct ModelConfig
     # Bed roughness length z0 (m): > 0 applies a log-law quadratic bed friction c_b u|u| on the lowest row
     # (c_b = (kappa/ln(z1/z0))^2, z1 = dz/2) and, with k-epsilon, the wall functions; 0 keeps the free-slip bed.
     bed_roughness_length::Float64 = 0.0
+    # Chezy coefficient C (m^(1/2)/s; issue #14): > 0 applies the depth-averaged quadratic bed friction
+    # tau_b / rho0 = g |U| U / C^2 (U the depth-averaged velocity of the u-face) as a stress on the lowest layer, so the
+    # depth-integrated momentum balance has the Chezy law exactly, independently of the vertical viscosity; 0 = off.
+    # Excludes bed_roughness_length (use chezy_roughness_length(C, depth) for the log-law equivalent, e.g. with
+    # k-epsilon). WHY on the depth average: uniform channel flow then has U = C sqrt(H i_b) exactly; the vertical
+    # profile needs a turbulent viscosity of the order kappa u_* H / 6 (with molecular nu the lowest layer reverses).
+    chezy_coefficient::Float64 = 0.0
     dt::Float64 = 0.0025
     # Implicitness theta (-, THETA_MIN <= theta <= THETA_MAX) of the free surface (issue #34; Casulli & Cattani 1994): the
     # surface level in the pressure gradient and the velocity in the continuity flux are taken at n + theta (layer
@@ -253,7 +260,7 @@ mutable struct ModelWorkspace{T<:Real}
     # implicit vertical terms (implicit_vertical_terms=true)
     r_vert::Matrix{T}       # -, nz x (nx+1): column response r = A^{-1} dZ per u-face (1 without implicit terms)
     H_face::Vector{T}       # m, nx+1: effective depth sum_k dZ_k r_k per u-face
-    col::Matrix{T}          # work columns (nz+1) x 10: u, r, uhat, dZ, W, nu, cprime, dprime, rprime, h_adv
+    col::Matrix{T}          # work columns (nz+1) x 11: u, r, uhat, dZ, W, nu, cprime, dprime, rprime, h_adv, zprime
 end
 
 function ModelWorkspace(cfg::ModelConfig; T::Type{<:Real}=Float64)
@@ -293,7 +300,7 @@ function ModelWorkspace(cfg::ModelConfig; T::Type{<:Real}=Float64)
         zeros(T, nz + 1, nx),
         ones(T, nz, nx + 1),
         zeros(T, nx + 1),
-        zeros(T, nz + 1, 10),
+        zeros(T, nz + 1, 11),
     )
 end
 
@@ -333,6 +340,8 @@ mutable struct Model{T<:Real}
     x_boundary_u_left_profile::Any
     x_boundary_u_right_open::Bool
     x_boundary_u_right_profile::Any
+    x_boundary_eta_right::Any   # nothing, or the prescribed water level eta_R (m) at the right boundary face
+    x_boundary_q_left::Any      # nothing, or the discharge q (m^2/s) of the left boundary face (profile = shape)
     geometry::BedGeometry   # staircase bed masks (all cells wet for the flat bed)
     turbulence::Any         # KEpsilonState with turbulence_closure = "k_epsilon", else nothing
     wetdry::Any             # WetDryState with wetting_drying = true, else nothing
@@ -804,6 +813,8 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
         nothing,
         false,
         nothing,
+        nothing,
+        nothing,
         geometry,
         turbulence_closure(cfg) == "k_epsilon" ? KEpsilonState(cfg.nz, cfg.nx; T=T) : nothing,
         cfg.wetting_drying ? WetDryState(cfg; T=T) : nothing,
@@ -818,45 +829,98 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
     return model
 end
 
+"""
+    set_x_inflow_outflow!(model, left_profile; left_discharge=nothing, open_right=true, right_profile=nothing,
+                          right_level=nothing)
+
+Lateral boundary conditions: velocity `left_profile` (m/s, one value per layer) at the left boundary face, or with
+`left_discharge` q (m^2/s) the profile shape scaled to the discharge, u_k = q * left_profile_k / sum_j dZ_j left_profile_j
+with the face layer thicknesses dZ of time level n (variable top layer: dz + eta_1; wetting and drying: the cut face
+layers; dry layers carry no flow), so that the inflow is q whatever the level at the inlet. At the right boundary face a
+wall, a zero-gradient velocity (`open_right=true`), a prescribed velocity `right_profile` (m/s, length nz) or a
+prescribed water level `right_level` (m, surface elevation eta at the boundary face x = L; overrides `open_right`).
+
+Water-level boundary (issue #14): the velocity of the boundary face is computed by its own momentum equation: advection
+in an open control volume (`_open_right_face_velocity!`), the baroclinic pressure gradient and horizontal diffusion of
+face nx (zero gradient), its own implicit vertical column and the surface slope (eta_R - eta_nx)/(dx/2) between the last
+cell centre and the boundary, which enters the free-surface solve implicitly like an interior face. Requires the
+hydrostatic mode, `implicit_vertical_terms=true` and no `periodic_x`. With the variable top layer (and with wetting and
+drying) the top layer of the boundary face has the level eta_R.
+"""
 function set_x_inflow_outflow!(
     model::Model,
     left_profile::AbstractVector{<:Real};
+    left_discharge::Union{Nothing,Real}=nothing,
     open_right::Bool=true,
     right_profile::Union{Nothing,AbstractVector{<:Real}}=nothing,
+    right_level::Union{Nothing,Real}=nothing,
 )
+    if left_discharge !== nothing
+        isfinite(left_discharge) || throw(ArgumentError("left_discharge must be finite"))
+        all(>=(0.0), left_profile) && any(>(0.0), left_profile) ||
+            throw(ArgumentError("left_discharge needs a profile shape with values >= 0, not all zero"))
+    end
     model.wetdry === nothing || (model.wetdry.left_velocity = nothing)
     model.x_boundary_u_left_profile = collect(left_profile)
-    model.x_boundary_u_right_open = open_right
-    model.x_boundary_u_right_profile = right_profile === nothing ? nothing : collect(right_profile)
+    model.x_boundary_q_left = left_discharge === nothing ? nothing : Float64(left_discharge)
+    _set_right_boundary!(model, open_right, right_profile, right_level)
+    # WHY: the discharge scaling uses the level of time n in ws.eta_old (set by every step); before the first step it
+    # is the initial level
+    copyto!(model.ws.eta_old, model.state.eta)
     _apply_x_boundary_conditions!(model)
     return model
 end
 
 """
-    set_x_inflow_outflow!(model, left_velocity::Function; open_right=false, right_profile=nothing)
+    set_x_inflow_outflow!(model, left_velocity::Function; open_right=false, right_profile=nothing, right_level=nothing)
 
 Wetting-drying mode: time-dependent velocity at the left boundary face, `left_velocity(t)` (m/s; scalar or one value per
-layer) at the model time t (s) of the end of each step; dry layers of the face carry no flow.
+layer) at the model time t (s) of the end of each step; dry layers of the face carry no flow. Right boundary as in the
+method with a velocity profile.
 """
 function set_x_inflow_outflow!(
     model::Model,
     left_velocity::Function;
     open_right::Bool=false,
     right_profile::Union{Nothing,AbstractVector{<:Real}}=nothing,
+    right_level::Union{Nothing,Real}=nothing,
 )
     model.wetdry === nothing && throw(ArgumentError("a time-dependent boundary velocity requires ModelConfig(wetting_drying=true)"))
     model.wetdry.left_velocity = left_velocity
     model.x_boundary_u_left_profile = nothing
-    model.x_boundary_u_right_open = open_right
-    model.x_boundary_u_right_profile = right_profile === nothing ? nothing : collect(right_profile)
+    model.x_boundary_q_left = nothing
+    _set_right_boundary!(model, open_right, right_profile, right_level)
     return model
+end
+
+function _set_right_boundary!(model::Model, open_right::Bool, right_profile, right_level)
+    if right_level !== nothing
+        right_profile === nothing || throw(ArgumentError("right_profile and right_level exclude each other"))
+        isfinite(right_level) || throw(ArgumentError("right_level must be finite"))
+        _check_right_level_config(model.config)
+    end
+    model.x_boundary_u_right_open = right_level === nothing && open_right
+    model.x_boundary_u_right_profile = right_profile === nothing ? nothing : collect(right_profile)
+    model.x_boundary_eta_right = right_level === nothing ? nothing : Float64(right_level)
+    return nothing
+end
+
+function _check_right_level_config(cfg::ModelConfig)
+    cfg.periodic_x && throw(ArgumentError("a water-level boundary (right_level) is not possible with periodic_x=true"))
+    cfg.use_hydrostatic || throw(ArgumentError("a water-level boundary (right_level) is implemented for the hydrostatic mode only"))
+    # WHY implicit vertical terms: the boundary face needs its own vertical viscosity and friction (the explicit
+    # diffusion_term! leaves the boundary points out); its implicit column provides them
+    cfg.implicit_vertical_terms || throw(ArgumentError("a water-level boundary (right_level) requires implicit_vertical_terms=true"))
+    return nothing
 end
 
 function clear_x_inflow_outflow!(model::Model)
     model.wetdry === nothing || (model.wetdry.left_velocity = nothing)
     model.x_boundary_u_left_profile = nothing
+    model.x_boundary_q_left = nothing
     model.x_boundary_u_right_open = false
     model.x_boundary_u_right_profile = nothing
+    model.x_boundary_eta_right = nothing
     return model
 end
 
@@ -886,6 +950,12 @@ function _check_model_config(cfg::ModelConfig)
     if (turbulence_closure(cfg) == "k_epsilon" || cfg.bed_roughness_length > 0.0) && cfg.bed_level !== nothing && !cfg.wetting_drying
         throw(ArgumentError("turbulence_closure=\"k_epsilon\" and bed_roughness_length are implemented for the flat bed only (bed_level=nothing)"))
     end
+    if cfg.chezy_coefficient != 0.0
+        cfg.chezy_coefficient > 0.0 || throw(ArgumentError("chezy_coefficient must be >= 0, got $(cfg.chezy_coefficient)"))
+        cfg.bed_roughness_length == 0.0 || throw(ArgumentError("chezy_coefficient and bed_roughness_length exclude each other (one bed friction law)"))
+        turbulence_closure(cfg) == "k_epsilon" && throw(ArgumentError("turbulence_closure=\"k_epsilon\" needs a roughness length for its wall functions: use bed_roughness_length=chezy_roughness_length(C, depth) instead of chezy_coefficient"))
+        cfg.bed_level === nothing || cfg.wetting_drying || throw(ArgumentError("chezy_coefficient is implemented for the flat bed (bed_level=nothing) or with wetting_drying=true"))
+    end
     if !(cfg.transport_advection_scheme in ("upwind1", "tvd2"))
         throw(ArgumentError("transport_advection_scheme must be \"upwind1\" or \"tvd2\", got \"$(cfg.transport_advection_scheme)\""))
     end
@@ -904,8 +974,8 @@ function _check_wetting_drying_config(cfg::ModelConfig)
     cfg.periodic_x && throw(ArgumentError("wetting_drying=true does not support periodic_x=true"))
     cfg.momentum_advection_scheme in ("upwind1", "tvd2") || throw(ArgumentError("momentum_advection_scheme must be \"upwind1\" or \"tvd2\", got \"$(cfg.momentum_advection_scheme)\""))
     turbulence_closure(cfg) == "none" || throw(ArgumentError("wetting_drying=true does not support a turbulence closure"))
-    cfg.bed_roughness_length == 0.0 || cfg.implicit_vertical_terms ||
-        throw(ArgumentError("wetting_drying=true supports bed_roughness_length only with implicit_vertical_terms=true (the cut layers at the bed can be arbitrarily thin)"))
+    (cfg.bed_roughness_length == 0.0 && cfg.chezy_coefficient == 0.0) || cfg.implicit_vertical_terms ||
+        throw(ArgumentError("wetting_drying=true supports bed_roughness_length and chezy_coefficient only with implicit_vertical_terms=true (the cut layers at the bed can be arbitrarily thin)"))
     cfg.wind_stress_x == 0.0 || throw(ArgumentError("wetting_drying=true does not support wind_stress_x"))
     cfg.dry_depth_threshold > 0.0 || throw(ArgumentError("dry_depth_threshold must be > 0"))
     if cfg.bed_level !== nothing
@@ -946,9 +1016,22 @@ function _apply_x_boundary_conditions!(model::Model, u::AbstractMatrix{<:Real})
             throw(ArgumentError("left inflow profile length must match nz"))
         end
         @views u[:, 1] .= left_profile
+        if model.x_boundary_q_left !== nothing
+            # discharge boundary: scale the shape with the face layer thicknesses of level n (ws.eta_old)
+            # WHY the wetting-drying branch: the step scales with the cut face layers itself
+            # (_wd_boundary_velocities!), but u of the boundary face set here is u^n of the next step and carries
+            # (1 - theta) of its inflow; scaled with the full layers of the flat grid the inflow over a raised bed was
+            # 0.6 % too small whenever the discharge was reset every step (issue #14)
+            transport = model.wetdry === nothing ? _left_face_transport(model, left_profile) :
+                _wd_left_face_transport(model, left_profile)   # m^2/s per unit of the shape
+            transport > 0.0 || throw(DomainError(transport, "left_discharge: the inflow face is dry"))
+            @views u[:, 1] .*= model.x_boundary_q_left / transport
+        end
     end
 
-    if model.x_boundary_u_right_profile !== nothing
+    if model.x_boundary_eta_right !== nothing
+        # water-level boundary: u of the boundary face comes from its own momentum equation (step_forward!)
+    elseif model.x_boundary_u_right_profile !== nothing
         right_profile = model.x_boundary_u_right_profile
         if length(right_profile) != size(u, 1)
             throw(ArgumentError("right outflow profile length must match nz"))
@@ -964,6 +1047,19 @@ function _apply_x_boundary_conditions!(model::Model, u::AbstractMatrix{<:Real})
 end
 
 _apply_x_boundary_conditions!(model::Model) = _apply_x_boundary_conditions!(model, model.state.u)
+
+# Transport (m^2/s per unit of the shape) of the profile `shape` (length nz) at the left boundary face: layers dz above the
+# bed face, the top layer dz + eta of level n (ws.eta_old) with the variable top layer.
+function _left_face_transport(model::Model, shape::AbstractVector{<:Real})
+    nz, dz = model.config.nz, model.dz
+    h_top = use_variable_top_layer(model.config) ? dz + model.ws.eta_old[1] : dz
+    kb = model.geometry.has_bed ? model.geometry.k_bed_face[1] : 1
+    transport = 0.0
+    for k in kb:nz
+        transport += (k == nz ? h_top : dz) * shape[k]
+    end
+    return transport
+end
 
 # Zeroes u (m/s, nz x (nx+1)) on all faces that are not open: walls of the bed and faces inside it (variable bed).
 function _mask_u!(u::AbstractMatrix{<:Real}, geo::BedGeometry)
@@ -1157,6 +1253,11 @@ function _surface_gradient!(grad::AbstractVector{<:Real}, eta::AbstractVector{<:
     return grad
 end
 
+# Surface slope (1) at the right boundary face of a water-level boundary: the level eta_right (m) lies on the face itself,
+# half a cell from the centre of the last cell. WHY at the face (not in a ghost cell at L + dx/2): eta_right is then the
+# level at the end of the domain, x = L, as a measured or normal-depth level is specified.
+_right_level_slope(eta::AbstractVector{<:Real}, eta_right::Real, dx::Real) = (eta_right - eta[end]) / (0.5 * dx)
+
 # u[k, f] += factor * slope (* r[k, f], the column response of the implicit vertical terms, if given) on the interior
 # u-faces (all faces with periodic_x); factor in m/s per unit slope.
 function _add_surface_gradient!(u::AbstractMatrix{<:Real}, grad::AbstractVector{<:Real}, factor::Real, periodic_x::Bool;
@@ -1189,8 +1290,8 @@ end
 
 # Implicit vertical terms of the fixed grid (implicit_vertical_terms=true) on every interior u-face: viscosity nu_eff_u,
 # upwind vertical advection in flux form with w^n averaged to the face, log-law bed friction c_b |u^n_1| (flat bed,
-# z1 = dz/2). Replaces ws.u_hat by A^{-1}(dZ .* u_hat) on the open layers and writes the column response ws.r_vert and
-# the effective depth ws.H_face (src/implicit_vertical.jl).
+# z1 = dz/2) or Chezy friction g |U^n| / C^2 on the depth average. Replaces ws.u_hat by A^{-1}(dZ .* u_hat) on the open
+# layers and writes the column response ws.r_vert and the effective depth ws.H_face (src/implicit_vertical.jl).
 function _implicit_vertical_terms!(model::Model, variable_top::Bool)
     cfg = model.config
     st = model.state
@@ -1200,10 +1301,12 @@ function _implicit_vertical_terms!(model::Model, variable_top::Bool)
     dz, dt = model.dz, cfg.dt
     col = ws.col
     cb = cfg.bed_roughness_length > 0.0 ? bed_friction_coefficient(cfg.bed_roughness_length, 0.5 * dz) : 0.0
-    flo, fhi = cfg.periodic_x ? (1, nx) : (2, nx)
+    cf = cfg.chezy_coefficient > 0.0 ? cfg.g / cfg.chezy_coefficient^2 : 0.0   # -, Chezy friction coefficient g / C^2
+    # the boundary face of a water-level boundary has its own column (set_x_inflow_outflow!(...; right_level))
+    flo, fhi = cfg.periodic_x ? (1, nx) : (2, model.x_boundary_eta_right === nothing ? nx : nx + 1)
     @inbounds for f in flo:fhi
         iL = cfg.periodic_x ? mod1(f - 1, nx) : f - 1   # cells left and right of face f
-        iR = cfg.periodic_x ? mod1(f, nx) : f
+        iR = cfg.periodic_x ? mod1(f, nx) : min(f, nx)  # boundary face: w of the last cell (zero gradient)
         kb = geo.has_bed ? geo.k_bed_face[f] : 1
         m = nz - kb + 1
         for j in 1:m
@@ -1214,15 +1317,26 @@ function _implicit_vertical_terms!(model::Model, variable_top::Bool)
             col[j, 6] = j > 1 ? 0.5 * (ws.nu_eff_u[k - 1, f] + ws.nu_eff_u[k, f]) : 0.0
         end
         gamma = cb * abs(ws.u_old[kb, f])   # m/s
+        gamma_mean = 0.0                    # m/s, Chezy: c_f |U^n| with the depth-averaged velocity of time n
+        if cf > 0.0
+            transport = 0.0
+            depth = 0.0
+            for j in 1:m
+                transport += col[j, 4] * ws.u_old[kb + j - 1, f]
+                depth += col[j, 4]
+            end
+            gamma_mean = cf * abs(transport / depth)
+        end
         # WHY the variable-top-layer correction -u_top div(v) (_top_row_advective_form!, including its vertical part
-        # u_top W/dz) stays explicit in u_hat and is not added to the top diagonal: A stays in pure flux form (1'A = dZ'),
-        # so without friction the effective depth sum(dZ r) equals the water depth exactly (header of
+        # u_top W/h_top, issue #14) stays explicit in u_hat and is not added to the top diagonal: A stays in pure flux
+        # form (1'A = dZ'), so without friction the effective depth sum(dZ r) equals the water depth exactly (header of
         # src/implicit_vertical.jl). A top-diagonal term breaks that identity by O(dt W/dz) (-3 % at dt W/dz = 0.1,
-        # issue #34 review). The explicit term is stable for dt |W|/dz < 2, W ~ d(eta)/dt at the top interface: the
-        # surface would have to move two layer thicknesses in one step, far outside the accuracy range of the variable
-        # top layer (and a fall below the top layer stops the run, _check_top_layer_thickness).
+        # issue #34 review). The explicit term is stable for dt |W|/h_top < 2, W ~ d(eta)/dt at the top interface: the
+        # surface would have to move two top-layer thicknesses in one step, far outside the accuracy range of the
+        # variable top layer (and a fall below top_layer_min_fraction * dz stops the run, _check_top_layer_thickness).
         implicit_vertical_column!(view(col, :, 1), view(col, :, 2), view(col, :, 3), view(col, :, 4), view(col, :, 5),
-            view(col, :, 6), gamma, dt, m, view(col, :, 7), view(col, :, 8), view(col, :, 9))
+            view(col, :, 6), gamma, dt, m, view(col, :, 7), view(col, :, 8), view(col, :, 9); gamma_mean=gamma_mean,
+            zprime=view(col, :, 11))
         H = 0.0
         for k in 1:(kb - 1)
             ws.r_vert[k, f] = 0.0
@@ -1305,11 +1419,20 @@ function step_forward!(model::Model)
         throw(ArgumentError("bed_level is not supported together with vegetation"))
     end
     variable_top = use_variable_top_layer(cfg)
+    # water-level boundary at the right (set_x_inflow_outflow!(...; right_level)): eta_R (m) at the boundary face
+    eta_right = model.x_boundary_eta_right
+    level_bc = eta_right !== nothing
+    level_bc && _check_right_level_config(cfg)
 
     copyto!(ws.eta_old, st.eta)
     if variable_top
         _check_top_layer_thickness(model, ws.eta_old)
         top_layer_face_thickness!(ws.h_top_face, ws.eta_old, model.dz)
+        if level_bc
+            model.dz + eta_right >= cfg.top_layer_min_fraction * model.dz ||
+                throw(ArgumentError("right_level = $(eta_right) m leaves the top layer (dz = $(model.dz) m)"))
+            ws.h_top_face[cfg.nx + 1] = model.dz + eta_right   # the level of the boundary face is known
+        end
     end
 
     if masked
@@ -1322,7 +1445,7 @@ function step_forward!(model::Model)
     implicit = cfg.implicit_vertical_terms
     # WHY top_row_advective_form=true also on the fixed grid: the grid top carries w = d(eta)/dt but no momentum flux,
     # so the flux form alone advects the top row at about (nz + 1) U (issue #37, _top_row_advective_form!)
-    @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=true, periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing, dt=cfg.dt, vertical=!implicit)
+    @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=true, periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing, dt=cfg.dt, vertical=!implicit, open_right=level_bc, h_top_vertical=(implicit && variable_top) ? ws.h_top_face : nothing)
     @timeit model.timers "step/advection_w" advection_term_w!(ws.adv_w, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_w_ws, ws.interpolation_ws, cfg.periodic_x; active=masked ? geo.w_active : nothing, dt=cfg.dt)
 
     @timeit model.timers "step/hydrostatic_predictor" begin
@@ -1336,6 +1459,13 @@ function step_forward!(model::Model)
         diffusion_term!(ws.diff_u, st.u, ws.nu_eff_u, model.dx, model.dz; periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing, vertical=!implicit)
 
         nz, nxp1 = size(st.u)
+        if level_bc
+            # WHY the tendencies of face nx: grad_x_c! and diffusion_term! leave the boundary points out (wall values);
+            # an outflow boundary assumes zero gradients instead, i.e. the baroclinic pressure gradient and horizontal
+            # diffusion of the last interior face (the advection has its own open control volume, open_right)
+            @views ws.grad_p_x[:, nxp1] .= ws.grad_p_x[:, nxp1 - 1]
+            @views ws.diff_u[:, nxp1] .= ws.diff_u[:, nxp1 - 1]
+        end
         @inbounds for i in 1:nxp1
             for k in 1:nz
                 ws.u_hat[k, i] = st.u[k, i] + cfg.dt * (-ws.adv_u[k, i] - (1.0 / cfg.rho0) * ws.grad_p_x[k, i] + ws.diff_u[k, i] + cfg.body_force_x)
@@ -1378,6 +1508,23 @@ function step_forward!(model::Model)
                 rate = cb * abs(st.u[1, i]) / model.dz
                 cfg.dt * rate > 1.0 && throw(ArgumentError("bed friction too stiff for the explicit step: dt * c_b |u| / dz = $(cfg.dt * rate) > 1"))
                 ws.u_hat[1, i] -= cfg.dt * rate * st.u[1, i]
+            end
+        end
+        if cfg.chezy_coefficient > 0.0 && !implicit
+            # Chezy bed friction (explicit) as a stress on the lowest layer: du_1/dt = -c_f |U| U / h_1, c_f = g / C^2,
+            # U = sum_k h_k u_k / H the depth-averaged velocity of time n (flat bed). Depth-integrated it is
+            # dU/dt = -c_f |U| U / H, forward Euler stable for dt * 2 c_f |U| / H < 2.
+            cf = cfg.g / cfg.chezy_coefficient^2   # -
+            @inbounds for i in 1:nxp1
+                h_top = variable_top ? ws.h_top_face[i] : model.dz
+                depth = (nz - 1) * model.dz + h_top
+                s = 0.0
+                for k in 1:(nz - 1)
+                    s += st.u[k, i]
+                end
+                U = (s * model.dz + h_top * st.u[nz, i]) / depth
+                cfg.dt * cf * abs(U) / depth > 1.0 && throw(ArgumentError("Chezy friction too stiff for the explicit step: dt * c_f |U| / H = $(cfg.dt * cf * abs(U) / depth) > 1"))
+                ws.u_hat[1, i] -= cfg.dt * cf * abs(U) * U / (nz == 1 ? h_top : model.dz)
             end
         end
         if cfg.sponge_length > 0.0 && cfg.sponge_rate > 0.0
@@ -1478,6 +1625,10 @@ function step_forward!(model::Model)
             # explicit part of the surface pressure gradient, -(1 - theta) g dt d(eta^n)/dx (Casulli & Cattani 1994)
             _surface_gradient!(ws.eta_grad_x, ws.eta_old, model.dx, cfg.periodic_x)
             _add_surface_gradient!(ws.u_hat, ws.eta_grad_x, -(1.0 - theta) * cfg.g * cfg.dt, cfg.periodic_x)
+            if level_bc
+                slope = _right_level_slope(ws.eta_old, eta_right, model.dx)
+                @views ws.u_hat[:, nx + 1] .-= (1.0 - theta) * cfg.g * cfg.dt * slope
+            end
         end
         _apply_x_boundary_conditions!(model, ws.u_hat)
         if masked
@@ -1493,7 +1644,7 @@ function step_forward!(model::Model)
         @. ws.u_theta = theta * ws.u_hat + (1.0 - theta) * ws.u_old
         if implicit
             _face_transport!(bsolver.U_hat, ws.u_theta, model, variable_top)
-            solve_effective_depth!(bsolver, st.eta, ws.eta_old, ws.H_face; periodic_x=cfg.periodic_x)
+            solve_effective_depth!(bsolver, st.eta, ws.eta_old, ws.H_face; periodic_x=cfg.periodic_x, right_level=eta_right)
             variable_top && _check_top_layer_thickness(model, st.eta)
         elseif variable_top
             solve_variable_thickness!(bsolver, st.eta, ws.u_theta, ws.eta_old, ws.h_top_face)
@@ -1508,6 +1659,10 @@ function step_forward!(model::Model)
         # WHY: corrects ws.u_hat in place (not yet written to st.u) so a following non-hydrostatic projection acts on
         # this surface-corrected predictor, exactly as it already acted on the (pressure-predictor-only) u_hat before.
         _add_surface_gradient!(ws.u_hat, ws.eta_grad_x, -cfg.g * cfg.dt * theta, cfg.periodic_x; r=implicit ? ws.r_vert : nothing)
+        if level_bc
+            slope = _right_level_slope(st.eta, eta_right, model.dx)
+            @views @. ws.u_hat[:, nx + 1] -= cfg.g * cfg.dt * theta * slope * ws.r_vert[:, nx + 1]
+        end
 
         if masked
             _mask_u!(ws.u_hat, geo)
@@ -1578,7 +1733,7 @@ function step_forward!(model::Model)
     end
 
     @timeit model.timers "step/free_surface_u_update" begin
-        ilo, ihi = cfg.periodic_x ? (1, nx + 1) : (2, nx)
+        ilo, ihi = cfg.periodic_x ? (1, nx + 1) : (2, level_bc ? nx + 1 : nx)
         @inbounds for i in ilo:ihi
             for k in 1:cfg.nz
                 st.u[k, i] = ws.u_hat[k, i]
@@ -2076,7 +2231,7 @@ function _thomas!(x::AbstractVector, lower::AbstractVector, diag::AbstractVector
 end
 
 """
-    solve_effective_depth!(solver, eta, eta_old, H_face; periodic_x=false)
+    solve_effective_depth!(solver, eta, eta_old, H_face; periodic_x=false, right_level=nothing)
 
 Free-surface solve with per-face effective depths `H_face` (m, length nx+1; the implicit vertical terms give
 H_f = sum_k dZ_k r_k, src/implicit_vertical.jl) and the face transports already in `solver.U_hat` (m^2/s):
@@ -2084,12 +2239,15 @@ H_f = sum_k dZ_k r_k, src/implicit_vertical.jl) and the face transports already 
     eta_i + a_{i+1}(eta_i - eta_{i+1}) + a_i(eta_i - eta_{i-1}) = eta_old_i - dt (U_{i+1} - U_i)/dx,
     a_f = theta^2 dt^2 g H_f / dx^2   (a = 0 at the outer faces unless periodic_x; with periodic_x face 1 = face nx+1).
 
+`right_level` (m): water-level boundary at face nx+1, eta_{nx+1} = right_level at half a cell from the last centre, so
+a_{nx+1} = 2 theta^2 dt^2 g H_{nx+1} / dx^2 and a_{nx+1} right_level moves to the right-hand side (`_right_level_slope`).
+
 Symmetric, diagonally dominant (H_f >= 0): Thomas algorithm, or with periodic_x the cyclic system by the
 Sherman-Morrison formula (Press et al. 2007, Numerical Recipes, 3rd ed., section 2.7.2).
 PERF: coefficients rebuilt every step (H_f depends on the friction and the flow), O(nx), no allocation.
 """
 function solve_effective_depth!(solver::BarotropicSolver, eta::AbstractVector{<:Real}, eta_old::AbstractVector{<:Real},
-    H_face::AbstractVector{<:Real}; periodic_x::Bool=false)
+    H_face::AbstractVector{<:Real}; periodic_x::Bool=false, right_level::Union{Nothing,Real}=nothing)
     nx = solver.nx
     dt, dx = solver.dt, solver.dx
     coeff = solver.theta * solver.theta * dt * dt * solver.g / (dx * dx)   # 1/m
@@ -2104,6 +2262,12 @@ function solve_effective_depth!(solver::BarotropicSolver, eta::AbstractVector{<:
         sub[i] = -a_left
         sup[i] = -a_right
         solver.rhs[i] = eta_old[i] - dt * (solver.U_hat[i + 1] - solver.U_hat[i]) / dx
+    end
+    if right_level !== nothing
+        periodic_x && throw(ArgumentError("right_level is not possible with periodic_x=true"))
+        a_bc = 2.0 * coeff * H_face[nx + 1]   # WHY 2: the level lies half a cell from the last centre
+        diag[nx] += a_bc
+        solver.rhs[nx] += a_bc * right_level
     end
     if !periodic_x
         sub[1] = 0.0

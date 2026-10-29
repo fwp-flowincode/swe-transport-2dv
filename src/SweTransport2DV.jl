@@ -45,6 +45,7 @@ export attach_vegetation!, clear_vegetation!, vegetation_source!, copy_vegetatio
 export WetDryState, layer_thicknesses!, water_depth, initialize_water_level!
 export ritter_dam_break, CarrierGreenspanWave, carrier_greenspan_time_scale, carrier_greenspan_rest_time
 export carrier_greenspan_shoreline, carrier_greenspan_solution
+export chezy_equilibrium_velocity, chezy_spinup_velocity, chezy_viscous_profile, chezy_roughness_length, chezy_backwater_depth
 export initialize_lock_exchange!, initialize_rayleigh_taylor!
 export initialize_rising_plume!, initialize_sinking_plume!, initialize_jet_impulse!
 export initialize_internal_seiche!, initialize_surface_dam_break!, initialize_kelvin_helmholtz!
