@@ -1320,7 +1320,9 @@ function step_forward!(model::Model)
     theta = cfg.theta
 
     implicit = cfg.implicit_vertical_terms
-    @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=variable_top, periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing, dt=cfg.dt, vertical=!implicit)
+    # WHY top_row_advective_form=true also on the fixed grid: the grid top carries w = d(eta)/dt but no momentum flux,
+    # so the flux form alone advects the top row at about (nz + 1) U (issue #37, _top_row_advective_form!)
+    @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=true, periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing, dt=cfg.dt, vertical=!implicit)
     @timeit model.timers "step/advection_w" advection_term_w!(ws.adv_w, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_w_ws, ws.interpolation_ws, cfg.periodic_x; active=masked ? geo.w_active : nothing, dt=cfg.dt)
 
     @timeit model.timers "step/hydrostatic_predictor" begin

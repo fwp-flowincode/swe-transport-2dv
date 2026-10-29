@@ -186,6 +186,12 @@ uniform flow and a small surface perturbation ($H=0.5$ m, 16 cells per wavelengt
 
 These limits are not part of issue #34; they are to be analysed separately (follow-up issue).
 
+Resolved in issue #37: both limits came from inconsistent discrete momentum fluxes, not from the limiter. The fixed grid
+had no momentum flux through its top (where $w=\partial_t\eta$), and the vertical velocity at the u control volumes was
+smoothed over three interfaces, so the u control volume was not divergence-free. With the top-row advective form on the
+fixed grid and the C-grid face velocities, the cases above decay up to $C=0.9$ for nz = 2 ... 16, both schemes,
+$\theta=0.7$ and 1 (`experiments/advection_stability/README.md`).
+
 4 Configuration (decided 2026-10-28)
 ------------------------------------
 

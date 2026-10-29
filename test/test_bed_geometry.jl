@@ -304,9 +304,10 @@ include(joinpath(@__DIR__, "../experiments/lock_exchange_obstacle/cases.jl"))
 
     @testset "test_verify_nonhydrostatic_lock_exchange_wall_splash_energy" begin
         # Issue #5 appears only after wall impact and can be hidden by coarse-grid numerical diffusion.
-        # WHY 1.08: issue #5 gave ratios of about 1.5. The explicit momentum advection creates a few per cent of kinetic
-        # energy here (observed max KE / released PE: 1.026 with theta = 1, 1.061 with the default theta = 0.7, which
-        # damps the surface waves less; issue #34, docs/plan_issue_34_theta_scheme.md, section 3.3).
+        # WHY 1.08: issue #5 gave ratios of about 1.5 after the wall impact. The observed maximum (1.026 with theta = 1,
+        # 1.061 with the default theta = 0.7) is a start-up effect at the first sample (t* = 0.25), where both energies
+        # are tiny; it is unchanged by the momentum-flux fix of issue #37 and grows with finer sampling and smaller dt,
+        # so it is not an advection error (docs/TESTS_TECHNICAL_DOCUMENTATION.md, this test).
         ENERGY_RELEASE_RATIO_MAX = 1.08
         for obstacle in (false, true)
             cfg = lock_exchange_obstacle_config(n=146, drho=10.0, t_end_star=12.0)

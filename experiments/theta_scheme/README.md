@@ -19,7 +19,8 @@ Allowed theta range
 Fr is the depth-averaged velocity over the long-wave speed, $\lvert U\rvert/\sqrt{gH}$, of the fastest part of the flow.
 Above the bound gravity waves on the current grow slowly; with first-order upwind momentum advection the scheme's
 numerical diffusion often hides this (the bound is sharp for the smooth limit of `tvd2`). The explicit momentum
-advection has its own Courant-number limits, independent of theta (plan section 3.3).
+advection had Courant-number limits of its own, independent of theta (plan section 3.3); they were removed in issue #37
+([../advection_stability/README.md](../advection_stability/README.md)).
 
 Scripts
 -------

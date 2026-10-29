@@ -119,6 +119,110 @@ include(joinpath(@__DIR__, "test_common.jl"))
         end
     end
 
+    # Fixed-grid layer continuity: w (m/s, (nz+1) x nx) of u (m/s, nz x (nx+1)), w = 0 at the bed; the top value is the
+    # column divergence (d(eta)/dt), not zero.
+    function continuity_w(u, dx, dz)
+        nz, nxp1 = size(u)
+        w = zeros(nz + 1, nxp1 - 1)
+        for i in 1:(nxp1 - 1), k in 1:nz
+            w[k + 1, i] = w[k, i] - dz * (u[k, i + 1] - u[k, i]) / dx
+        end
+        return w
+    end
+
+    @testset "test_verify_momentum_control_volumes_divergence_free" begin
+        # Issue #37: the face velocities of the u and w control volumes satisfy the layer continuity exactly, so that the
+        # flux form div(v phi) of the momentum advection equals the advective form v.grad(phi). u control volume at u-point
+        # (k, i): faces at the cell centres i-1, i and at the interfaces k, k+1 (top interface: w = d(eta)/dt); w control
+        # volume at interface k: faces at the u-points i, i+1 and at the layer centres k-1, k.
+        nz, nx = 6, 9
+        dx, dz = 0.2, 0.15                   # m
+        rng = MersenneTwister(37)
+        u = 0.3 .* randn(rng, nz, nx + 1)    # m/s
+        u[:, 1] .= 0.0
+        u[:, end] .= 0.0
+        w = continuity_w(u, dx, dz)
+        ws_u = SweTransport2DV.AdvectionWorkspace(nz, nx + 1)
+        SweTransport2DV._face_velocity_x!(ws_u.vx_face, u)
+        SweTransport2DV._w_at_u_interfaces!(ws_u.vz_face, w)
+        div_u = [(ws_u.vx_face[k, i + 1] - ws_u.vx_face[k, i]) / dx + (ws_u.vz_face[k + 1, i] - ws_u.vz_face[k, i]) / dz
+                 for k in 1:nz, i in 2:nx]
+        @test maximum(abs, div_u) < TOL_IDENTITY
+        ws_w = SweTransport2DV.AdvectionWorkspace(nz + 1, nx)
+        SweTransport2DV._u_at_w_faces!(ws_w.vx_face, u)
+        SweTransport2DV._face_velocity_z!(ws_w.vz_face, w)
+        div_w = [(ws_w.vx_face[k, i + 1] - ws_w.vx_face[k, i]) / dx + (ws_w.vz_face[k + 1, i] - ws_w.vz_face[k, i]) / dz
+                 for k in 2:nz, i in 1:nx]
+        @test maximum(abs, div_w) < TOL_IDENTITY
+        # contrast: the former interpolation via the layer centres, (w[k-1] + 2 w[k] + w[k+1]) / 4, is not divergence-free
+        ws_i = SweTransport2DV.InterpolationWorkspace(nz, nx)
+        SweTransport2DV._interpolate_w_to_u!(ws_i.w_u, w, ws_i.w_center)
+        SweTransport2DV._face_velocity_z!(ws_u.vz_face, ws_i.w_u)
+        div_old = [(ws_u.vx_face[k, i + 1] - ws_u.vx_face[k, i]) / dx + (ws_u.vz_face[k + 1, i] - ws_u.vz_face[k, i]) / dz
+                   for k in 2:(nz - 1), i in 2:nx]
+        @test maximum(abs, div_old) > 1e6 * TOL_IDENTITY
+    end
+
+    MEAN_FLOW_AMPLIFICATION_TOL = 1e-10   # -, round-off margin of the spectral radius
+
+    @testset "test_verify_momentum_advection_stable_with_mean_flow_up_to_courant_one" begin
+        # Issue #37, von Neumann analysis of the discrete operator: around a uniform current U > 0 in a periodic channel
+        # on the fixed grid (w from continuity, top value d(eta)/dt), the upwind1 tendency is quadratic in the
+        # perturbation, so the central difference gives its linear part L exactly. Forward Euler is stable,
+        # max |eig(I - dt L)| <= 1, up to the Courant number C = U dt / dx = 1 for every nz, as 1D upwind. Before the fix
+        # (no top momentum flux, smoothed w) it was 1.15 at C = 0.5 and 2 at C = 1
+        # (experiments/advection_stability/operator_spectrum.jl).
+        U, H, nx, dx, eps = 0.5, 0.5, 8, 0.0625, 1e-3   # m/s, m, -, m, m/s
+        for nz in (1, 2, 4)
+            dz = H / nz
+            n = nz * nx
+            L = zeros(n, n)
+            for j in 1:n
+                k, i = (j - 1) % nz + 1, (j - 1) ÷ nz + 1
+                f = map((1, -1)) do sign
+                    u = fill(U, nz, nx + 1)
+                    u[k, i] += sign * eps
+                    i == 1 && (u[k, nx + 1] += sign * eps)
+                    out = zeros(nz, nx + 1)
+                    SweTransport2DV.advection_term_u!(out, u, continuity_w(u, dx, dz), dx, dz, "upwind1",
+                        SweTransport2DV.AdvectionWorkspace(nz, nx + 1), SweTransport2DV.InterpolationWorkspace(nz, nx);
+                        top_row_advective_form=true, periodic_x=true)
+                    out[:, 1:nx]
+                end
+                L[:, j] = vec(f[1] .- f[2]) ./ (2eps)
+            end
+            lambdas = eigvals(L)
+            for C in (0.5, 0.75, 1.0)
+                @test maximum(abs, 1 .- (C * dx / U) .* lambdas) <= 1 + MEAN_FLOW_AMPLIFICATION_TOL
+            end
+        end
+    end
+
+    @testset "test_verify_mean_flow_channel_perturbation_decays" begin
+        # Issue #37, full model: periodic channel (fixed grid) with a uniform current at Fr = 0.5 (below the theta bound
+        # theta_froude_max(0.7) = 0.67), tvd2, nz = 8, C = 0.3, surface perturbation 1e-8 m. Before the fix the
+        # perturbation grew to blow-up within seconds; now it decays, hydrostatic and non-hydrostatic.
+        H, L, nx, nz, Fr, C, A = 0.5, 1.0, 16, 8, 0.5, 0.3, 1e-8   # m, m, -, -, -, -, m
+        U = Fr * sqrt(9.81 * H)
+        dx = L / nx
+        dt = C * dx / U
+        for hydrostatic in (true, false)
+            cfg = ModelConfig(nx=nx, nz=nz, length=L, depth=H, dt=dt, theta=0.7, periodic_x=true,
+                pressure_solver_method="sparse", variable_top_layer=false, use_hydrostatic=hydrostatic,
+                momentum_advection_scheme="tvd2", nu=0.0, rayleigh_damping=0.0, apply_froude_limiter=false)
+            model = Model(cfg)
+            fill!(model.state.rho, 1000.0)
+            refresh_density_metadata!(model)
+            fill!(model.state.u, U)
+            model.state.eta .= A .* cos.(2pi .* [(i - 0.5) * dx for i in 1:nx] ./ L)
+            for _ in 1:round(Int, 20.0 / dt)
+                step_forward!(model)
+            end
+            @test maximum(abs, model.state.eta) < A
+            @test maximum(abs.(model.state.u .- U)) < A
+        end
+    end
+
     @testset "test_verify_model_runs_with_tvd2_momentum_advection" begin
         cfg = ModelConfig(nx=30, nz=12, dt=5e-4, nt=1, momentum_advection_scheme="tvd2", max_froude=0.9, apply_froude_limiter=true)
         model = Model(cfg)
