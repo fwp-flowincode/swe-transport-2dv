@@ -74,10 +74,13 @@ include(joinpath(@__DIR__, "test_common.jl"))
         eta_new = zeros(nx)
         solve_variable_thickness!(solver, eta_new, u_hat, eta_old, h_face)
 
-        # final velocities as in step_forward!: free-surface slope in every layer, walls stay closed
+        # continuity velocities as in step_forward!: the solver input is the theta transport velocity
+        # theta u_hat + (1 - theta) u^n, and u^{n+theta} = input - theta^2 g dt d(eta^{n+1})/dx (issue #34; theta = 1:
+        # the final velocity); free-surface slope in every layer, walls stay closed
+        theta = solver.theta
         u = copy(u_hat)
         for i in 2:nx
-            u[:, i] .= u_hat[:, i] .- g * dt * (eta_new[i] - eta_new[i - 1]) / dx
+            u[:, i] .= u_hat[:, i] .- theta^2 * g * dt * (eta_new[i] - eta_new[i - 1]) / dx
         end
         # layer-integrated transport with the OLD top-layer thickness
         transport = [dz * sum(@view u[1:(nz - 1), i]) + h_face[i] * u[nz, i] for i in 1:(nx + 1)]
@@ -95,7 +98,8 @@ include(joinpath(@__DIR__, "test_common.jl"))
             step_forward!(model)
         end
 
-        # After a step: ws.eta_old = eta^n, state.eta = eta^{n+1}, ws.h_top_face built from eta^n, (u, w) consistent with both.
+        # After a step: ws.eta_old = eta^n, state.eta = eta^{n+1}, ws.h_top_face built from eta^n, and the transport
+        # velocities (ws.u_theta, ws.w_theta) = (u, w)^{n+theta} consistent with both (issue #34).
         st, ws = model.state, model.ws
         nz, nx, dx, dz = cfg.nz, cfg.nx, model.dx, model.dz
 
@@ -104,12 +108,12 @@ include(joinpath(@__DIR__, "test_common.jl"))
         rho_new = similar(rho)
         rho_uniform = fill(1000.0, nz, nx)
         for scheme in ("upwind1", "tvd2")
-            advect_density_top_layer!(rho_new, rho, st.u, st.w, cfg.dt, dx, dz, ws.density_ws, ws.h_top_face, ws.eta_old, st.eta; scheme=scheme)
+            advect_density_top_layer!(rho_new, rho, ws.u_theta, ws.w_theta, cfg.dt, dx, dz, ws.density_ws, ws.h_top_face, ws.eta_old, st.eta; scheme=scheme)
             mass_old = constituent_mass(rho, dx, dz; eta=ws.eta_old)
             mass_new = constituent_mass(rho_new, dx, dz; eta=st.eta)
             @test abs(mass_new - mass_old) < TOL_IDENTITY * abs(mass_old)
 
-            advect_density_top_layer!(rho_new, rho_uniform, st.u, st.w, cfg.dt, dx, dz, ws.density_ws, ws.h_top_face, ws.eta_old, st.eta; scheme=scheme)
+            advect_density_top_layer!(rho_new, rho_uniform, ws.u_theta, ws.w_theta, cfg.dt, dx, dz, ws.density_ws, ws.h_top_face, ws.eta_old, st.eta; scheme=scheme)
             @test maximum(abs, rho_new .- 1000.0) < TOL_IDENTITY
         end
     end
@@ -163,7 +167,9 @@ include(joinpath(@__DIR__, "test_common.jl"))
         @test max_mismatch < TOL_IDENTITY
         @test abs(d1["water_volume"] - d0["water_volume"]) < TOL_MODEL_IDENTITY * d0["water_volume"]
         @test abs(d1["constituent_mass"] - d0["constituent_mass"]) < TOL_MODEL_IDENTITY * d0["constituent_mass"]
-        @test all(isapprox.(model.state.w[end, :], (model.state.eta .- model.ws.eta_old) ./ cfg.dt; atol=TOL_IDENTITY))
+        # theta scheme (issue #34): the surface value of the stored w^{n+1} is the column divergence of u^{n+1}; the surface
+        # moves with w^{n+theta} (ws.w_theta, its integrated value is checked by max_mismatch above)
+        @test all(isapprox.(model.ws.w_theta[end, :], (model.state.eta .- model.ws.eta_old) ./ cfg.dt; atol=TOL_IDENTITY))
     end
 
     @testset "test_verify_top_row_advective_form_zero_for_uniform_u" begin

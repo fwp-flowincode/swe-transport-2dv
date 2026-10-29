@@ -13,4 +13,6 @@ include("test_common.jl")
     include("test_variable_top_layer.jl")
     include("test_bed_geometry.jl")
     include("test_wetting_drying.jl")
+    include("test_theta_scheme.jl")
+    include("test_implicit_vertical.jl")
 end

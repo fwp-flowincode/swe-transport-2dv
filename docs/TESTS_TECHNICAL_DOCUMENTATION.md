@@ -274,7 +274,8 @@ with interior coefficients equivalent to
 -\alpha\eta_{i-1}^{n+1} + (1+2\alpha)\eta_i^{n+1} - \alpha\eta_{i+1}^{n+1} = \eta_i^n - \Delta t\,\partial_x\hat U_i,
 ```
 
-and one-sided edge coefficients at boundaries.
+and one-sided edge coefficients at boundaries. With the $\theta$ scheme (section 19) $\alpha$ carries the factor
+$\theta^2$ and $\hat U$ is the transport of $\theta\hat u + (1-\theta)u^n$.
 
 ### 9) Boundary treatment and kinematic closure
 
@@ -846,6 +847,75 @@ Fluid Mech. 4, 97-109; Synolakis (1987), J. Fluid Mech. 185, 523-545; Casulli & 
 Comput. 34, A2040-A2059; Delestre et al. (2013), Int. J. Numer. Methods Fluids 72, 269-300 (SWASHES). Equation numbers were
 not checked.
 
+### 19) Theta time integration and its stability range (issue #34)
+
+The free surface is integrated with the $\theta$ scheme of Casulli & Cattani (1994), `ModelConfig(theta=0.7)` by
+default: the surface level in the pressure gradient and the velocity in the continuity flux are taken at $n+\theta$
+(layer thicknesses of level $n$),
+
+```math
+u^{n+1} = \hat u - g\Delta t\,\partial_x\bigl(\theta\eta^{n+1} + (1-\theta)\eta^n\bigr),
+\qquad
+\eta^{n+1} = \eta^n - \Delta t\,\partial_x \sum_k \Delta Z_k^n\bigl(\theta u_k^{n+1} + (1-\theta)u_k^n\bigr),
+```
+
+so the coefficient $\alpha$ of section 8 becomes $\theta^2 gH\Delta t^2/\Delta x^2$. The non-hydrostatic pressure is at
+$n+\theta$ as well (incremental form), and the transport uses $u^{n+\theta}$ and the matching $w^{n+\theta}$. With
+$\theta<1$ the stored $w^{n+1}$ no longer equals $\eta_t$ at the surface; the surface moves with $w^{n+\theta}$
+(`ws.w_theta`). $\theta=1$ is the former scheme. Derivations, tests and decisions are in
+`docs/plan_issue_34_theta_scheme.md`; the analysis script is `experiments/theta_scheme/stability_analysis.jl`.
+
+**Allowed range.** There are two conditions, both from von Neumann analysis of the linearised 1D equations.
+
+Gravity waves without mean flow: the amplification factor
+
+```math
+\lvert G\rvert^2 = \frac{1+\mu^2(1-\theta)^2}{1+\mu^2\theta^2},
+\qquad
+\mu = \frac{2\sqrt{gH}\,\Delta t}{\Delta x}\sin\frac{k\Delta x}{2},
+```
+
+is at most 1 for every time step if and only if $\theta\ge\frac12$. `ModelConfig` rejects $\theta$ outside
+$[\frac12, 1]$ (`THETA_MIN`, `THETA_MAX`). The damping per wave period of $N$ steps is about $4\pi^2(\theta-\frac12)/N$;
+$\theta=\frac12$ is second order and undamped.
+
+Mean flow with the Froude number $\mathrm{Fr}=\lvert U\rvert/\sqrt{gH}$ and explicit momentum advection: stable for
+
+```math
+\mathrm{Fr} \le \mathrm{Fr}_{\max}(\theta) = \frac{2\theta-1}{2(1-\theta)}
+\qquad\Longleftrightarrow\qquad
+\theta \ge \frac{1+2\,\mathrm{Fr}}{2(1+\mathrm{Fr})},
+```
+
+returned by `theta_froude_max(theta)`. The explicit advection shifts the phase of a long wave by $Uk\Delta t$ without
+damping, and the explicit share $1-\theta$ of the gravity term turns this shift into growth that the implicit share has
+to absorb. The bound is sharp for Lax-Wendroff advection (the smooth limit of `tvd2`) with an advected surface, and
+sufficient for `upwind1` and for fixed layer thicknesses. Above it, gravity waves on the current grow slowly (factor
+1.04 per step at $\theta=0.55$, Fr = 0.45).
+
+| $\theta$ | 0.5 | 0.55 | 0.6 | 0.65 | **0.7** | 0.75 | 0.8 | 0.9 | 1 |
+|---|---|---|---|---|---|---|---|---|---|
+| largest stable Fr | 0 | 0.11 | 0.25 | 0.43 | **0.67** | 1 | 1.5 | 4 | any |
+
+`test_verify_theta_froude_bound_matches_linear_stability` recomputes the spectral radius for $\theta=0.55\ldots0.8$
+and $C=0.1\ldots0.9$: it is at most 1 at $0.9~\mathrm{Fr_{max}}$ and above 1 at $1.1~\mathrm{Fr_{max}}$.
+
+The default $\theta=0.7$ covers subcritical flows up to Fr = 2/3 and damps waves 2.5 times less than $\theta=1$. The
+first default, 0.55, allows only Fr ≤ 0.11: a hydrostatic periodic channel at Fr = 0.45 (fixed layer thicknesses, `tvd2`,
+$C=0.2$) grew by a factor of about $10^7$ in 50 s at $\theta=0.55$ and decayed from $\theta=0.6$ on (analysis: 0.59).
+Physical damping (bed friction, turbulent viscosity) can hide the weak growth. Flows with larger Froude numbers need a
+larger $\theta$ (for example $\theta=1$).
+
+The explicit momentum advection additionally has Courant-number limits of its own, independent of $\theta$ and already
+present with $\theta=1$. In a periodic channel with a uniform current, `upwind1` was stable up to
+$C=U\Delta t/\Delta x\approx0.45$ with 2 layers and about 0.3 with 8 layers. `tvd2` let a small perturbation grow even at
+$C=0.1$ (Fr = 0.5), which the linear theory does not predict (MC limiter). These limits are outside issue #34 and are to
+be analysed separately.
+
+References: Casulli & Cattani (1994), Comput. Math. Appl. 27(4), 99-112; Casulli & Cheng (1992), Int. J. Numer. Methods
+Fluids 15, 629-648; Casulli (1999), Int. J. Numer. Methods Fluids 30, 425-440; van Kan (1986), SIAM J. Sci. Stat.
+Comput. 7, 870-891 (incremental pressure correction). Equation numbers were not checked.
+
 ## Test-by-test documentation
 
 ### test_verify_state_shapes
@@ -1088,13 +1158,17 @@ Validation section: invalid parameter ranges must raise `ArgumentError`.
 
 Purpose: enforce kinematic free-surface closure.
 
-Reference condition:
+Reference condition (theta scheme, section 19; $\theta=1$ gives $w^{n+1}=\eta_t$ at the surface):
 
 ```math
-w_{top} = \frac{\partial \eta}{\partial t}.
+w_{top}^{n+\theta} = \theta w_{top}^{n+1} + (1-\theta)w_{top}^n = \frac{\eta^{n+1}-\eta^n}{\Delta t}.
 ```
 
-Validation section: compares reconstructed top vertical velocity to finite-difference $\eta_t$ each step.
+Validation section: in the default configuration (variable top layer) the surface value of $w^{n+\theta}$, integrated
+from the layer continuity of $u^{n+\theta}$, matches $\eta_t$ in every step (`model.last_kinematic_mismatch`). With a
+fixed top layer the stored $w$ of two consecutive steps satisfies the relation above as well. With the variable top
+layer the stored $w^n$ was integrated with the top thicknesses of level $n-1$, so that second check is for the fixed
+top layer only.
 
 ### test_verify_hydrostatic_continuity_and_surface_closure_residuals
 

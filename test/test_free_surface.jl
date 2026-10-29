@@ -16,13 +16,26 @@ include(joinpath(@__DIR__, "test_common.jl"))
     end
 
     @testset "test_verify_free_surface_kinematic_bc_consistency" begin
-        cfg = ModelConfig(nx=60, nz=20, dt=5e-4, nt=1)
-        model = Model(cfg)
-        for _ in 1:150
-            eta_old = copy(model.state.eta)
-            step_forward!(model)
-            eta_t = (model.state.eta .- eta_old) ./ cfg.dt
-            @test all(isapprox.(model.state.w[end, :], eta_t, atol=1e-10))
+        # Theta scheme (issue #34): the surface moves with u^{n+theta}. Default configuration (variable top layer): the
+        # surface value of w^{n+theta}, integrated from the layer continuity of u^{n+theta}, equals eta_t
+        # (model.last_kinematic_mismatch). Fixed top layer: the stored w satisfies eta_t = theta w_s^{n+1} +
+        # (1 - theta) w_s^n (with the variable top layer, w_s^n was integrated with the top thicknesses of level n - 1).
+        for variable_top in (nothing, false)
+            cfg = variable_top === nothing ? ModelConfig(nx=60, nz=20, dt=5e-4, nt=1) :
+                  ModelConfig(nx=60, nz=20, dt=5e-4, nt=1, variable_top_layer=variable_top)
+            model = Model(cfg)
+            theta = cfg.theta
+            for _ in 1:150
+                eta_old = copy(model.state.eta)
+                w_surface_old = model.state.w[end, :]
+                step_forward!(model)
+                eta_t = (model.state.eta .- eta_old) ./ cfg.dt
+                @test model.last_kinematic_mismatch < 1e-10
+                if variable_top === false
+                    w_surface_theta = theta .* model.state.w[end, :] .+ (1 - theta) .* w_surface_old
+                    @test all(isapprox.(w_surface_theta, eta_t, atol=1e-10))
+                end
+            end
         end
     end
 

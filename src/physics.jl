@@ -206,7 +206,8 @@ grid points, with the point velocities `vx`, `vz` (m/s) averaged to the faces. `
 `"tvd2"`: MC-limited piecewise-linear reconstruction with the Lax-Wendroff time correction, face value
 `phi_up + 0.5 (1 - c) s_up` with the face Courant number c = |v| dt/dx (resp. dz) -- the same scheme as the density
 transport (`_density_face_fluxes!`). `dt = 0` (s) gives the semi-discrete MUSCL flux. `active`: points next to solid
-walls (variable bed), see `BedGeometry`.
+walls (variable bed), see `BedGeometry`. `vertical = false` leaves out the vertical fluxes (they are then treated
+implicitly, `implicit_vertical_column!`).
 
 WHY the time correction (model passes dt = cfg.dt): the momentum equations are advanced with one forward-Euler step,
 which adds kinetic energy of order (dt^2/2)|A|^2 per step; without the correction the MUSCL/forward-Euler update is
@@ -228,6 +229,7 @@ function _advective_flux_divergence!(
     periodic_x::Bool=false;
     active::Union{Nothing,AbstractMatrix{Bool}}=nothing,
     dt::Real=0.0,
+    vertical::Bool=true,
 )
     nz, nx = size(phi)
 
@@ -356,6 +358,7 @@ function _advective_flux_divergence!(
         end
     end
 
+    vertical || fill!(ws.flux_z, 0.0)
     @inbounds for i in 1:nx
         for k in 1:nz
             out[k, i] = (ws.flux_x[k, i + 1] - ws.flux_x[k, i]) / dx + (ws.flux_z[k + 1, i] - ws.flux_z[k, i]) / dz
@@ -411,14 +414,15 @@ function advection_term_u!(
     periodic_x::Bool=false,
     active::Union{Nothing,AbstractMatrix{Bool}}=nothing,
     dt::Real=0.0,
+    vertical::Bool=true,
 )
     _interpolate_w_to_u!(ws_interp.w_u, w, ws_interp.w_center; periodic_x=periodic_x)
     if periodic_x
         nx = size(u, 2) - 1
-        _advective_flux_divergence!(@view(out[:, 1:nx]), @view(u[:, 1:nx]), @view(u[:, 1:nx]), @view(ws_interp.w_u[:, 1:nx]), dx, dz, scheme, ws_adv, true; dt=dt)
+        _advective_flux_divergence!(@view(out[:, 1:nx]), @view(u[:, 1:nx]), @view(u[:, 1:nx]), @view(ws_interp.w_u[:, 1:nx]), dx, dz, scheme, ws_adv, true; dt=dt, vertical=vertical)
         @views out[:, nx + 1] .= out[:, 1]
     else
-        _advective_flux_divergence!(out, u, u, ws_interp.w_u, dx, dz, scheme, ws_adv; active=active, dt=dt)
+        _advective_flux_divergence!(out, u, u, ws_interp.w_u, dx, dz, scheme, ws_adv; active=active, dt=dt, vertical=vertical)
     end
     if top_row_advective_form
         if periodic_x
@@ -500,7 +504,8 @@ the top; a wind stress enters the top row as a body force in `step_forward!`, wh
 outermost points in x (the wall faces) get `res = 0`; their value (`phi = 0` at a wall) enters the neighbouring flux.
 With `active` (nz x nx; for u: a face next to at least one wet cell), inactive points get `res = 0` and the vertical flux
 to an inactive neighbour (the face below the bed) is zero, i.e. the same free-slip bed as at k = 1; obstacle walls
-(active, `u = 0`) act like the outer walls.
+(active, `u = 0`) act like the outer walls. `vertical = false` leaves out the vertical part (treated implicitly,
+`implicit_vertical_column!`).
 
 Second order in space for smooth `nu`; sum(phi) dz per column is conserved by the vertical part. Explicit
 forward-Euler stability: `2 nu dt (1/dx^2 + 1/dz^2) <= 1`. For constant `nu` this is the 5-point Laplacian in the
@@ -508,7 +513,7 @@ interior.
 WHY flux form over the top and bottom rows: the former kernel `nu * Laplacian` skipped rows 1 and nz, so the top row had
 no viscous coupling to the row below, and a wind stress stayed in the top cell (issue #4).
 """
-function diffusion_term!(res::AbstractMatrix{<:Real}, phi::AbstractMatrix{<:Real}, nu::Union{Real,AbstractMatrix{<:Real}}, dx::Real, dz::Real; periodic_x::Bool=false, active::Union{Nothing,AbstractMatrix{Bool}}=nothing)
+function diffusion_term!(res::AbstractMatrix{<:Real}, phi::AbstractMatrix{<:Real}, nu::Union{Real,AbstractMatrix{<:Real}}, dx::Real, dz::Real; periodic_x::Bool=false, active::Union{Nothing,AbstractMatrix{Bool}}=nothing, vertical::Bool=true)
     nz, nx = size(phi)
     fill!(res, 0.0)
     nphysical = periodic_x ? nx - 1 : nx
@@ -523,8 +528,8 @@ function diffusion_term!(res::AbstractMatrix{<:Real}, phi::AbstractMatrix{<:Real
             nu_c = _nu_at(nu, k, i)
             g_right = 0.5 * (nu_c + _nu_at(nu, k, ir)) * (phi[k, ir] - phi[k, i]) / dx
             g_left = 0.5 * (nu_c + _nu_at(nu, k, il)) * (phi[k, i] - phi[k, il]) / dx
-            has_top = k < nz && (active === nothing || active[k + 1, i])
-            has_bottom = k > 1 && (active === nothing || active[k - 1, i])
+            has_top = vertical && k < nz && (active === nothing || active[k + 1, i])
+            has_bottom = vertical && k > 1 && (active === nothing || active[k - 1, i])
             f_top = has_top ? 0.5 * (nu_c + _nu_at(nu, k + 1, i)) * (phi[k + 1, i] - phi[k, i]) / dz : 0.0
             f_bottom = has_bottom ? 0.5 * (nu_c + _nu_at(nu, k - 1, i)) * (phi[k, i] - phi[k - 1, i]) / dz : 0.0
             res[k, i] = (g_right - g_left) / dx + (f_top - f_bottom) / dz
