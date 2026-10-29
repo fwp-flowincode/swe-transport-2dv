@@ -219,6 +219,18 @@ function _wd_face_thicknesses!(model::Model, wd::WetDryState)
     return nothing
 end
 
+# Transport (m^2/s per unit of the shape) of the profile `shape` (length nz) at the left boundary face with the face
+# layers that the next step uses (`_wd_face_thicknesses!`: level of column 1 above the bed of face 1; a dry face carries
+# none). PERF: allocates one vector of length nz; called by set_x_inflow_outflow!, not inside the time step.
+function _wd_left_face_transport(model::Model, shape::AbstractVector{<:Real})
+    wd = model.wetdry
+    zeta = _wd_level(model, 1)
+    zeta - wd.bed_face[1] > model.config.dry_depth_threshold || return 0.0
+    h = zeros(eltype(wd.hf), model.config.nz)
+    layer_thicknesses!(h, zeta, wd.bed_face[1], model.dz)
+    return sum(h .* shape)
+end
+
 # Baroclinic pressure p' = g * integral_z^zeta (rho - rho0) dz' (Pa) at the nominal layer centres z_c = z_k + dz/2. Layers
 # above the surface extrapolate with the density of the surface layer.
 # WHY nominal centres (not the centroids of cut cells): a horizontally uniform stratification at rest then gives

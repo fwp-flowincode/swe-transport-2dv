@@ -1018,14 +1018,13 @@ function _apply_x_boundary_conditions!(model::Model, u::AbstractMatrix{<:Real})
         @views u[:, 1] .= left_profile
         if model.x_boundary_q_left !== nothing
             # discharge boundary: scale the shape with the face layer thicknesses of level n (ws.eta_old)
-            nz = size(u, 1)
-            dz = model.dz
-            h_top = use_variable_top_layer(model.config) ? dz + model.ws.eta_old[1] : dz
-            kb = model.geometry.has_bed ? model.geometry.k_bed_face[1] : 1
-            transport = 0.0   # m^2/s per unit of the shape
-            for k in kb:nz
-                transport += (k == nz ? h_top : dz) * left_profile[k]
-            end
+            # WHY the wetting-drying branch: the step scales with the cut face layers itself
+            # (_wd_boundary_velocities!), but u of the boundary face set here is u^n of the next step and carries
+            # (1 - theta) of its inflow; scaled with the full layers of the flat grid the inflow over a raised bed was
+            # 0.6 % too small whenever the discharge was reset every step (issue #14)
+            transport = model.wetdry === nothing ? _left_face_transport(model, left_profile) :
+                _wd_left_face_transport(model, left_profile)   # m^2/s per unit of the shape
+            transport > 0.0 || throw(DomainError(transport, "left_discharge: the inflow face is dry"))
             @views u[:, 1] .*= model.x_boundary_q_left / transport
         end
     end
@@ -1048,6 +1047,19 @@ function _apply_x_boundary_conditions!(model::Model, u::AbstractMatrix{<:Real})
 end
 
 _apply_x_boundary_conditions!(model::Model) = _apply_x_boundary_conditions!(model, model.state.u)
+
+# Transport (m^2/s per unit of the shape) of the profile `shape` (length nz) at the left boundary face: layers dz above the
+# bed face, the top layer dz + eta of level n (ws.eta_old) with the variable top layer.
+function _left_face_transport(model::Model, shape::AbstractVector{<:Real})
+    nz, dz = model.config.nz, model.dz
+    h_top = use_variable_top_layer(model.config) ? dz + model.ws.eta_old[1] : dz
+    kb = model.geometry.has_bed ? model.geometry.k_bed_face[1] : 1
+    transport = 0.0
+    for k in kb:nz
+        transport += (k == nz ? h_top : dz) * shape[k]
+    end
+    return transport
+end
 
 # Zeroes u (m/s, nz x (nx+1)) on all faces that are not open: walls of the bed and faces inside it (variable bed).
 function _mask_u!(u::AbstractMatrix{<:Real}, geo::BedGeometry)

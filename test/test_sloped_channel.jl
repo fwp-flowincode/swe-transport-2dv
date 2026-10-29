@@ -266,11 +266,16 @@ end
     end
 
     @testset "test_verify_discharge_boundary_transport" begin
-        # The inflow face carries exactly q with the face thicknesses of time n, also while the inlet level moves.
+        # The inflow face carries exactly q with the face thicknesses of time n, also while the inlet level moves; with
+        # the discharge set again before every step (as a ramp does) the theta flux that moves the level is q as well
+        # (in the wetting-drying step the reset used to scale u^n with the flat-grid layers: 0.6 % too little inflow
+        # over a raised bed).
         for v in OPEN_CHANNEL_VARIANTS
-            model, _ = open_channel(; vt=v.vt, wd=v.wd, start=0.8)
+            model, P = open_channel(; vt=v.vt, wd=v.wd, start=0.8)
             for _ in 1:20
+                set_x_inflow_outflow!(model, P; left_discharge=CHANNEL_DISCHARGE, right_level=0.0)
                 step_forward!(model)
+                @test boundary_discharges(model)[1] ≈ CHANNEL_DISCHARGE rtol = TOL_IDENTITY
                 if v.wd
                     @test sum(model.wetdry.hf[:, 1] .* model.state.u[:, 1]) ≈ CHANNEL_DISCHARGE rtol = TOL_IDENTITY
                 else

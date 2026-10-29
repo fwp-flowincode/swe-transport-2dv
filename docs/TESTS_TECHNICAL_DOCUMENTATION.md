@@ -1010,6 +1010,11 @@ step to $\sum_k\Delta Z_ku_k=q$ with the face layer thicknesses of time $n$: the
 the cut face layers in the wetting-drying step. A velocity profile alone carries a transport that changes with the inlet
 level; at the backwater level of the tests that is 10 % of $q$.
 
+When `set_x_inflow_outflow!` is called again (e.g. to ramp $q$), the inlet velocity it sets is $u^n$ of the next step
+and carries $(1-\theta)$ of that step's inflow. It is therefore scaled with the face layers that this step uses. In the
+wetting-drying case these are the cut layers at the current inlet level. Scaled with the full layers of the flat grid,
+a ramped inflow over the raised bed of the sloped channel settled 0.6 % too low ($U=0.995$ m/s).
+
 **Water-level boundary** (`right_level=eta_R`; hydrostatic, `implicit_vertical_terms=true`, not periodic). The level
 $\eta_R$ lies on the boundary face $x=L$, half a cell from the last centre. The velocity of the boundary face has its own
 momentum equation:
@@ -2064,7 +2069,8 @@ stated otherwise.
 - `test_verify_level_boundary_fills_lake_to_prescribed_level`: no slope, closed inlet. A lake at the boundary level
   stays at rest to round-off; a lake 0.1 m below it fills to within 1e-4 m in 30000 s.
 - `test_verify_discharge_boundary_transport`: the inflow face carries $q$ to round-off with the thicknesses of time $n$
-  while the inlet level moves.
+  while the inlet level moves. With the discharge set again before every step, the θ flux that moves the level is $q$
+  as well; in the wetting-drying step it was too small by up to 0.6 % before the fix.
 - `test_validate_backwater_curve_matches_gradually_varied_flow`: $\eta_R=\pm0.3$ m (M1, M2), variable top layer and
   wetting-drying step, nx = 50, nz = 8. The steady depth is within 1e-4 m of `chezy_backwater_depth` (observed
   2-4e-5 m; with the old top-row vertical advection 3.3e-4 and 5.9e-4 m).

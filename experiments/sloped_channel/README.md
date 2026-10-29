@@ -23,7 +23,50 @@ Model features used:
 - The slope enters as the body force g i_b (`body_force_x`) on a flat bed, or (case 4) as a real bed in the
   wetting-drying step.
 
-Run: `julia --project experiments/sloped_channel/run_cases.jl` (about 30 s).
+Run: `julia --project experiments/sloped_channel/run_cases.jl` (tables, about 30 s) and
+`julia --project experiments/sloped_channel/plot_sloped_channel.jl` (figures and animation in `figures/`, about 30 s).
+
+Figures
+-------
+
+Spin-up from rest against U_eq tanh(t/T), and the error against dt: explicit friction first order, implicit second order.
+
+![Spin-up](figures/sloped_channel_spinup.png)
+
+Steady velocity profiles. Left: Chezy friction with constant viscosity against the analytical parabola, which has the
+Chezy velocity as its depth average. Right: k-epsilon with z0 = `chezy_roughness_length(50, 4)`. The profile follows
+the log law near the bed and is faster above about 1 m, so the depth average is 5 % above the Chezy velocity (table 5).
+
+![Profiles](figures/sloped_channel_profiles.png)
+
+Backwater (M1) and drawdown (M2) curves against the gradually-varied-flow equation, and the difference (below 0.04 mm).
+
+![Backwater](figures/sloped_channel_backwater.png)
+
+Real bed slope in the wetting-drying step: velocity section (the bed falls 0.1 m over the channel), and the deviation
+of depth and depth-averaged velocity from the normal flow (hundredths of a millimetre).
+
+![Sloped bed](figures/sloped_channel_sloped_bed.png)
+
+Longitudinal section of the uniform flow on the real slope. The bed falls only 0.1 m under 4 m of water, so the water
+surface (with the energy line z + U²/2g, 0.05 m above it) and the bed are shown on two zoomed axes with the same
+vertical span of 0.2 m. All three run parallel with the slope i_b = 1e-4, the surface lies on bed + H, and depth and
+velocity are the normal values along the whole channel.
+
+![Longitudinal section](figures/sloped_channel_longitudinal.png)
+
+Animation of the same channel from a lake at rest at the outlet level, with the inflow raised linearly from 0 to
+q = 4 m²/s within 1000 s. The surface first tilts more steeply than the bed (the inlet depth overshoots to 4.12 m at
+t ≈ 1000 s), then relaxes. Within 1 mm it is parallel to the bed at normal depth after about 2500 s, and exactly after
+about 4500 s.
+
+![Longitudinal animation](figures/sloped_channel_longitudinal.gif)
+
+Animation: the outlet level of the normal flow is raised from 0 to 0.3 m within 600 s. The surface rises along the whole
+channel, with long waves of about 1 cm sloshing between the discharge inlet and the outlet. Within 1 mm it lies on the
+backwater curve (dashed) after about 2500 s, and within 0.1 mm after 3600 s. The discharge returns to the inflow q.
+
+![Backwater animation](figures/sloped_channel_backwater.gif)
 
 Results
 -------
