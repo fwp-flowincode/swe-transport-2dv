@@ -2,7 +2,7 @@ include("test_common.jl")
 
 # Open boundaries for transcritical flow (issue #46): free outflow at the right boundary (right_free, radiation condition
 # for subcritical outflow, extrapolation for supercritical outflow) and supercritical inflow (left_discharge with
-# left_level). See docs/TESTS_TECHNICAL_DOCUMENTATION.md, section 22.
+# left_level), sections 22; in the non-hydrostatic mode (issue #49), section 24 of docs/TESTS_TECHNICAL_DOCUMENTATION.md.
 
 const OB_G = 9.81                 # m/s^2, ModelConfig default
 const OB_C = 50.0                 # m^(1/2)/s, Chezy coefficient
@@ -69,7 +69,48 @@ function ob_wave(; wd, free, nx=100, sigma=50.0, A=0.01, H=4.0, L=1000.0)
     return model, A, nsteps
 end
 
-water_volume_of(model) = model.wetdry === nothing ? sum(model.state.eta) * model.dx : sum(water_depth(model)) * model.dx
+# Non-hydrostatic dispersive wave (issue #49): Gaussian hump of width NH_WAVE_SIGMA in NH_WAVE_DEPTH, at 3/4 of the
+# channel; returns eta after the right half has left (half the channel length at the long-wave speed).
+const NH_WAVE_DEPTH = 1.0          # m
+const NH_WAVE_LENGTH = 40.0        # m
+const NH_WAVE_DX = 0.2             # m
+const NH_WAVE_SIGMA = 1.0          # m, k H ~ 1: dispersive
+const NH_WAVE_AMPLITUDE = 0.01     # m
+const NH_WAVE_DT = 0.02            # s
+const NH_REFLECTION_MAX = 0.01     # -, fixed grid (measured 0.0025)
+const NH_REFLECTION_MAX_WD = 0.03  # -, wetting-drying step (measured 0.0115)
+const NH_REFLECTION_LEVEL_MIN = 0.15   # -, a prescribed level (measured 0.23-0.35)
+const NH_POISSON_ORDER_MIN = 1.9   # -, observed order of the Poisson manufactured solution (measured 2.0)
+function nh_wave(; wd, boundary, L, check_budget=false)
+    nx = round(Int, L / NH_WAVE_DX)
+    nz = 10
+    cfg = ModelConfig(nx=nx, nz=nz, length=L, depth=NH_WAVE_DEPTH, dt=NH_WAVE_DT, theta=0.7, implicit_vertical_terms=true,
+        nu=1e-6, rayleigh_damping=0.0, apply_froude_limiter=false, momentum_advection_scheme="tvd2", use_hydrostatic=false,
+        pressure_solver_method="sparse", wetting_drying=wd, bed_level=wd ? zeros(nx) : nothing, write_plots=false)
+    model = Model(cfg)
+    fill!(model.state.rho, 1000.0)
+    refresh_density_metadata!(model)
+    xc = ((1:nx) .- 0.5) .* NH_WAVE_DX
+    eta0 = NH_WAVE_AMPLITUDE .* exp.(-((xc .- 0.75 * NH_WAVE_LENGTH) ./ NH_WAVE_SIGMA) .^ 2)
+    wd ? initialize_water_level!(model, NH_WAVE_DEPTH .+ eta0) : (model.state.eta .= eta0)
+    boundary == :free && set_x_inflow_outflow!(model, zeros(nz); right_free=true)
+    boundary == :level && set_x_inflow_outflow!(model, zeros(nz); open_right=false, right_level=0.0)
+    budget_error = 0.0
+    for _ in 1:round(Int, 0.5 * NH_WAVE_LENGTH / sqrt(OB_G * NH_WAVE_DEPTH) / NH_WAVE_DT)
+        V0 = water_volume_of(model)
+        step_forward!(model)
+        if check_budget
+            Qin, Qout = theta_boundary_discharges(model)
+            budget_error = max(budget_error, abs(water_volume_of(model) - V0 - NH_WAVE_DT * (Qin - Qout)))
+        end
+    end
+    check_budget && @test budget_error < TOL_MODEL_IDENTITY * NH_WAVE_DEPTH * L
+    # fixed grid: w from the layer continuity meets the surface motion in every column, the boundary column included
+    check_budget && !wd && @test model.last_kinematic_mismatch < TOL_MODEL_IDENTITY
+    return copy(model.state.eta)
+end
+
+water_volume_of(model) =model.wetdry === nothing ? sum(model.state.eta) * model.dx : sum(water_depth(model)) * model.dx
 function theta_boundary_discharges(model)
     wd = model.wetdry
     wd === nothing || return (sum(wd.q[:, 1]), sum(wd.q[:, end]))
@@ -79,7 +120,7 @@ function theta_boundary_discharges(model)
     return (Q(1), Q(model.config.nx + 1))
 end
 
-@testset "Open boundaries for transcritical flow (issue #46)" begin
+@testset "Open boundaries: transcritical (issue #46) and non-hydrostatic (issue #49)" begin
     @testset "test_verify_supercritical_channel_with_inlet_level_and_free_outflow" begin
         # Normal flow at Fr = 1.6 with discharge and level at the inlet and a free outflow is a steady state, and a
         # perturbed start (0.8 times the velocity) returns to it: supercritical, the perturbation leaves downstream.
@@ -204,5 +245,73 @@ end
                     ModelConfig(nx=8, nz=4, implicit_vertical_terms=true, use_hydrostatic=false))
             @test_throws ArgumentError set_x_inflow_outflow!(Model(cfg), ones(4); right_free=true)
         end
+    end
+
+    # ---- non-hydrostatic mode (issue #49) ----
+
+    @testset "test_verify_poisson_right_dirichlet_manufactured_solution" begin
+        # p'' = C on (0, L) with p'(0) = 0 (wall) and p(L) = 0 (open boundary face): p = C/2 (x^2 - L^2). One layer
+        # (no z-coupling); the half-cell Dirichlet row of build_poisson_matrix(right_dirichlet=true) is second order.
+        C, L = 2.0, 3.0
+        errors = map((10, 20, 40)) do nx
+            dx = L / nx
+            p = build_poisson_matrix((1, nx), dx, 1.0; right_dirichlet=true) \ fill(C, nx)
+            xc = ((1:nx) .- 0.5) .* dx
+            maximum(abs.(p .- C / 2 .* (xc .^ 2 .- L^2)))
+        end
+        @test all(o -> o > NH_POISSON_ORDER_MIN, log2.(errors[1:end-1] ./ errors[2:end]))
+        @test_throws ArgumentError PressureCorrectionSolver((4, 8), 1.0, 1.0; method="spectral", right_dirichlet=true)
+    end
+
+    @testset "test_verify_nonhydro_open_channel_uniform_flow_is_steady" begin
+        # #14 channel, non-hydrostatic, discharge inlet and water-level outlet: the projection does nothing (q ~ 0),
+        # fixed grid (q = 0 on the open face) and wetting-drying step (dq/dx = 0 there).
+        for wd in (false, true)
+            nz, nx = 8, 50
+            P = ob_profile(SUB_DEPTH, SUB_SLOPE, nz)
+            cfg = ModelConfig(nx=nx, nz=nz, length=SUB_LENGTH, depth=SUB_DEPTH, dt=10.0, implicit_vertical_terms=true,
+                chezy_coefficient=OB_C, nu=OB_NU, body_force_x=OB_G * SUB_SLOPE, rayleigh_damping=0.0,
+                apply_froude_limiter=false, momentum_advection_scheme="tvd2", use_hydrostatic=false,
+                pressure_solver_method="sparse", wetting_drying=wd, bed_level=wd ? zeros(nx) : nothing, write_plots=false)
+            model = Model(cfg)
+            fill!(model.state.rho, 1000.0)
+            refresh_density_metadata!(model)
+            for i in axes(model.state.u, 2)
+                model.state.u[:, i] .= P
+            end
+            set_x_inflow_outflow!(model, P; left_discharge=SUB_DEPTH, right_level=0.0)
+            wd || @test model.pressure_correction_solver.right_dirichlet
+            for _ in 1:300
+                step_forward!(model)
+            end
+            @test maximum(abs.(model.state.u .- P)) < TOL_MODEL_IDENTITY
+            @test maximum(abs, model.state.eta) < TOL_MODEL_IDENTITY
+        end
+    end
+
+    @testset "test_validate_nonhydro_free_outflow_transmits_dispersive_wave" begin
+        # A Gaussian hump of width 1 m in 1 m depth (dispersive) splits; its right half leaves through the free outflow.
+        # Reflection: max |eta - eta_ref| / A over the channel, eta_ref from a twice as long channel. Measured: fixed grid
+        # 0.25 %, wetting-drying step 1.15 %; a prescribed level reflects completely (23-35 % left after the damping).
+        # Each step of the free-outflow runs closes the volume budget with the boundary transports.
+        for wd in (false, true)
+            reference = nh_wave(; wd=wd, boundary=:closed, L=2 * NH_WAVE_LENGTH)
+            n = round(Int, NH_WAVE_LENGTH / NH_WAVE_DX)
+            free = nh_wave(; wd=wd, boundary=:free, L=NH_WAVE_LENGTH, check_budget=true)
+            level = nh_wave(; wd=wd, boundary=:level, L=NH_WAVE_LENGTH)
+            @test maximum(abs.(free .- reference[1:n])) / NH_WAVE_AMPLITUDE < (wd ? NH_REFLECTION_MAX_WD : NH_REFLECTION_MAX)
+            @test maximum(abs.(level .- reference[1:n])) / NH_WAVE_AMPLITUDE > NH_REFLECTION_LEVEL_MIN
+        end
+    end
+
+    @testset "test_verify_nonhydro_open_boundary_config_checks" begin
+        cfg = ModelConfig(nx=8, nz=4, implicit_vertical_terms=true, use_hydrostatic=false, pressure_solver_method="spectral")
+        @test_throws ArgumentError set_x_inflow_outflow!(Model(cfg), ones(4); right_free=true)
+        cfg = ModelConfig(nx=8, nz=4, implicit_vertical_terms=true, use_hydrostatic=false, pressure_solver_method="sparse")
+        model = Model(cfg)
+        set_x_inflow_outflow!(model, ones(4); right_level=0.0)
+        @test model.pressure_correction_solver.right_dirichlet
+        clear_x_inflow_outflow!(model)
+        @test !model.pressure_correction_solver.right_dirichlet   # the Neumann solver is restored
     end
 end

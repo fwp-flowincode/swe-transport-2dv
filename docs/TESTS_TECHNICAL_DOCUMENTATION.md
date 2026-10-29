@@ -1212,11 +1212,49 @@ $\Delta t\,(q_{in}\rho_{in}-q_{out}\rho_{nx})$, and the values stay within $[\rh
 other modes has no flux through the outer faces, so `left_rho` is rejected there.
 
 Not covered: the sharp-crested (thin-plate) weir. Its curved nappe needs the non-hydrostatic pressure, and open
-boundaries in the non-hydrostatic mode are issue #49.
+boundaries in the non-hydrostatic mode came with issue #49 (section 24); the weir case is still to be set up.
 
 References: Delestre et al. (2013), SWASHES, Int. J. Numer. Methods Fluids 72, 269-300, section 3.1.1; Chow (1959),
 Open-Channel Hydraulics, ch. 3, 14 and 15; Henderson (1966), Open Channel Flow, ch. 6 (weirs). Equation numbers were
 not checked.
+
+### 24) Open boundaries in the non-hydrostatic mode (issue #49)
+
+The water-level outlet and the free outflow (sections 21 and 22) now also work in the non-hydrostatic mode. The boundary
+face keeps its own momentum equation; the open boundary needs a condition for the non-hydrostatic pressure $q$. The
+discharge inlet stays a prescribed velocity, with no correction ($\partial q/\partial x=0$).
+
+**Fixed grid: $q=0$ on the open face** (hydrostatic pressure at the boundary).
+- `build_poisson_matrix(...; right_dirichlet=true)`: the last column gains $-2/\Delta x^2$, the neighbour half a cell
+  away with $q=0$. The manufactured solution $p=C/2\,(x^2-L^2)$ converges at second order
+  (`test_verify_poisson_right_dirichlet_manufactured_solution`).
+- The Dirichlet condition removes the null space, so there is no gauge pin and no mean removal (`_has_dirichlet`).
+- The face is corrected like an interior one, with $(0-q_{n_x})/(\Delta x/2)$: in the incremental predictor ($q^n$) and
+  in the projection (the increment); see `_add_open_boundary_pressure_gradient!`.
+- The solver is rebuilt when the boundary type changes (`_sync_pressure_solver!`) and needs the sparse method.
+- **Reference-profile subtraction.** The vertical predictor contains the hydrostatic gradient of the full reference
+  density. A Neumann projection absorbs it in an $x$-independent $q(z)$; a Dirichlet face cannot. Without subtracting
+  `grad_p_z_reference`, as the top-Dirichlet mode already did (section 15), it became a horizontal gradient of
+  $2\cdot10^4$ Pa over half a cell at the outlet, and $u=18$ m/s after one step. The subtraction now applies whenever
+  the projection has a Dirichlet face.
+
+**Wetting-drying step: $\partial q/\partial x=0$ on the open face** (no correction). Here $q$ is zero in the surface
+cell, not at the surface, so it has a part that a Dirichlet condition at the outlet does not match, even for long
+waves. Measured with a Gaussian wave of width 1 to 5 m in 1 m depth leaving through a free outflow, as a fraction of the
+reflection from a closed boundary:
+
+| condition on the open face | wetting-drying step | fixed grid |
+|---|---|---|
+| $q=0$ on the face | 10-29 % | 0.4-2 % |
+| $q=0$ one cell beyond | 8-21 % | |
+| $\partial q/\partial x=0$ | 2-5 % | |
+
+Results:
+- **Uniform flow** in the #14 channel with a water-level outlet stays steady to round-off; the projection does nothing.
+- **A dispersive wave** (width 1 m in 1 m depth) leaves through the free outflow with 0.25 % of its amplitude reflected
+  on the fixed grid and 1.15 % in the wetting-drying step; a prescribed level reflects it completely.
+- The volume budget with the boundary transports closes to round-off. On the fixed grid the kinematic condition holds
+  in every column, which includes the divergence of the boundary column.
 
 ## Test-by-test documentation
 
@@ -2247,7 +2285,17 @@ stated otherwise.
 - `test_verify_open_boundary_46_config_checks`: rejected combinations are
   - `left_level` without discharge, non-finite, or on the fixed grid;
   - `right_free` together with `right_level` or `right_profile`;
-  - `right_free` with explicit vertical terms or in the non-hydrostatic mode.
+  - `right_free` with explicit vertical terms, or in the non-hydrostatic mode with the spectral pressure solver.
+- Non-hydrostatic mode (section 24):
+  - `test_verify_poisson_right_dirichlet_manufactured_solution`: second order; the spectral solver rejects the
+    Dirichlet face.
+  - `test_verify_nonhydro_open_channel_uniform_flow_is_steady`: fixed grid and wetting-drying step; $u$ and $\eta$
+    stay to 1e-9 for 300 steps.
+  - `test_validate_nonhydro_free_outflow_transmits_dispersive_wave`: reflection below 1 % (fixed grid, measured 0.25 %)
+    and 3 % (wetting-drying step, measured 1.15 %) against a twice as long channel; a prescribed level reflects more
+    than 15 %. Also checks the volume budget, and on the fixed grid the kinematic condition, every step.
+  - `test_verify_nonhydro_open_boundary_config_checks`: the spectral solver is rejected; opening the boundary switches
+    the solver to the Dirichlet face, clearing it restores the Neumann solver.
 
 ### Obstacle tests (`test_obstacles.jl`, section 23)
 

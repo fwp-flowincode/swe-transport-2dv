@@ -77,8 +77,8 @@ changes every step exactly by the boundary fluxes (`test_verify_tracer_through_b
 Limits
 ------
 
-- Hydrostatic only; the boundaries of the non-hydrostatic mode are issue #49. The sharp-crested (thin-plate) weir of
-  issue #47 needs the non-hydrostatic pressure (a curved nappe), so it is left to after #49.
+- Hydrostatic only. The sharp-crested (thin-plate) weir of issue #47 needs the non-hydrostatic pressure (a curved
+  nappe); the open boundaries of the non-hydrostatic mode now exist (issue #49), the weir case is still to be set up.
 - A prescribed inflow density (`left_rho`) exists only in the wetting-drying step; the transport of the other modes has
   no flux through the outer faces.
 - Frictionless with an open outlet: a lake carrying the discharge is a steady state as well. The transcritical case

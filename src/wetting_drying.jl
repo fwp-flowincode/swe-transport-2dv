@@ -829,6 +829,11 @@ WHY q = 0 in the surface cell (not at the surface itself): the surface cell is c
 arbitrarily thin; the simple condition keeps the system SPD for every geometry. It is first order in the surface-cell
 thickness (period error of a standing wave, test_validate_wd_nonhydro_standing_wave_full_dispersion_*).
 For a lake at rest the right-hand side is exactly zero, so q = 0 and nothing changes.
+Open right boundary (water level or free outflow, issue #49): the boundary face is not corrected (dq/dx = 0 there).
+WHY not q = 0 on the face, as on the fixed grid (_add_open_boundary_pressure_gradient!): q of this scheme is zero in the
+surface cell, not at the surface, so it has a part that a Dirichlet condition at the outlet does not match even for long
+waves. Measured with a Gaussian wave of width 1 to 5 m in 1 m depth leaving through a free outflow (reflected amplitude
+relative to a closed boundary): q = 0 on the face 10-29 %, q = 0 one cell beyond 8-21 %, dq/dx = 0 2-5 %.
 """
 function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
     cfg = model.config
@@ -927,7 +932,9 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
             hf = wd.hf[k, f]
             hf > 0.0 || continue
             div += sgn * hf * (theta * st.u[k, f] + (1.0 - theta) * ws.u_old[k, f]) / dx
-            (1 < f <= nx) || continue   # boundary faces: prescribed velocity, no correction
+            # boundary faces: no correction; at an open right boundary (water level or free outflow, issue #49) a
+            # Neumann condition dq/dx = 0 (see _wd_nonhydrostatic_correction! docstring for why not q = 0)
+            (1 < f <= nx) || continue
             a = hf / dx^2
             diag += a
             N = idx[k, j]
@@ -1047,7 +1054,8 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
                 tend = _wd_advection_tendency(model, wd, k, f, second_order_momentum, depth_totals; vertical=!implicit) - (wd.p_anom[k, fp] - wd.p_anom[k, fp - 1]) / (cfg.rho0 * dx) + cfg.body_force_x
                 if theta != 1.0
                     tend -= explicit_surface
-                    nonhydro && (tend -= explicit_weight * (wd.q_nh[k, f] - wd.q_nh[k, f - 1]) / (cfg.rho0 * dx))
+                    # open right boundary face: dq/dx = 0 there (issue #49, _wd_nonhydrostatic_correction!)
+                    nonhydro && !boundary && (tend -= explicit_weight * (wd.q_nh[k, f] - wd.q_nh[k, f - 1]) / (cfg.rho0 * dx))
                 end
                 ws.u_hat[k, f] = damp * (st.u[k, f] + dt * tend)
             else
