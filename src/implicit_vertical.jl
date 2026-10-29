@@ -12,8 +12,7 @@
 # gives dZ' A^{-1} dZ = sum(dZ). Backward Euler: first order in time, no time-step restriction (robustness, issue #34).
 
 """
-    implicit_vertical_column!(u, r, uhat, dZ, W, nu, gamma, dt, m, cprime, dprime, rprime; advective=false, h_adv=dZ,
-        top_advection_rate=0)
+    implicit_vertical_column!(u, r, uhat, dZ, W, nu, gamma, dt, m, cprime, dprime, rprime; advective=false, h_adv=dZ)
 
 One implicit step of the vertical terms of a u-face column with `m` open layers, numbered from the bed (k = 1) to the
 top (k = m); entries beyond `m` are not touched:
@@ -29,8 +28,6 @@ top (k = m); entries beyond `m` are not touched:
     (u_k - u_{k-1}) - min(W_{k+1}, 0)(u_k - u_{k+1})], with the advection thickness `h_adv` (m) of the explicit scheme.
 - Viscosity `nu` (m^2/s, at the interfaces, length >= m+1, W-like indexing): D_k = nu_{k+1}(u_{k+1} - u_k)/dzf_{k+1} -
   nu_k (u_k - u_{k-1})/dzf_k, dzf_j = (dZ_{j-1} + dZ_j)/2, zero stress at the bed and the top.
-- Optional `top_advection_rate` (1/s): an additional implicit source on the top layer, used for the variable-top-layer
-  advective-form correction.
 
 Writes `u` (m/s) = A^{-1}(dZ .* uhat) and the column response `r` (-) = A^{-1} dZ. `cprime`, `dprime`, `rprime`: work
 vectors of length >= m. Thomas algorithm without pivoting: A is diagonally dominant (by columns in flux form, by rows
@@ -39,7 +36,7 @@ in advective form).
 function implicit_vertical_column!(u::AbstractVector{<:Real}, r::AbstractVector{<:Real}, uhat::AbstractVector{<:Real},
     dZ::AbstractVector{<:Real}, W::AbstractVector{<:Real}, nu::AbstractVector{<:Real}, gamma::Real, dt::Real, m::Int,
     cprime::AbstractVector{<:Real}, dprime::AbstractVector{<:Real}, rprime::AbstractVector{<:Real};
-    advective::Bool=false, h_adv::AbstractVector{<:Real}=dZ, top_advection_rate::Real=0.0)
+    advective::Bool=false, h_adv::AbstractVector{<:Real}=dZ)
     m >= 1 || return nothing
     @inbounds for k in 1:m
         lower = 0.0   # coefficient of u_{k-1} in row k
@@ -72,7 +69,6 @@ function implicit_vertical_column!(u::AbstractVector{<:Real}, r::AbstractVector{
             end
         end
         k == 1 && (diag += dt * gamma)
-        k == m && (diag += dt * dZ[k] * top_advection_rate)
         # forward elimination (Thomas), both right-hand sides
         if k == 1
             denom = diag

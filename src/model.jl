@@ -413,6 +413,9 @@ function refresh_density_metadata!(model::Model)
     return _refresh_density_metadata!(model)
 end
 
+# Clears the non-hydrostatic pressure of the previous step (ws.p_corr, Pa; wetting-drying q_nh, Pa, and w_nh, m/s), called
+# by every initialize_*!. WHY: the incremental projection (van Kan 1986) carries q^n into the next predictor, so a model
+# re-initialised after a run would otherwise feel the stale pressure gradient of the old flow.
 function _reset_nonhydrostatic_history!(model::Model)
     fill!(model.ws.p_corr, 0.0)
     if model.wetdry !== nothing
@@ -1211,9 +1214,15 @@ function _implicit_vertical_terms!(model::Model, variable_top::Bool)
             col[j, 6] = j > 1 ? 0.5 * (ws.nu_eff_u[k - 1, f] + ws.nu_eff_u[k, f]) : 0.0
         end
         gamma = cb * abs(ws.u_old[kb, f])   # m/s
+        # WHY the variable-top-layer correction -u_top div(v) (_top_row_advective_form!, including its vertical part
+        # u_top W/dz) stays explicit in u_hat and is not added to the top diagonal: A stays in pure flux form (1'A = dZ'),
+        # so without friction the effective depth sum(dZ r) equals the water depth exactly (header of
+        # src/implicit_vertical.jl). A top-diagonal term breaks that identity by O(dt W/dz) (-3 % at dt W/dz = 0.1,
+        # issue #34 review). The explicit term is stable for dt |W|/dz < 2, W ~ d(eta)/dt at the top interface: the
+        # surface would have to move two layer thicknesses in one step, far outside the accuracy range of the variable
+        # top layer (and a fall below the top layer stops the run, _check_top_layer_thickness).
         implicit_vertical_column!(view(col, :, 1), view(col, :, 2), view(col, :, 3), view(col, :, 4), view(col, :, 5),
-            view(col, :, 6), gamma, dt, m, view(col, :, 7), view(col, :, 8), view(col, :, 9);
-            top_advection_rate=variable_top ? ws.advection_u_ws.vz_face[nz, f] / dz : 0.0)
+            view(col, :, 6), gamma, dt, m, view(col, :, 7), view(col, :, 8), view(col, :, 9))
         H = 0.0
         for k in 1:(kb - 1)
             ws.r_vert[k, f] = 0.0
@@ -1283,6 +1292,7 @@ function step_forward!(model::Model)
     end
     # WHY the type assertion: the Model field is untyped; a concrete solver type avoids boxing and dynamic dispatch
     bsolver = model.barotropic_solver::BarotropicSolver{eltype(st.eta)}
+    # WHY the conversion: the solver stores theta in the state precision; Float32(0.7) != 0.7 in Float64
     if typeof(bsolver.theta)(cfg.theta) != bsolver.theta
         throw(ArgumentError("theta cannot be changed after Model construction (the free-surface matrix depends on it)"))
     end

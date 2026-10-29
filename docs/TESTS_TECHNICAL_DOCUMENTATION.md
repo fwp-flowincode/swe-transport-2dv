@@ -912,6 +912,23 @@ $C=U\Delta t/\Delta x\approx0.45$ with 2 layers and about 0.3 with 8 layers. `tv
 $C=0.1$ (Fr = 0.5), which the linear theory does not predict (MC limiter). These limits are outside issue #34 and are to
 be analysed separately.
 
+$\theta$ is fixed when the `Model` is built (the free-surface matrix contains $\theta^2$); `step_forward!` rejects a
+changed `config.theta`. The check compares in the precision of the state, so a `Float32` model (which stores
+`Float32(0.7)`) is not rejected spuriously (`test_verify_theta_range_is_checked`).
+
+With `implicit_vertical_terms=true` the vertical viscosity, the upwind vertical momentum advection and the bed friction
+form one tridiagonal matrix $A$ per u-face column (backward Euler, Casulli & Cheng 1992), and the free surface sees the
+effective depth $\sum_k\Delta Z_k r_k$ with the column response $r=A^{-1}\Delta Z$ (`src/implicit_vertical.jl`). $A$ is in
+flux form, so its columns sum to $\Delta Z$ and, without friction, the effective depth equals the water depth exactly.
+With the variable top layer the top row of the momentum advection carries the advective-form correction
+$-u_{\mathrm{top}}\nabla\cdot v$ (section 13). Its vertical part $u_{\mathrm{top}}W/\Delta z$ stays in the explicit
+predictor and is not put on the top diagonal of $A$: a diagonal term would change the effective depth by
+$O(\Delta t W/\Delta z)$ (−3 % at $\Delta t W/\Delta z=0.1$ in a single column, up to 0.01 m in the test below). The explicit
+term is stable for $\Delta t\lvert W\rvert/\Delta z<2$, i.e. as long as the surface moves less than two layer thicknesses per
+step, far beyond the accuracy range of the variable top layer.
+`test_verify_implicit_variable_top_effective_depth_equals_water_depth` checks $\sum_k\Delta Z_k r_k=(n_z-1)\Delta z+h_{\mathrm{top}}$
+on every interior face to $10^{-11}H$ in a standing wave with $\max\Delta t\lvert W\rvert/\Delta z\ge0.01$.
+
 References: Casulli & Cattani (1994), Comput. Math. Appl. 27(4), 99-112; Casulli & Cheng (1992), Int. J. Numer. Methods
 Fluids 15, 629-648; Casulli (1999), Int. J. Numer. Methods Fluids 30, 425-440; van Kan (1986), SIAM J. Sci. Stat.
 Comput. 7, 870-891 (incremental pressure correction). Equation numbers were not checked.
@@ -1344,6 +1361,18 @@ averages over the last 600 s, both modes.
 Validation section: profile error below 2 % of the exact surface velocity (observed 0.16-0.17 %), downwind bed flow,
 upwind flow below the interface, surface slope within 2 % (observed 0.09 %) and interface slope within 3 % (observed
 0.3 % hydrostatic, 0.5 % non-hydrostatic). The experiment `plot_wind_shear_analytic.jl` runs both cases from rest.
+
+### test_verify_fixed_grid_reinitialization_clears_pressure_history
+
+Purpose: an `initialize_*!` call on a model that has already run must give the same first step as a fresh model.
+
+Reference: in the incremental pressure correction (van Kan 1986, section 19) the predictor carries the full
+non-hydrostatic pressure gradient of the previous step ($q^n$ in `ws.p_corr`), so a stale $q^n$ would act as a spurious
+force after a re-initialisation. Every `initialize_*!` therefore resets this history (`_reset_nonhydrostatic_history!`,
+also `q_nh` and `w_nh` of the wetting-drying mode).
+
+Validation section: after 10 non-hydrostatic lock-exchange steps `p_corr` is non-zero; re-initialised to uniform density,
+one step matches a fresh model in $u$, $w$ and $\eta$ to $10^{-11}$.
 
 ### test_verify_nonhydrostatic_branch_produces_pressure_correction
 
@@ -1798,6 +1827,9 @@ Exactness, conservation and positivity tests run for the four variants hydrostat
 - `test_verify_wd_pressure_components_include_nonhydrostatic_correction`: in the non-hydrostatic mode `state.p` is the
   cut-cell hydrostatic pressure plus the solved non-hydrostatic pressure, and `pressure_buoyancy_components` returns
   these two components.
+- `test_verify_wd_reinitialization_clears_nonhydrostatic_history`: `initialize_water_level!` on a model that has run
+  five non-hydrostatic steps (non-zero `q_nh`, `w_nh`) gives the same next step as a fresh model ($u$, $w$, $\eta$ to
+  $10^{-11}$; see `test_verify_fixed_grid_reinitialization_clears_pressure_history`).
 - `test_verify_wd_nz1_pressure_diagnostics_output`: `run!` with one layer writes the pressure/buoyancy diagnostics (no
   interior interface).
 - `test_verify_ritter_reference_solution`: the Ritter solution conserves the released volume (quadrature, $10^{-5}$), is
