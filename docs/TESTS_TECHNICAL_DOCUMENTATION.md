@@ -902,7 +902,10 @@ and $C=0.1\ldots0.9$: it is at most 1 at $0.9~\mathrm{Fr_{max}}$ and above 1 at 
 
 The default $\theta=0.7$ covers subcritical flows up to Fr = 2/3 and damps waves 2.5 times less than $\theta=1$. The
 first default, 0.55, allows only Fr ≤ 0.11: a hydrostatic periodic channel at Fr = 0.45 (fixed layer thicknesses, `tvd2`,
-$C=0.2$) grew by a factor of about $10^7$ in 50 s at $\theta=0.55$ and decayed from $\theta=0.6$ on (analysis: 0.59).
+$C=0.2$) grows by a factor of 36 in 50 s at $\theta=0.55$ and decays from $\theta=0.59$ on, the value of the analysis for
+fixed layer thicknesses (measured with the momentum fluxes of issue #37, section 20; before, the advection defect
+inflated the growth to about $10^7$). With fixed layer thicknesses `theta_froude_max` is conservative (the channel
+still decays at 1.4 times the bound); it is sharp for an advected surface (variable top layer).
 Physical damping (bed friction, turbulent viscosity) can hide the weak growth. Flows with larger Froude numbers need a
 larger $\theta$ (for example $\theta=1$).
 

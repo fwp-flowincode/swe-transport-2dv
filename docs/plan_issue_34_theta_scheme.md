@@ -164,9 +164,13 @@ so short runs or runs with physical damping (bed friction, viscosity) may not sh
 default:
 
 - $\theta=0.55$ (the first default) allows only Fr ≤ 0.11. Model check: a hydrostatic periodic channel (fixed layer
-  thicknesses, $U=1$ m/s, $H=0.5$ m, Fr = 0.45, 4 cells per wavelength, `tvd2`, $C=0.2$) grows by a factor of about
-  $10^7$ in 50 s at $\theta=0.5$ and $0.55$ and decays from $\theta=0.6$ on; the analysis for fixed layer thicknesses
-  gives a minimal $\theta$ of 0.59 there. The k-ε open channel (Fr = 0.43) stays stable at $\theta=0.55$, because its
+  thicknesses, $U=1$ m/s, $H=0.5$ m, Fr = 0.45, `tvd2`, $C=0.2$); the analysis for fixed layer thicknesses gives a
+  minimal $\theta$ of 0.59 there. With the consistent momentum fluxes of issue #37 (16 cells per wavelength, nz = 2 and
+  8, identical results) the surface perturbation grows by 36 in 50 s at $\theta=0.55$ and by 2 at 0.57, and decays from
+  $\theta=0.59$ on (factor 0.11 at 0.59, 0.026 at 0.6). Before issue #37 the growth was about $10^7$ (4 cells per
+  wavelength), mostly from the advection defect; it also decayed from $\theta=0.6$ on. With `upwind1` every $\theta$ decays (its
+  numerical diffusion hides the growth). Above `theta_froude_max` the periodic channel still decays (checked up to
+  1.4 times the bound): with fixed layer thicknesses the bound is conservative, it is sharp for an advected surface. The k-ε open channel (Fr = 0.43) stays stable at $\theta=0.55$, because its
   bed friction and turbulent viscosity damp the weak growth; its failure during development came from the
   non-hydrostatic top-velocity error described in section 2.
 - $\theta=0.7$ (default, decided 2026-10-28) allows Fr ≤ 2/3, which covers subcritical river and estuary flows. It
