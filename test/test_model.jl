@@ -268,6 +268,7 @@ include(joinpath(@__DIR__, "..", "experiments", "wind_shear", "cases.jl"))
         initialize_wind_steady_state!(model, solution; two_layer=two_layer)
         mid = (3 * nx ÷ 8 + 1):(5 * nx ÷ 8 + 1)
         u_mean = zeros(nz)                      # m/s
+        eta_mean = zeros(nx)                    # m
         n_mean = 0
         for n in 1:cfg.nt
             step_forward!(model)
@@ -275,15 +276,19 @@ include(joinpath(@__DIR__, "..", "experiments", "wind_shear", "cases.jl"))
                 for k in 1:nz
                     u_mean[k] += mean(@view model.state.u[k, mid])
                 end
+                eta_mean .+= model.state.eta
                 n_mean += 1
             end
         end
         u_mean ./= n_mean
+        # WHY time-averaged eta: the theta scheme (issue #34, default theta = 0.7) damps the barotropic seiche excited by
+        # the discrete start much less than theta = 1, so the instantaneous slope still oscillates at t_end
+        eta_mean ./= n_mean
         z = [(k - 0.5) * model.dz for k in 1:nz]
         x_centres = [(i - 0.5) * model.dx for i in 1:nx]
         half = (nx ÷ 4 + 1):(3 * nx ÷ 4)        # middle half: slopes
         return (error=maximum(abs, u_mean .- solution.u.(z)), u=u_mean, model=model,
-            surface_slope=linear_slope(x_centres[half], model.state.eta[half]),
+            surface_slope=linear_slope(x_centres[half], eta_mean[half]),
             interface_slope=two_layer ? linear_slope(x_centres[half], interface_heights(model.state.rho, model.dz)[half]) : NaN)
     end
 

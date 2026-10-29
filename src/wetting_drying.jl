@@ -16,6 +16,10 @@ const WD_NEWTON_EXTRA_ITERATIONS = 10 # -, iterations allowed beyond the nx + 1 
 # -, safety factor on the round-off bound gamma_m S, m = 2 nz + 8, of a computed depth (docs/depth_positivity.md, section 5);
 # a depth below -WD_POSITIVITY_ROUNDOFF_FACTOR gamma_m S stops the run
 const WD_POSITIVITY_ROUNDOFF_FACTOR = 2
+# -, smallest log-law height of the bed friction as a multiple of the roughness length z0 (implicit_vertical_terms):
+# WHY: the cut layer at the bed can be arbitrarily thin, and z1 = hf/2 < z0 would make ln(z1/z0) <= 0; z1 >= 10 z0 caps
+# the coefficient at c_b = (kappa/ln 10)^2 = 0.032
+const WD_FRICTION_Z1_MIN_FACTOR = 10.0
 
 """
     WetDryState
@@ -54,6 +58,7 @@ mutable struct WetDryState{T<:Real}
     w_star::Matrix{T}          # m/s, (nz+1) x nx: predicted vertical velocity at the interfaces
     h_nh::Matrix{T}            # m, nz x nx: layer thicknesses of the provisional level of the free-surface solve
     q_nh::Matrix{T}            # Pa, nz x nx: non-hydrostatic pressure
+    w_nh::Matrix{T}            # m/s, (nz+1) x nx: vertical velocity w^n at the interfaces (theta scheme, issue #34)
     nh_index::Matrix{Int}      # unknown number of a cell of the pressure problem (0: surface, dry or empty cell)
     nh_rows::Vector{Int}
     nh_cols::Vector{Int}
@@ -78,7 +83,7 @@ function WetDryState(cfg::ModelConfig; T::Type{<:Real}=Float64)
     return WetDryState(bed, bed_face, zeros(T, nz, nx), zeros(T, nz, nx), zeros(T, nz, nx + 1), zeros(T, nz, nx + 1),
         zeros(T, nz, nx), zeros(T, nz, nx), zeros(T, nx + 1), zeros(T, nx + 1), zeros(T, nx), zeros(T, nx), zeros(T, nx),
         zeros(T, nx), zeros(T, nx), zeros(T, nx), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz),
-        zeros(T, nz, nx + 1), zeros(T, nz + 1, nx), zeros(T, nz, nx), zeros(T, nz, nx), zeros(Int, nz, nx),
+        zeros(T, nz, nx + 1), zeros(T, nz + 1, nx), zeros(T, nz, nx), zeros(T, nz, nx), zeros(T, nz + 1, nx), zeros(Int, nz, nx),
         Int[], Int[], T[], T[], fill(T(-1), nz, nx + 1), 0.0, 0.0, 0, 0, nothing)
 end
 
@@ -153,6 +158,7 @@ function initialize_water_level!(model::Model, level::Union{Real,AbstractVector{
     fill!(st.u, 0.0)
     fill!(st.w, 0.0)
     fill!(st.p, 0.0)
+    _reset_nonhydrostatic_history!(model)
     wd.time = 0.0
     _refresh_density_metadata!(model)
     return nothing
@@ -311,7 +317,8 @@ end
 # WHY the cap: with C = dt * (sum of the inflow coefficients), the tendency is scaled by 1/C where C > 1; for upwind1 this
 # keeps the update a convex combination of the neighbours (thin layers stay stable).
 # `depth_totals` = (Hbar_f, Htilde_L, Htilde_R) of face f from `_wd_advection_depth_totals`.
-function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, second::Bool, depth_totals)
+function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, second::Bool, depth_totals;
+    vertical::Bool=true)
     u = model.state.u
     W = model.state.w
     nz = model.config.nz
@@ -354,9 +361,9 @@ function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, s
             tend -= aR / dx * (_wd_upwind_value(uf, u[k, f - 1], u[k, f + 1], true, true) - uf)
         end
 
-        # vertical: interface k (below layer k) and k+1 (above)
+        # vertical: interface k (below layer k) and k+1 (above); implicit instead with implicit_vertical_terms
         v2 = second && open_v(k - 2) && open_v(k - 1) && open_v(k + 1) && open_v(k + 2)
-        if open_v(k - 1)
+        if vertical && open_v(k - 1)
             w_bot = 0.5 * (W[k, L] + W[k, R])
             if w_bot > 0.0                 # inflow from below: upwind node k-1, behind it k-2
                 c = w_bot / hbar
@@ -366,7 +373,7 @@ function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, s
                 tend += w_bot / hbar * (_wd_upwind_value(uf, u[k + 1, f], u[k - 1, f], true, true) - uf)
             end
         end
-        if open_v(k + 1)
+        if vertical && open_v(k + 1)
             w_top = 0.5 * (W[k + 1, L] + W[k + 1, R])
             if w_top < 0.0                 # inflow from above: upwind node k+1, behind it k+2
                 c = -w_top / hbar
@@ -412,6 +419,62 @@ function _wd_vertical_viscosity!(model::Model, wd::WetDryState, u_hat::AbstractM
     @inbounds for k in (nz - 1):-1:1
         u_hat[k, f] = (d[k] - c[k] * u_hat[k + 1, f]) / b[k]
     end
+    return nothing
+end
+
+# Implicit vertical terms of face f (implicit_vertical_terms=true; src/implicit_vertical.jl): viscosity nu, upwind
+# vertical advection in the advective form of `_wd_advection_tendency` (interface fluxes of time n averaged to the face,
+# advection thickness hbar of the two cells) and log-law bed friction c_b |u^n| on the lowest open layer
+# (z1 = max(hf/2, WD_FRICTION_Z1_MIN_FACTOR z0)), on the open layers of the face. Replaces u_hat there by
+# A^{-1}(hf .* u_hat) and writes the column response ws.r_vert and the effective depth ws.H_face[f] = sum_k hf_k r_k.
+function _wd_implicit_vertical!(model::Model, wd::WetDryState, f::Int)
+    cfg = model.config
+    ws = model.ws
+    W = model.state.w
+    nz = cfg.nz
+    col = ws.col
+    klo, khi = 0, 0
+    @inbounds for k in 1:nz
+        if wd.hf[k, f] > 0.0
+            klo == 0 && (klo = k)
+            khi = k
+        end
+    end
+    @inbounds for k in 1:nz
+        ws.r_vert[k, f] = 0.0
+    end
+    if klo == 0
+        ws.H_face[f] = 0.0
+        return nothing
+    end
+    m = khi - klo + 1
+    L, R = f - 1, f
+    @inbounds for j in 1:m
+        k = klo + j - 1
+        col[j, 3] = ws.u_hat[k, f]
+        col[j, 4] = wd.hf[k, f]
+        col[j, 5] = 0.5 * (W[k, L] + W[k, R])   # interface below layer k
+        col[j, 6] = cfg.nu
+        hbar = 0.5 * (wd.h[k, L] + wd.h[k, R])
+        # WHY floatmax: an empty cell pair has no advection in the explicit scheme either (dZ/h_adv = 0)
+        col[j, 10] = hbar > WD_EMPTY_CELL_THICKNESS ? hbar : floatmax(Float64)   # m, advection thickness
+    end
+    gamma = 0.0   # m/s
+    if cfg.bed_roughness_length > 0.0
+        z1 = max(0.5 * wd.hf[klo, f], WD_FRICTION_Z1_MIN_FACTOR * cfg.bed_roughness_length)
+        gamma = bed_friction_coefficient(cfg.bed_roughness_length, z1) * abs(ws.u_old[klo, f])
+    end
+    implicit_vertical_column!(view(col, :, 1), view(col, :, 2), view(col, :, 3), view(col, :, 4), view(col, :, 5),
+        view(col, :, 6), gamma, cfg.dt, m, view(col, :, 7), view(col, :, 8), view(col, :, 9); advective=true,
+        h_adv=view(col, :, 10))
+    H = 0.0
+    @inbounds for j in 1:m
+        k = klo + j - 1
+        ws.u_hat[k, f] = col[j, 1]
+        ws.r_vert[k, f] = col[j, 2]
+        H += col[j, 4] * col[j, 2]
+    end
+    ws.H_face[f] = H
     return nothing
 end
 
@@ -540,16 +603,20 @@ function _wd_free_surface_solve!(model::Model, wd::WetDryState)
     ws = model.ws
     nz, nx = cfg.nz, cfg.nx
     dt, dx, g, H = cfg.dt, model.dx, cfg.g, cfg.depth
-    coeff = dt * dt * g / (dx * dx)   # 1/m
+    theta = cfg.theta
+    # WHY theta^2 and the theta transport: u^{n+1} = u_hat - theta g dt d(eta^{n+1})/dx enters the continuity flux
+    # sum_k hf (theta u^{n+1} + (1 - theta) u^n) (issue #34); theta = 1 is the former scheme exactly
+    coeff = theta * theta * dt * dt * g / (dx * dx)   # 1/m
     a, eta, F, b = wd.a_face, wd.eta_iter, wd.rhs, wd.dp
     @inbounds for f in 1:(nx + 1)
         Hf = 0.0
         U = 0.0
         for k in 1:nz
             Hf += wd.hf[k, f]
-            U += wd.hf[k, f] * ws.u_hat[k, f]
+            U += wd.hf[k, f] * (theta * ws.u_hat[k, f] + (1.0 - theta) * ws.u_old[k, f])
         end
-        a[f] = (f == 1 || f == nx + 1) ? 0.0 : coeff * Hf
+        # implicit vertical terms: effective depth sum_k hf_k r_k of the column response (src/implicit_vertical.jl)
+        a[f] = (f == 1 || f == nx + 1) ? 0.0 : coeff * (cfg.implicit_vertical_terms ? ws.H_face[f] : Hf)
         wd.U_hat[f] = U
     end
     @inbounds for i in 1:nx
@@ -603,7 +670,8 @@ function _wd_free_surface_solve!(model::Model, wd::WetDryState)
     @inbounds for f in 2:nx
         grad = (eta[f] - eta[f - 1]) / dx
         for k in 1:nz
-            st.u[k, f] = wd.hf[k, f] > 0.0 ? ws.u_hat[k, f] - g * dt * grad : 0.0
+            r = cfg.implicit_vertical_terms ? ws.r_vert[k, f] : 1.0   # column response of the implicit vertical terms
+            st.u[k, f] = wd.hf[k, f] > 0.0 ? ws.u_hat[k, f] - g * dt * theta * grad * r : 0.0
         end
     end
     @views st.u[:, 1] .= ws.u_hat[:, 1]
@@ -626,7 +694,9 @@ function _wd_update_level_from_fluxes!(model::Model, wd::WetDryState)
     ws = model.ws
     nz, nx = cfg.nz, cfg.nx
     dt, dx = cfg.dt, model.dx
-    @. wd.q = wd.hf * st.u
+    theta = cfg.theta
+    # theta fluxes (m^2/s): they move the level, give the vertical fluxes and transport the constituent
+    @. wd.q = wd.hf * (theta * st.u + (1.0 - theta) * ws.u_old)
     @inbounds for i in 1:nx
         div = 0.0
         out = 0.0
@@ -685,6 +755,7 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
     ws = model.ws
     nz, nx = cfg.nz, cfg.nx
     dt, dx, rho0 = cfg.dt, model.dx, cfg.rho0
+    theta = cfg.theta
     h_nh, w_star, idx = wd.h_nh, wd.w_star, wd.nh_index
     wet(k, i) = h_nh[k, i] > WD_EMPTY_CELL_THICKNESS
 
@@ -694,8 +765,9 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
         layer_thicknesses!(view(h_nh, :, i), zeta, wd.bed[i], model.dz)
     end
 
-    # 2. w predictor at the interfaces k = 2..nz between two wet cells (k-1 below, k above)
-    W = st.w
+    # 2. w predictor at the interfaces k = 2..nz between two wet cells (k-1 below, k above), from w^n
+    # WHY st.w at theta = 1: the interface fluxes of the last step are w^n there (the former scheme, bit for bit)
+    W = theta == 1.0 ? st.w : wd.w_nh
     u0 = wd.u_old
     fill!(w_star, 0.0)
     @inbounds for i in 1:nx, k in 2:nz
@@ -726,6 +798,16 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
             tend += c * (W[k + 1, i] - wk)
         end
         w_star[k, i] = wk + (dt * csum > 1.0 ? tend / csum : dt * tend)
+    end
+    if theta != 1.0
+        # The continuity below holds for the theta velocities; with w^{n+1} = w_star - dt/rho0 dz(theta q^{n+1} +
+        # (1 - theta) q^n) the predicted theta interface velocity is theta w_star + (1 - theta) w^n - theta (1 - theta)
+        # dt/rho0 dz q^n (wd.q_nh still holds q^n), and the system adds -dt/rho0 dz(theta^2 q^{n+1}).
+        @inbounds for i in 1:nx, k in 2:nz
+            (wet(k - 1, i) && wet(k, i)) || continue
+            dzq = (wd.q_nh[k, i] - wd.q_nh[k - 1, i]) / (0.5 * (h_nh[k - 1, i] + h_nh[k, i]))
+            w_star[k, i] = theta * w_star[k, i] + (1.0 - theta) * W[k, i] - theta * (1.0 - theta) * dt / rho0 * dzq
+        end
     end
 
     # 3. pressure problem: unknowns are the wet cells below the surface cell of each column
@@ -763,7 +845,7 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
         for (f, j, sgn) in ((i, i - 1, -1.0), (i + 1, i + 1, 1.0))   # left and right face, neighbour column
             hf = wd.hf[k, f]
             hf > 0.0 || continue
-            div += sgn * hf * st.u[k, f] / dx
+            div += sgn * hf * (theta * st.u[k, f] + (1.0 - theta) * ws.u_old[k, f]) / dx
             (1 < f <= nx) || continue   # boundary faces: prescribed velocity, no correction
             a = hf / dx^2
             diag += a
@@ -796,15 +878,17 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
     # and memory); a lake at rest has rhs = 0 and gives q = 0 exactly.
     A = sparse(rows, cols, vals, n, n)
     sol = cholesky(Symmetric(A)) \ rhs
+    # WHY 1/theta^2: the system makes the theta flux divergence-free with the correction -dt/rho0 grad(sol); the
+    # pressure enters u^{n+1} with theta dt and the theta flux with theta^2 dt, so q = sol / theta^2 (Pa)
     @inbounds for i in 1:nx, k in 1:nz
-        idx[k, i] > 0 && (wd.q_nh[k, i] = sol[idx[k, i]])
+        idx[k, i] > 0 && (wd.q_nh[k, i] = sol[idx[k, i]] / (theta * theta))
     end
 
-    # 4. the non-hydrostatic pressure gradient enters the predictor; the caller repeats the free-surface solve
+    # 4. the non-hydrostatic pressure gradient (weight theta) enters the predictor; the caller repeats the solve
     @inbounds for f in 2:nx, k in 1:nz
         wd.hf[k, f] > 0.0 || continue
         dq = wd.q_nh[k, f] - wd.q_nh[k, f - 1]
-        dq == 0.0 || (ws.u_hat[k, f] -= dt / rho0 * dq / dx)
+        dq == 0.0 || (ws.u_hat[k, f] -= theta * dt / rho0 * dq / dx)
     end
     model.last_nonhydro_pcorr_max = maximum(abs, wd.q_nh)
     return nothing
@@ -852,17 +936,28 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     _wd_cell_thicknesses!(wd.h, model, wd)
     _wd_face_thicknesses!(model, wd)
     _wd_initialize_new_face_layers!(model, wd)
+    copyto!(ws.u_old, st.u)   # u^n with the newly opened face layers (theta part of the continuity flux)
     @. wd.q = wd.hf * st.u   # discharges of time n, for the advection
     _wd_baroclinic_pressure!(model, wd)
 
-    # 2. momentum predictor
+    # 2. momentum predictor, with the explicit parts of the theta scheme (issue #34): -(1 - theta) g d(eta^n)/dx and,
+    # non-hydrostatic, -(1 - theta)/rho0 dq^n/dx (wd.q_nh still holds q^n)
+    theta = cfg.theta
+    explicit_weight = 1.0 - theta
+    nonhydro = !cfg.use_hydrostatic && nz > 1
+    implicit = cfg.implicit_vertical_terms
     second_order_momentum = cfg.momentum_advection_scheme == "tvd2"
     damp = cfg.rayleigh_damping > 0.0 ? max(0.0, 1.0 - cfg.rayleigh_damping * dt) : 1.0
     @inbounds for f in 2:nx
         depth_totals = _wd_advection_depth_totals(wd, f)
+        explicit_surface = explicit_weight * g * (ws.eta_old[f] - ws.eta_old[f - 1]) / dx   # m/s^2
         for k in 1:nz
             if wd.hf[k, f] > 0.0
-                tend = _wd_advection_tendency(model, wd, k, f, second_order_momentum, depth_totals) - (wd.p_anom[k, f] - wd.p_anom[k, f - 1]) / (cfg.rho0 * dx) + cfg.body_force_x
+                tend = _wd_advection_tendency(model, wd, k, f, second_order_momentum, depth_totals; vertical=!implicit) - (wd.p_anom[k, f] - wd.p_anom[k, f - 1]) / (cfg.rho0 * dx) + cfg.body_force_x
+                if theta != 1.0
+                    tend -= explicit_surface
+                    nonhydro && (tend -= explicit_weight * (wd.q_nh[k, f] - wd.q_nh[k, f - 1]) / (cfg.rho0 * dx))
+                end
                 ws.u_hat[k, f] = damp * (st.u[k, f] + dt * tend)
             else
                 ws.u_hat[k, f] = 0.0
@@ -877,7 +972,7 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
                 end
             end
         end
-        _wd_vertical_viscosity!(model, wd, ws.u_hat, f)
+        implicit ? _wd_implicit_vertical!(model, wd, f) : _wd_vertical_viscosity!(model, wd, ws.u_hat, f)
     end
     _wd_boundary_velocities!(model, wd, ws.u_hat, wd.time + dt)
 
@@ -909,6 +1004,15 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
         st.w[nz + 1, i] = 0.0
     end
     model.last_kinematic_mismatch = max_mismatch
+    if !cfg.use_hydrostatic && nz > 1
+        # w^{n+1} of the non-hydrostatic mode: st.w holds the theta fluxes theta w^{n+1} + (1 - theta) w^n; interfaces
+        # that were not between two wet cells at both levels start from st.w
+        @inbounds for i in 1:nx, k in 1:(nz + 1)
+            interior = 1 < k <= nz && wd.h[k - 1, i] > WD_EMPTY_CELL_THICKNESS && wd.h[k, i] > WD_EMPTY_CELL_THICKNESS &&
+                wd.h_new[k - 1, i] > WD_EMPTY_CELL_THICKNESS && wd.h_new[k, i] > WD_EMPTY_CELL_THICKNESS
+            wd.w_nh[k, i] = interior ? (st.w[k, i] - (1.0 - theta) * wd.w_nh[k, i]) / theta : st.w[k, i]
+        end
+    end
 
     # 7. constituent transport
     _wd_transport_density!(model, wd)

@@ -1,3 +1,29 @@
+# WHY these bounds: the linear amplification factor of the theta scheme, |G|^2 = (1 + mu^2 (1-theta)^2)/(1 + mu^2 theta^2),
+# is <= 1 for every time step only if theta >= 1/2 (docs/plan_issue_34_theta_scheme.md, section 3); theta > 1 only adds
+# damping and is not a Casulli theta scheme.
+const THETA_MIN = 0.5   # -, smallest allowed implicitness of the free surface
+const THETA_MAX = 1.0   # -, largest allowed implicitness of the free surface
+
+"""
+    theta_froude_max(theta)
+
+Largest Froude number `Fr = |U| / sqrt(g H)` (-) of a mean flow for which the theta scheme with explicit momentum
+advection is linearly stable (docs/plan_issue_34_theta_scheme.md, section 3.3):
+
+    Fr_max(theta) = (2 theta - 1) / (2 (1 - theta)),   equivalently   theta >= (1 + 2 Fr) / (2 (1 + Fr)).
+
+`theta` (-) in [THETA_MIN, THETA_MAX]; `Fr_max(1/2) = 0`, `Fr_max(0.55) = 0.11`, `Fr_max(0.7) = 2/3`, `Fr_max(0.75) = 1`,
+`Fr_max(1) = Inf`. Von Neumann analysis of the linearised 1D system about a uniform flow U (upwind or Lax-Wendroff
+advection of u and eta with Courant number C <= 1, theta free surface with any gravity-wave Courant number): long
+waves, where the explicit advection adds the Doppler phase U k dt without damping, give |lambda|^2 <= 1 iff
+2 (1 - theta) Fr <= 2 theta - 1; the bound is sharp for Lax-Wendroff (the smooth limit of tvd2) and sufficient for
+upwind1, whose numerical diffusion lowers the required theta. Above Fr_max the growth per step is weak (slowly growing
+gravity waves on the mean flow), not an immediate blow-up. The bound concerns the theta coupling only; the explicit
+momentum advection has its own limits (advective Courant number, see the plan, section 3.3).
+"""
+theta_froude_max(theta::Real) = theta >= 1 ? Inf : (2 * theta - 1) / (2 * (1 - theta))
+
+
 Base.@kwdef mutable struct ModelConfig
     nz::Int = 20
     nx::Int = 100
@@ -20,6 +46,22 @@ Base.@kwdef mutable struct ModelConfig
     # (c_b = (kappa/ln(z1/z0))^2, z1 = dz/2) and, with k-epsilon, the wall functions; 0 keeps the free-slip bed.
     bed_roughness_length::Float64 = 0.0
     dt::Float64 = 0.0025
+    # Implicitness theta (-, THETA_MIN <= theta <= THETA_MAX) of the free surface (issue #34; Casulli & Cattani 1994): the
+    # surface level in the pressure gradient and the velocity in the continuity flux are taken at n + theta (layer
+    # thicknesses at n), and the transport uses the matching theta velocities. theta = 1/2 is second order in time without
+    # damping, theta = 1 (the former scheme) first order with a damping of about 2 pi^2 / N per wave period (N steps per
+    # period). Stability: theta >= 1/2 for any time step without mean flow; with a mean flow of Froude number Fr and the
+    # explicit momentum advection theta >= (1 + 2 Fr) / (2 (1 + Fr)), i.e. Fr <= theta_froude_max(theta).
+    # WHY 0.7: stable up to Fr = 2/3 (theta = 0.55 only up to Fr = 0.11: a periodic channel at Fr = 0.45 grew by 1e7 in
+    # 50 s), damping 0.8 pi^2 / N per period (2.5 times less than theta = 1). See docs/plan_issue_34_theta_scheme.md,
+    # section 3.
+    theta::Float64 = 0.7
+    # Implicit vertical terms (issue #34, src/implicit_vertical.jl): vertical viscosity, vertical momentum advection
+    # (first-order upwind with the interface velocities of time n) and bed friction (linearised, c_b |u^n|) in one
+    # tridiagonal matrix per u-face, coupled to the free surface (Casulli & Cheng 1992); the explicit momentum advection
+    # is then horizontal only. No time-step limit from these terms. Also allows bed_roughness_length with wetting_drying.
+    # WHY false by default: keeps the results of the validated cases (explicit vertical terms) unchanged.
+    implicit_vertical_terms::Bool = false
     nt::Int = 40000
     rayleigh_damping::Float64 = 0.01
     max_froude::Float64 = 0.9
@@ -146,6 +188,8 @@ function copy_config(cfg::ModelConfig)
         turbulence_closure=cfg.turbulence_closure,
         bed_roughness_length=cfg.bed_roughness_length,
         dt=cfg.dt,
+        theta=cfg.theta,
+        implicit_vertical_terms=cfg.implicit_vertical_terms,
         nt=cfg.nt,
         rayleigh_damping=cfg.rayleigh_damping,
         max_froude=cfg.max_froude,
@@ -203,6 +247,13 @@ mutable struct ModelWorkspace{T<:Real}
     tridiag_dp::Vector{T}
     tridiag_x::Vector{T}
     h_top_face::Vector{T}   # m, top-layer thickness at the u-faces (variable top layer only)
+    u_old::Matrix{T}        # m/s, nz x (nx+1): u of time level n
+    u_theta::Matrix{T}      # m/s, nz x (nx+1): theta u^{n+1} + (1 - theta) u^n (continuity flux and transport)
+    w_theta::Matrix{T}      # m/s, (nz+1) x nx: vertical velocity of the continuity of u_theta (transport)
+    # implicit vertical terms (implicit_vertical_terms=true)
+    r_vert::Matrix{T}       # -, nz x (nx+1): column response r = A^{-1} dZ per u-face (1 without implicit terms)
+    H_face::Vector{T}       # m, nx+1: effective depth sum_k dZ_k r_k per u-face
+    col::Matrix{T}          # work columns (nz+1) x 10: u, r, uhat, dZ, W, nu, cprime, dprime, rprime, h_adv
 end
 
 function ModelWorkspace(cfg::ModelConfig; T::Type{<:Real}=Float64)
@@ -237,6 +288,12 @@ function ModelWorkspace(cfg::ModelConfig; T::Type{<:Real}=Float64)
         zeros(T, nx),
         zeros(T, nx),
         zeros(T, nx + 1),
+        zeros(T, nz, nx + 1),
+        zeros(T, nz, nx + 1),
+        zeros(T, nz + 1, nx),
+        ones(T, nz, nx + 1),
+        zeros(T, nx + 1),
+        zeros(T, nz + 1, 10),
     )
 end
 
@@ -356,6 +413,18 @@ function refresh_density_metadata!(model::Model)
     return _refresh_density_metadata!(model)
 end
 
+# Clears the non-hydrostatic pressure of the previous step (ws.p_corr, Pa; wetting-drying q_nh, Pa, and w_nh, m/s), called
+# by every initialize_*!. WHY: the incremental projection (van Kan 1986) carries q^n into the next predictor, so a model
+# re-initialised after a run would otherwise feel the stale pressure gradient of the old flow.
+function _reset_nonhydrostatic_history!(model::Model)
+    fill!(model.ws.p_corr, 0.0)
+    if model.wetdry !== nothing
+        fill!(model.wetdry.q_nh, 0.0)
+        fill!(model.wetdry.w_nh, 0.0)
+    end
+    return nothing
+end
+
 function initialize_lock_exchange!(model::Model; rho_left::Real=model.config.rho_left, rho_right::Real=model.config.rho_right)
     cfg = model.config
     st = model.state
@@ -367,6 +436,7 @@ function initialize_lock_exchange!(model::Model; rho_left::Real=model.config.rho
     fill!(st.w, 0.0)
     fill!(st.eta, 0.0)
     fill!(st.p, 0.0)
+    _reset_nonhydrostatic_history!(model)
 
     _refresh_density_metadata!(model)
 
@@ -415,6 +485,7 @@ function initialize_rayleigh_taylor!(
     fill!(st.w, 0.0)
     fill!(st.eta, 0.0)
     fill!(st.p, 0.0)
+    _reset_nonhydrostatic_history!(model)
 
     _refresh_density_metadata!(model)
 
@@ -464,6 +535,7 @@ function initialize_rising_plume!(
     fill!(st.w, 0.0)
     fill!(st.eta, 0.0)
     fill!(st.p, 0.0)
+    _reset_nonhydrostatic_history!(model)
 
     _refresh_density_metadata!(model)
 
@@ -516,6 +588,7 @@ function initialize_jet_impulse!(
     fill!(st.w, 0.0)
     fill!(st.eta, 0.0)
     fill!(st.p, 0.0)
+    _reset_nonhydrostatic_history!(model)
 
     x0 = x_center_fraction * cfg.length
     z0 = z_center_fraction * cfg.depth
@@ -578,6 +651,7 @@ function initialize_internal_seiche!(
     fill!(st.w, 0.0)
     fill!(st.eta, 0.0)
     fill!(st.p, 0.0)
+    _reset_nonhydrostatic_history!(model)
 
     _refresh_density_metadata!(model)
 
@@ -605,6 +679,7 @@ function initialize_surface_dam_break!(
     fill!(st.p, 0.0)
     @views st.eta[1:split_idx] .= 0.5 * eta_jump
     @views st.eta[(split_idx + 1):end] .= -0.5 * eta_jump
+    _reset_nonhydrostatic_history!(model)
 
     _refresh_density_metadata!(model)
 
@@ -661,6 +736,7 @@ function initialize_kelvin_helmholtz!(
     fill!(st.w, 0.0)
     fill!(st.eta, 0.0)
     fill!(st.p, 0.0)
+    _reset_nonhydrostatic_history!(model)
     # WHY: with periodic x the first and last u-faces are the same seam face and carry the shear like every other face
     # (x_u[1] = 0 and x_u[end] = L have the same perturbation phase); zeroing them would put a wall-like velocity
     # defect across the whole depth at the seam. Closed walls keep zero normal velocity.
@@ -785,6 +861,9 @@ function clear_x_inflow_outflow!(model::Model)
 end
 
 function _check_model_config(cfg::ModelConfig)
+    if !(THETA_MIN <= cfg.theta <= THETA_MAX)
+        throw(ArgumentError("theta must be in [$(THETA_MIN), $(THETA_MAX)] (theta < 1/2 is unstable), got $(cfg.theta)"))
+    end
     cfg.wetting_drying && _check_wetting_drying_config(cfg)
     if cfg.periodic_x && use_variable_top_layer(cfg)
         throw(ArgumentError("periodic_x=true is not supported with the variable top layer"))
@@ -804,7 +883,7 @@ function _check_model_config(cfg::ModelConfig)
     if cfg.bed_roughness_length < 0.0 || cfg.bed_roughness_length >= 0.5 * cfg.depth / cfg.nz
         throw(ArgumentError("bed_roughness_length must be in [0, dz/2)"))
     end
-    if (turbulence_closure(cfg) == "k_epsilon" || cfg.bed_roughness_length > 0.0) && cfg.bed_level !== nothing
+    if (turbulence_closure(cfg) == "k_epsilon" || cfg.bed_roughness_length > 0.0) && cfg.bed_level !== nothing && !cfg.wetting_drying
         throw(ArgumentError("turbulence_closure=\"k_epsilon\" and bed_roughness_length are implemented for the flat bed only (bed_level=nothing)"))
     end
     if !(cfg.transport_advection_scheme in ("upwind1", "tvd2"))
@@ -825,7 +904,8 @@ function _check_wetting_drying_config(cfg::ModelConfig)
     cfg.periodic_x && throw(ArgumentError("wetting_drying=true does not support periodic_x=true"))
     cfg.momentum_advection_scheme in ("upwind1", "tvd2") || throw(ArgumentError("momentum_advection_scheme must be \"upwind1\" or \"tvd2\", got \"$(cfg.momentum_advection_scheme)\""))
     turbulence_closure(cfg) == "none" || throw(ArgumentError("wetting_drying=true does not support a turbulence closure"))
-    cfg.bed_roughness_length == 0.0 || throw(ArgumentError("wetting_drying=true does not support bed_roughness_length"))
+    cfg.bed_roughness_length == 0.0 || cfg.implicit_vertical_terms ||
+        throw(ArgumentError("wetting_drying=true supports bed_roughness_length only with implicit_vertical_terms=true (the cut layers at the bed can be arbitrarily thin)"))
     cfg.wind_stress_x == 0.0 || throw(ArgumentError("wetting_drying=true does not support wind_stress_x"))
     cfg.dry_depth_threshold > 0.0 || throw(ArgumentError("dry_depth_threshold must be > 0"))
     if cfg.bed_level !== nothing
@@ -1059,6 +1139,141 @@ function _compute_effective_viscosity_u!(nu_eff_u::AbstractMatrix{<:Real}, model
     return nu_eff_u
 end
 
+# Surface slope d(eta)/dx (1) at the u-faces: grad[i] between cells i and i+1 (i = 1 ... nx-1), or with periodic_x
+# grad[i] at face i (i = 1 ... nx+1, face nx+1 = face 1).
+function _surface_gradient!(grad::AbstractVector{<:Real}, eta::AbstractVector{<:Real}, dx::Real, periodic_x::Bool)
+    nx = length(eta)
+    if periodic_x
+        grad[1] = (eta[1] - eta[end]) / dx
+        @inbounds for i in 2:nx
+            grad[i] = (eta[i] - eta[i - 1]) / dx
+        end
+        grad[nx + 1] = grad[1]
+    else
+        @inbounds for i in 1:(nx - 1)
+            grad[i] = (eta[i + 1] - eta[i]) / dx
+        end
+    end
+    return grad
+end
+
+# u[k, f] += factor * slope (* r[k, f], the column response of the implicit vertical terms, if given) on the interior
+# u-faces (all faces with periodic_x); factor in m/s per unit slope.
+function _add_surface_gradient!(u::AbstractMatrix{<:Real}, grad::AbstractVector{<:Real}, factor::Real, periodic_x::Bool;
+    r::Union{Nothing,AbstractMatrix{<:Real}}=nothing)
+    nz, nxp1 = size(u)
+    ilo, ihi = periodic_x ? (1, nxp1) : (2, nxp1 - 1)
+    @inbounds for i in ilo:ihi
+        grad_index = periodic_x ? i : i - 1
+        for k in 1:nz
+            u[k, i] += r === nothing ? factor * grad[grad_index] : factor * grad[grad_index] * r[k, i]
+        end
+    end
+    return u
+end
+
+# Column transports U_f = sum_k dZ_k u[k, f] (m^2/s) of the u-faces: dZ = dz, and the top-layer face thickness for the
+# variable top layer (faces below the bed carry u = 0).
+function _face_transport!(U::AbstractVector{<:Real}, u::AbstractMatrix{<:Real}, model::Model, variable_top::Bool)
+    nz = size(u, 1)
+    @inbounds for f in axes(u, 2)
+        s = 0.0
+        for k in 1:(nz - 1)
+            s += u[k, f]
+        end
+        top = variable_top ? model.ws.h_top_face[f] : model.dz
+        U[f] = s * model.dz + top * u[nz, f]
+    end
+    return U
+end
+
+# Implicit vertical terms of the fixed grid (implicit_vertical_terms=true) on every interior u-face: viscosity nu_eff_u,
+# upwind vertical advection in flux form with w^n averaged to the face, log-law bed friction c_b |u^n_1| (flat bed,
+# z1 = dz/2). Replaces ws.u_hat by A^{-1}(dZ .* u_hat) on the open layers and writes the column response ws.r_vert and
+# the effective depth ws.H_face (src/implicit_vertical.jl).
+function _implicit_vertical_terms!(model::Model, variable_top::Bool)
+    cfg = model.config
+    st = model.state
+    ws = model.ws
+    geo = model.geometry
+    nz, nx = cfg.nz, cfg.nx
+    dz, dt = model.dz, cfg.dt
+    col = ws.col
+    cb = cfg.bed_roughness_length > 0.0 ? bed_friction_coefficient(cfg.bed_roughness_length, 0.5 * dz) : 0.0
+    flo, fhi = cfg.periodic_x ? (1, nx) : (2, nx)
+    @inbounds for f in flo:fhi
+        iL = cfg.periodic_x ? mod1(f - 1, nx) : f - 1   # cells left and right of face f
+        iR = cfg.periodic_x ? mod1(f, nx) : f
+        kb = geo.has_bed ? geo.k_bed_face[f] : 1
+        m = nz - kb + 1
+        for j in 1:m
+            k = kb + j - 1
+            col[j, 3] = ws.u_hat[k, f]
+            col[j, 4] = (variable_top && k == nz) ? ws.h_top_face[f] : dz
+            col[j, 5] = 0.5 * (st.w[k, iL] + st.w[k, iR])   # interface below layer k
+            col[j, 6] = j > 1 ? 0.5 * (ws.nu_eff_u[k - 1, f] + ws.nu_eff_u[k, f]) : 0.0
+        end
+        gamma = cb * abs(ws.u_old[kb, f])   # m/s
+        # WHY the variable-top-layer correction -u_top div(v) (_top_row_advective_form!, including its vertical part
+        # u_top W/dz) stays explicit in u_hat and is not added to the top diagonal: A stays in pure flux form (1'A = dZ'),
+        # so without friction the effective depth sum(dZ r) equals the water depth exactly (header of
+        # src/implicit_vertical.jl). A top-diagonal term breaks that identity by O(dt W/dz) (-3 % at dt W/dz = 0.1,
+        # issue #34 review). The explicit term is stable for dt |W|/dz < 2, W ~ d(eta)/dt at the top interface: the
+        # surface would have to move two layer thicknesses in one step, far outside the accuracy range of the variable
+        # top layer (and a fall below the top layer stops the run, _check_top_layer_thickness).
+        implicit_vertical_column!(view(col, :, 1), view(col, :, 2), view(col, :, 3), view(col, :, 4), view(col, :, 5),
+            view(col, :, 6), gamma, dt, m, view(col, :, 7), view(col, :, 8), view(col, :, 9))
+        H = 0.0
+        for k in 1:(kb - 1)
+            ws.r_vert[k, f] = 0.0
+        end
+        for j in 1:m
+            k = kb + j - 1
+            ws.u_hat[k, f] = col[j, 1]
+            ws.r_vert[k, f] = col[j, 2]
+            H += col[j, 4] * col[j, 2]
+        end
+        ws.H_face[f] = H
+    end
+    if cfg.periodic_x
+        @views ws.u_hat[:, nx + 1] .= ws.u_hat[:, 1]
+        @views ws.r_vert[:, nx + 1] .= ws.r_vert[:, 1]
+        ws.H_face[nx + 1] = ws.H_face[1]
+    end
+    return nothing
+end
+
+# Vertical velocity w (m/s, (nz+1) x nx) of the layer continuity of u (m/s), integrated upwards from w = 0 at the bed.
+# Fixed grid: every layer has the thickness dz, so w[nz+1] is the column divergence. Variable top layer: the layers below
+# the top layer have the thickness dz, and the top layer closes its own budget with its face thickness of level n,
+#   w[nz+1] = w[nz] - d(h_face u_top)/dx,
+# which equals d(eta)/dt when u moved the surface (eta^{n+1} solves the barotropic equation with the same thicknesses).
+function _integrate_w_from_continuity!(w::AbstractMatrix{<:Real}, u::AbstractMatrix{<:Real}, model::Model, variable_top::Bool)
+    ws = model.ws
+    geo = model.geometry
+    nz, nx = model.config.nz, model.config.nx
+    dz, dx = model.dz, model.dx
+    div_x_u!(ws.div_u, u, dx)
+    @views w[1, :] .= 0.0
+    if geo.has_bed
+        # w = 0 on the bed face of each column and below it
+        @inbounds for i in 1:nx, k in 1:geo.k_bed[i]
+            w[k, i] = 0.0
+        end
+    end
+    @inbounds for i in 1:nx
+        ktop = variable_top ? nz - 1 : nz
+        for k in geo.k_bed[i]:ktop
+            w[k + 1, i] = w[k, i] - dz * ws.div_u[k, i]
+        end
+        if variable_top
+            div_hu_top = (ws.h_top_face[i + 1] * u[nz, i + 1] - ws.h_top_face[i] * u[nz, i]) / dx
+            w[nz + 1, i] = w[nz, i] - div_hu_top
+        end
+    end
+    return w
+end
+
 function step_forward!(model::Model)
     cfg = model.config
     st = model.state
@@ -1074,6 +1289,12 @@ function step_forward!(model::Model)
     end
     if cfg.periodic_x != model.pressure_correction_solver.periodic_x
         throw(ArgumentError("periodic_x cannot be changed after Model construction"))
+    end
+    # WHY the type assertion: the Model field is untyped; a concrete solver type avoids boxing and dynamic dispatch
+    bsolver = model.barotropic_solver::BarotropicSolver{eltype(st.eta)}
+    # WHY the conversion: the solver stores theta in the state precision; Float32(0.7) != 0.7 in Float64
+    if typeof(bsolver.theta)(cfg.theta) != bsolver.theta
+        throw(ArgumentError("theta cannot be changed after Model construction (the free-surface matrix depends on it)"))
     end
     geo = model.geometry
     masked = geo.has_bed
@@ -1095,8 +1316,11 @@ function step_forward!(model::Model)
         _mask_u!(st.u, geo)
         _mask_w!(st.w, geo)
     end
+    copyto!(ws.u_old, st.u)
+    theta = cfg.theta
 
-    @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=variable_top, periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing, dt=cfg.dt)
+    implicit = cfg.implicit_vertical_terms
+    @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=variable_top, periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing, dt=cfg.dt, vertical=!implicit)
     @timeit model.timers "step/advection_w" advection_term_w!(ws.adv_w, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_w_ws, ws.interpolation_ws, cfg.periodic_x; active=masked ? geo.w_active : nothing, dt=cfg.dt)
 
     @timeit model.timers "step/hydrostatic_predictor" begin
@@ -1107,13 +1331,23 @@ function step_forward!(model::Model)
     @timeit model.timers "step/u_hat_predictor" begin
         grad_x_c!(ws.grad_p_x, ws.p_internal, model.dx; periodic_x=cfg.periodic_x)
         _compute_effective_viscosity_u!(ws.nu_eff_u, model)
-        diffusion_term!(ws.diff_u, st.u, ws.nu_eff_u, model.dx, model.dz; periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing)
+        diffusion_term!(ws.diff_u, st.u, ws.nu_eff_u, model.dx, model.dz; periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing, vertical=!implicit)
 
         nz, nxp1 = size(st.u)
         @inbounds for i in 1:nxp1
             for k in 1:nz
                 ws.u_hat[k, i] = st.u[k, i] + cfg.dt * (-ws.adv_u[k, i] - (1.0 / cfg.rho0) * ws.grad_p_x[k, i] + ws.diff_u[k, i] + cfg.body_force_x)
             end
+        end
+        if !cfg.use_hydrostatic
+            # Non-hydrostatic pressure q at n + theta (Casulli 1999) in incremental form (van Kan 1986): the predictor
+            # carries the full -dt/rho0 dq^n/dx (ws.p_corr still holds q^n), the projection solves for the increment
+            # dq = q^{n+1} - q^n with theta dt, so the momentum equation has theta q^{n+1} + (1 - theta) q^n.
+            # WHY incremental: with only (1 - theta) q^n in the predictor the free-surface solve misses most of q and
+            # the splitting error is first order in time (dispersive standing wave at theta = 1/2: observed order
+            # 1.49 -> 1.27); the incremental form gives order 2.0 (test_verify_theta_nonhydro_dispersive_temporal_order).
+            grad_x_c!(ws.grad_pc_x, ws.p_corr, model.dx; periodic_x=cfg.periodic_x)
+            @. ws.u_hat -= cfg.dt / cfg.rho0 * ws.grad_pc_x
         end
 
         if cfg.wind_stress_x != 0.0
@@ -1135,7 +1369,7 @@ function step_forward!(model::Model)
             damp = max(0.0, 1.0 - cfg.rayleigh_damping * cfg.dt)
             @. ws.u_hat = ws.u_hat * damp
         end
-        if cfg.bed_roughness_length > 0.0
+        if cfg.bed_roughness_length > 0.0 && !implicit
             # Log-law bed friction on the lowest row (explicit): du/dt = -c_b |u1| u1 / dz.
             cb = bed_friction_coefficient(cfg.bed_roughness_length, 0.5 * model.dz)
             @inbounds for i in 1:nxp1
@@ -1207,6 +1441,10 @@ function step_forward!(model::Model)
     @timeit model.timers "step/w_hat_predictor" begin
         copyto!(ws.w_hat, st.w)
         @views @. ws.w_hat[2:end-1, :] = st.w[2:end-1, :] + cfg.dt * (-ws.adv_w[2:end-1, :] - (1.0 / cfg.rho0) * ws.grad_p_z[2:end-1, :] + ws.buoy)
+        if !cfg.use_hydrostatic
+            grad_z_c!(ws.grad_pc_z, ws.p_corr, model.dz)   # incremental form, see the u_hat predictor
+            @views @. ws.w_hat[2:end-1, :] = ws.w_hat[2:end-1, :] - cfg.dt / cfg.rho0 * ws.grad_pc_z[2:end-1, :]
+        end
         if masked
             _mask_w!(ws.w_hat, geo)
         end
@@ -1234,40 +1472,40 @@ function step_forward!(model::Model)
         # volume drifted (seen in the non-hydrostatic wind-shear case, issue #4).
         # In a wall splash it also forced the projection to accommodate fictitious wall transport in the top cells,
         # driving the surface jet of issue #5. Enforce the walls before BOTH solves, not just on the final state.u.
+        if theta != 1.0
+            # explicit part of the surface pressure gradient, -(1 - theta) g dt d(eta^n)/dx (Casulli & Cattani 1994)
+            _surface_gradient!(ws.eta_grad_x, ws.eta_old, model.dx, cfg.periodic_x)
+            _add_surface_gradient!(ws.u_hat, ws.eta_grad_x, -(1.0 - theta) * cfg.g * cfg.dt, cfg.periodic_x)
+        end
         _apply_x_boundary_conditions!(model, ws.u_hat)
         if masked
             _mask_u!(ws.u_hat, geo)
         end
-        if variable_top
-            solve_variable_thickness!(model.barotropic_solver, st.eta, ws.u_hat, ws.eta_old, ws.h_top_face)
+        # The continuity flux takes u^{n+theta} = theta u^{n+1} + (1 - theta) u^n with the thicknesses of level n; with
+        # u^{n+1} = u_hat - theta g dt d(eta^{n+1})/dx the solve sees the transport of theta u_hat + (1 - theta) u^n and the
+        # coefficients theta^2 dt^2 g H / dx^2 (BarotropicSolver). theta = 1 gives u_theta = u_hat exactly.
+        if implicit
+            # vertical viscosity, vertical advection and bed friction implicit: u_hat <- A^{-1}(dZ .* u_hat), r = A^{-1} dZ
+            _implicit_vertical_terms!(model, variable_top)
+        end
+        @. ws.u_theta = theta * ws.u_hat + (1.0 - theta) * ws.u_old
+        if implicit
+            _face_transport!(bsolver.U_hat, ws.u_theta, model, variable_top)
+            solve_effective_depth!(bsolver, st.eta, ws.eta_old, ws.H_face; periodic_x=cfg.periodic_x)
+            variable_top && _check_top_layer_thickness(model, st.eta)
+        elseif variable_top
+            solve_variable_thickness!(bsolver, st.eta, ws.u_theta, ws.eta_old, ws.h_top_face)
             _check_top_layer_thickness(model, st.eta)
         else
-            solve!(model.barotropic_solver, st.eta, ws.u_hat, ws.eta_old)
+            solve!(bsolver, st.eta, ws.u_theta, ws.eta_old)
         end
     end
 
     @timeit model.timers "step/free_surface_slope" begin
-        if cfg.periodic_x
-            ws.eta_grad_x[1] = (st.eta[1] - st.eta[end]) / model.dx
-            @inbounds for i in 2:nx
-                ws.eta_grad_x[i] = (st.eta[i] - st.eta[i - 1]) / model.dx
-            end
-            ws.eta_grad_x[nx + 1] = ws.eta_grad_x[1]
-        else
-            @inbounds for i in 1:(nx - 1)
-                ws.eta_grad_x[i] = (st.eta[i + 1] - st.eta[i]) / model.dx
-            end
-        end
-
+        _surface_gradient!(ws.eta_grad_x, st.eta, model.dx, cfg.periodic_x)
         # WHY: corrects ws.u_hat in place (not yet written to st.u) so a following non-hydrostatic projection acts on
         # this surface-corrected predictor, exactly as it already acted on the (pressure-predictor-only) u_hat before.
-        ilo, ihi = cfg.periodic_x ? (1, nx + 1) : (2, nx)
-        @inbounds for i in ilo:ihi
-            for k in 1:cfg.nz
-                grad_index = cfg.periodic_x ? i : i - 1
-                ws.u_hat[k, i] -= cfg.g * cfg.dt * ws.eta_grad_x[grad_index]
-            end
-        end
+        _add_surface_gradient!(ws.u_hat, ws.eta_grad_x, -cfg.g * cfg.dt * theta, cfg.periodic_x; r=implicit ? ws.r_vert : nothing)
 
         if masked
             _mask_u!(ws.u_hat, geo)
@@ -1289,15 +1527,31 @@ function step_forward!(model::Model)
             # either way, the top face's velocity is treated as externally known here, and the elliptic solve's job is
             # to find the pressure (and correct the INTERIOR flow) consistent with it and with the chosen top
             # pressure condition.
-            @views ws.w_hat[end, :] .= ws.eta_t
+            # Theta scheme: the surface moves with u^{n+theta}, eta_t = theta w_s^{n+1} + (1 - theta) w_s^n, so the surface
+            # value of w^{n+1} is (eta_t - (1 - theta) w_s^n) / theta, with w_s^n the column divergence of u^n with the
+            # thicknesses of level n (as in the surface solve); it equals the column divergence of the surface-corrected
+            # u_hat, so the projection keeps the column transports.
+            # WHY not the stored st.w[end, :]: it need not be the divergence of u^n (initial state, variable top layer
+            # integrated with the thicknesses of level n - 1); the mismatch went into a depth-uniform part of q with a
+            # slope, which the incremental form keeps for ever (steady wind set-up: surface slope -3 times the exact one
+            # at theta = 0.7). ws.w_theta is free here (it is computed after the projection).
+            if theta == 1.0
+                @views ws.w_hat[end, :] .= ws.eta_t
+            else
+                _integrate_w_from_continuity!(ws.w_theta, ws.u_old, model, variable_top)
+                @views @. ws.w_hat[end, :] = (ws.eta_t - (1.0 - theta) * ws.w_theta[end, :]) / theta
+            end
 
-            solve!(model.pressure_correction_solver, ws.u_hat, ws.w_hat, cfg.rho0, cfg.dt, model.dx, model.dz)
-            copyto!(ws.p_corr, model.pressure_correction_solver.p_corr)
+            # increment dq = q^{n+1} - q^n with the weight theta in the momentum equation: the projection corrects with
+            # theta dt (incremental form, see the u_hat predictor)
+            dt_q = theta * cfg.dt
+            solve!(model.pressure_correction_solver, ws.u_hat, ws.w_hat, cfg.rho0, dt_q, model.dx, model.dz)
+            dq = model.pressure_correction_solver.p_corr
+            grad_x_c!(ws.grad_pc_x, dq, model.dx; periodic_x=cfg.periodic_x)
+            grad_z_c!(ws.grad_pc_z, dq, model.dz)
+            ws.p_corr .+= dq   # q^{n+1}
 
-            grad_x_c!(ws.grad_pc_x, ws.p_corr, model.dx; periodic_x=cfg.periodic_x)
-            grad_z_c!(ws.grad_pc_z, ws.p_corr, model.dz)
-
-            @. ws.u_hat = ws.u_hat - cfg.dt * (1.0 / cfg.rho0) * ws.grad_pc_x
+            @. ws.u_hat = ws.u_hat - dt_q * (1.0 / cfg.rho0) * ws.grad_pc_x
             # WHY: only INTERIOR w faces (2:end-1) are corrected, same as the legacy Neumann case. With the
             # homogeneous-Neumann condition this correction is exactly zero at the boundary faces (0 and end), so
             # leaving them uncorrected changes nothing there. With the Dirichlet condition the (unapplied) top-face
@@ -1305,7 +1559,7 @@ function step_forward!(model::Model)
             # reads: the model's actual w (state.w) is always reconstructed from state.u's divergence (w_reconstruction
             # below), never copied from ws.w_hat. The Dirichlet condition's effect on the physics is carried entirely
             # through the pressure field's effect on ws.u_hat (grad_pc_x, above) and hence on state.u.
-            @views @. ws.w_hat[2:end-1, :] = ws.w_hat[2:end-1, :] - cfg.dt * (1.0 / cfg.rho0) * ws.grad_pc_z[2:end-1, :]
+            @views @. ws.w_hat[2:end-1, :] = ws.w_hat[2:end-1, :] - dt_q * (1.0 / cfg.rho0) * ws.grad_pc_z[2:end-1, :]
             if masked
                 # WHY: the gradient between a wet cell and a solid cell (p' = 0 there) is not a physical force on a wall
                 _mask_u!(ws.u_hat, geo)
@@ -1333,54 +1587,37 @@ function step_forward!(model::Model)
         if masked
             _mask_u!(st.u, geo)
         end
-
-        div_x_u!(ws.div_u, st.u, model.dx)
+        @. ws.u_theta = theta * st.u + (1.0 - theta) * ws.u_old
     end
 
     @timeit model.timers "step/w_reconstruction" begin
-        @views st.w[1, :] .= 0.0
-        if masked
-            # w = 0 on the bed face of each column and below it; continuity is integrated upwards from the bed
-            @inbounds for i in 1:nx, k in 1:geo.k_bed[i]
-                st.w[k, i] = 0.0
-            end
-        end
+        # w^{n+theta} from the continuity of u^{n+theta}, the velocities that moved the surface: its surface value equals
+        # eta_t up to round-off (kinematic condition, checked here) and it transports the constituent.
+        _integrate_w_from_continuity!(ws.w_theta, ws.u_theta, model, variable_top)
         max_mismatch = 0.0
-        if variable_top
-            # Layers below the top layer have the fixed thickness dz; the top layer closes its own budget
-            #   d(eta)/dt + d(h_face*u_top)/dx = w[nz],   i.e. w[nz] = eta_t + div(h_face*u_top),
-            # which holds because eta^{n+1} solves the barotropic equation with the same thicknesses.
-            @inbounds for i in 1:nx
-                for k in geo.k_bed[i]:(cfg.nz - 1)
-                    st.w[k + 1, i] = st.w[k, i] - model.dz * ws.div_u[k, i]
-                end
-                div_hu_top = (ws.h_top_face[i + 1] * st.u[cfg.nz, i + 1] - ws.h_top_face[i] * st.u[cfg.nz, i]) / model.dx
-                m = abs(st.w[cfg.nz, i] - div_hu_top - ws.eta_t[i])
-                max_mismatch = max(max_mismatch, m)
-            end
-        else
-            @inbounds for i in 1:nx
-                for k in geo.k_bed[i]:cfg.nz
-                    st.w[k + 1, i] = st.w[k, i] - model.dz * ws.div_u[k, i]
-                end
-            end
-
-            @inbounds for i in 1:nx
-                m = abs(st.w[end, i] - ws.eta_t[i])
-                max_mismatch = max(max_mismatch, m)
-            end
+        @inbounds for i in 1:nx
+            max_mismatch = max(max_mismatch, abs(ws.w_theta[end, i] - ws.eta_t[i]))
         end
         model.last_kinematic_mismatch = max_mismatch
-        @views st.w[end, :] .= ws.eta_t   # velocity of the fluid at the surface (d eta/dt)
+        @views ws.w_theta[end, :] .= ws.eta_t   # velocity of the fluid at the surface (d eta/dt)
+        if theta == 1.0
+            copyto!(st.w, ws.w_theta)
+        else
+            # w^{n+1} of the continuity of u^{n+1} (momentum advection of the next step, output); its surface value is
+            # the column divergence of u^{n+1}, not eta_t.
+            _integrate_w_from_continuity!(st.w, st.u, model, variable_top)
+        end
     end
 
     @timeit model.timers "step/density_transport" begin
+        # WHY u_theta, w_theta: the transport velocities must be those of the volume change (eta^{n+1} - eta^n uses
+        # u^{n+theta}), otherwise a uniform constituent does not stay uniform and the mass is not conserved.
         if variable_top
-            advect_density_top_layer!(ws.rho_new, st.rho, st.u, st.w, cfg.dt, model.dx, model.dz, ws.density_ws, ws.h_top_face, ws.eta_old, st.eta; scheme=cfg.transport_advection_scheme, active=masked ? geo.wet_cell : nothing, rho_min=model.rho_min_init, rho_max=model.rho_max_init)
+            advect_density_top_layer!(ws.rho_new, st.rho, ws.u_theta, ws.w_theta, cfg.dt, model.dx, model.dz, ws.density_ws, ws.h_top_face, ws.eta_old, st.eta; scheme=cfg.transport_advection_scheme, active=masked ? geo.wet_cell : nothing, rho_min=model.rho_min_init, rho_max=model.rho_max_init)
         else
             # WHY: fixed grid (variable top layer off, incl. every non-hydrostatic run): advective form in the top row removes
             # the spurious source of the moving top face, see _density_top_row_advective_form! (docs section 4).
-            advect_density!(ws.rho_new, st.rho, st.u, st.w, cfg.dt, model.dx, model.dz, ws.density_ws; scheme=cfg.transport_advection_scheme, top_row_advective_form=true, periodic_x=cfg.periodic_x, active=masked ? geo.wet_cell : nothing, rho_min=model.rho_min_init, rho_max=model.rho_max_init)
+            advect_density!(ws.rho_new, st.rho, ws.u_theta, ws.w_theta, cfg.dt, model.dx, model.dz, ws.density_ws; scheme=cfg.transport_advection_scheme, top_row_advective_form=true, periodic_x=cfg.periodic_x, active=masked ? geo.wet_cell : nothing, rho_min=model.rho_min_init, rho_max=model.rho_max_init)
         end
         _apply_wind_surface_density_mixing!(ws.rho_new, cfg, model.dz)
         if model.turbulence !== nothing
@@ -1603,6 +1840,7 @@ mutable struct BarotropicSolver{T<:Real}
     H::T
     g::T
     dt::T
+    theta::T   # -, implicitness of the free surface; the coefficients a_f carry the factor theta^2
     lower::Vector{T}
     main::Vector{T}
     upper::Vector{T}
@@ -1620,6 +1858,7 @@ mutable struct BarotropicSolver{T<:Real}
     cp_var::Vector{T}
     inv_denom_var::Vector{T}
     k_bed_face::Vector{Int}   # lowest open layer per u-face (all ones for the flat bed)
+    cyclic_z::Vector{T}       # work vector of the cyclic (periodic) solve with per-step coefficients
 end
 
 function BarotropicSolver(cfg::ModelConfig, dx::Real, dz::Real; T::Type{<:Real}=Float64, geometry::Union{Nothing,BedGeometry}=nothing)
@@ -1627,9 +1866,11 @@ function BarotropicSolver(cfg::ModelConfig, dx::Real, dz::Real; T::Type{<:Real}=
     H = T(cfg.depth)
     g = T(cfg.g)
     dt = T(cfg.dt)
+    theta = T(cfg.theta)
     k_bed_face = geometry === nothing ? ones(Int, nx + 1) : copy(geometry.k_bed_face)
 
-    alpha = dt * dt * g * H / (dx * dx)
+    # WHY theta^2: u^{n+1} carries theta g dt d(eta^{n+1})/dx and enters the continuity flux with the weight theta
+    alpha = theta * theta * dt * dt * g * H / (dx * dx)
     periodic_factorization = nothing
     if cfg.periodic_x
         rows = Int[]
@@ -1656,7 +1897,7 @@ function BarotropicSolver(cfg::ModelConfig, dx::Real, dz::Real; T::Type{<:Real}=
         # masked path reproduces the flat-bed coefficients bit for bit.
         a_face = zeros(T, nx + 1)
         for f in 2:nx
-            a_face[f] = dt * dt * g * (H - geometry.bed_face_level[f]) / (dx * dx)
+            a_face[f] = theta * theta * dt * dt * g * (H - geometry.bed_face_level[f]) / (dx * dx)
         end
         for i in 1:nx
             main[i] = T(1.0 + (a_face[i] + a_face[i + 1]))
@@ -1690,8 +1931,8 @@ function BarotropicSolver(cfg::ModelConfig, dx::Real, dz::Real; T::Type{<:Real}=
     x = zeros(T, nx)
 
     return BarotropicSolver(
-        cfg, T(dx), T(dz), nx, periodic_factorization, H, g, dt, lower, main, upper, cp, inv_denom, U_hat, rhs, dp, x,
-        zeros(T, nx - 1), zeros(T, nx), zeros(T, nx - 1), zeros(T, nx - 1), zeros(T, nx), k_bed_face,
+        cfg, T(dx), T(dz), nx, periodic_factorization, H, g, dt, theta, lower, main, upper, cp, inv_denom, U_hat, rhs, dp, x,
+        zeros(T, nx - 1), zeros(T, nx), zeros(T, nx - 1), zeros(T, nx - 1), zeros(T, nx), k_bed_face, zeros(T, nx),
     )
 end
 
@@ -1727,7 +1968,7 @@ function solve_variable_thickness!(
     dz = solver.dz
     dt = solver.dt
     g = solver.g
-    coeff = dt * dt * g / (dx * dx)   # 1/m; times H_i (m) it gives the dimensionless a_i
+    coeff = solver.theta * solver.theta * dt * dt * g / (dx * dx)   # 1/m; times H_i (m) it gives the dimensionless a_i
 
     @inbounds for i in 1:(nx + 1)
         s = zero(eltype(solver.U_hat))
@@ -1811,5 +2052,82 @@ function solve!(solver::BarotropicSolver, eta::AbstractVector{<:Real}, u_hat::Ab
     end
     copyto!(eta, solver.x)
 
+    return eta
+end
+
+# Thomas algorithm for the tridiagonal system with sub-diagonal `lower` (lower[i] couples x[i] to x[i-1], i >= 2),
+# diagonal `diag` and super-diagonal `upper` (upper[i] couples x[i] to x[i+1]); `cp`, `dp` work vectors. Writes x.
+function _thomas!(x::AbstractVector, lower::AbstractVector, diag::AbstractVector, upper::AbstractVector,
+    rhs::AbstractVector, cp::AbstractVector, dp::AbstractVector, n::Int)
+    cp[1] = upper[1] / diag[1]
+    dp[1] = rhs[1] / diag[1]
+    @inbounds for i in 2:n
+        denom = diag[i] - lower[i] * cp[i - 1]
+        cp[i] = upper[i] / denom
+        dp[i] = (rhs[i] - lower[i] * dp[i - 1]) / denom
+    end
+    x[n] = dp[n]
+    @inbounds for i in (n - 1):-1:1
+        x[i] = dp[i] - cp[i] * x[i + 1]
+    end
+    return x
+end
+
+"""
+    solve_effective_depth!(solver, eta, eta_old, H_face; periodic_x=false)
+
+Free-surface solve with per-face effective depths `H_face` (m, length nx+1; the implicit vertical terms give
+H_f = sum_k dZ_k r_k, src/implicit_vertical.jl) and the face transports already in `solver.U_hat` (m^2/s):
+
+    eta_i + a_{i+1}(eta_i - eta_{i+1}) + a_i(eta_i - eta_{i-1}) = eta_old_i - dt (U_{i+1} - U_i)/dx,
+    a_f = theta^2 dt^2 g H_f / dx^2   (a = 0 at the outer faces unless periodic_x; with periodic_x face 1 = face nx+1).
+
+Symmetric, diagonally dominant (H_f >= 0): Thomas algorithm, or with periodic_x the cyclic system by the
+Sherman-Morrison formula (Press et al. 2007, Numerical Recipes, 3rd ed., section 2.7.2).
+PERF: coefficients rebuilt every step (H_f depends on the friction and the flow), O(nx), no allocation.
+"""
+function solve_effective_depth!(solver::BarotropicSolver, eta::AbstractVector{<:Real}, eta_old::AbstractVector{<:Real},
+    H_face::AbstractVector{<:Real}; periodic_x::Bool=false)
+    nx = solver.nx
+    dt, dx = solver.dt, solver.dx
+    coeff = solver.theta * solver.theta * dt * dt * solver.g / (dx * dx)   # 1/m
+    diag = solver.main_var
+    # WHY these arrays: lower_var/upper_var have nx-1 entries, the cyclic solve needs sub- and super-diagonals of length
+    # nx (the corner entries are moved out before the solve); solver.dp and solver.cyclic_z hold them
+    sub, sup = solver.dp, solver.cyclic_z
+    @inbounds for i in 1:nx
+        a_left = (i == 1 && !periodic_x) ? 0.0 : coeff * H_face[i]
+        a_right = (i == nx && !periodic_x) ? 0.0 : coeff * H_face[i + 1]
+        diag[i] = 1.0 + a_left + a_right
+        sub[i] = -a_left
+        sup[i] = -a_right
+        solver.rhs[i] = eta_old[i] - dt * (solver.U_hat[i + 1] - solver.U_hat[i]) / dx
+    end
+    if !periodic_x
+        sub[1] = 0.0
+        sup[nx] = 0.0
+        # cp/dp work: inv_denom_var (nx) and cp_var (nx-1) are too short for _thomas!, use eta as dp storage
+        _thomas!(solver.x, sub, diag, sup, solver.rhs, solver.inv_denom_var, eta, nx)
+        copyto!(eta, solver.x)
+        return eta
+    end
+    # cyclic: corners A[nx,1] = A[1,nx] = -a_1 (face 1 = face nx+1)
+    alpha = sub[1]
+    beta = sup[nx]
+    gamma = -diag[1]
+    diag[1] -= gamma
+    diag[nx] -= alpha * beta / gamma
+    sub[1] = 0.0
+    sup[nx] = 0.0
+    _thomas!(solver.x, sub, diag, sup, solver.rhs, solver.inv_denom_var, eta, nx)   # T x = rhs
+    z = solver.U_hat   # WHY: the transports are no longer needed once rhs is built; reused as the second right-hand side
+    fill!(z, 0.0)
+    z[1] = gamma
+    z[nx] = alpha
+    _thomas!(z, sub, diag, sup, z, solver.inv_denom_var, eta, nx)                   # T z = (gamma, 0, ..., alpha)
+    factor = (solver.x[1] + beta * solver.x[nx] / gamma) / (1.0 + z[1] + beta * z[nx] / gamma)
+    @inbounds for i in 1:nx
+        eta[i] = solver.x[i] - factor * z[i]
+    end
     return eta
 end

@@ -4,6 +4,26 @@
 include(joinpath(@__DIR__, "test_common.jl"))
 
 @testset "Non-hydrostatic" begin
+    @testset "test_verify_fixed_grid_reinitialization_clears_pressure_history" begin
+        cfg = ModelConfig(nx=20, nz=8, dt=5e-4, use_hydrostatic=false, pressure_solver_method="sparse",
+            momentum_advection_scheme="upwind1", nu=0.0, rayleigh_damping=0.0)
+        model = Model(cfg)
+        initialize_lock_exchange!(model; rho_left=1002.0, rho_right=998.0)
+        for _ in 1:10
+            step_forward!(model)
+        end
+        @test maximum(abs, model.ws.p_corr) > 0.0
+
+        initialize_lock_exchange!(model; rho_left=1000.0, rho_right=1000.0)
+        fresh = Model(copy_config(cfg))
+        initialize_lock_exchange!(fresh; rho_left=1000.0, rho_right=1000.0)
+        step_forward!(model)
+        step_forward!(fresh)
+        @test model.state.u ≈ fresh.state.u atol=TOL_IDENTITY rtol=0
+        @test model.state.w ≈ fresh.state.w atol=TOL_IDENTITY rtol=0
+        @test model.state.eta ≈ fresh.state.eta atol=TOL_IDENTITY rtol=0
+    end
+
     @testset "test_verify_nonhydrostatic_branch_produces_pressure_correction" begin
         cfg = ModelConfig(nx=40, nz=12, dt=5e-4, nt=1, use_hydrostatic=false, momentum_advection_scheme="tvd2")
         model = Model(cfg)
