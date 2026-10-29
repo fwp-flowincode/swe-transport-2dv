@@ -338,7 +338,7 @@ end
         for i in axes(model.state.u, 2)
             model.state.u[:, i] .= shape
         end
-        # outlet: normal depth above the bed extrapolated to x = L (the bed of the boundary face is that of cell nx)
+        # outlet: normal depth above the bed extrapolated to x = L, which is also the bed of the boundary face (#46)
         set_x_inflow_outflow!(model, shape; left_discharge=CHANNEL_DISCHARGE, right_level=CHEZY_DEPTH - grid_depth)
         for _ in 1:round(Int, OPEN_CHANNEL_RELAX_TIME / cfg.dt)
             step_forward!(model)

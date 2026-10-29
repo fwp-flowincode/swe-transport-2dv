@@ -1101,6 +1101,72 @@ References: Chow (1959), Open-Channel Hydraulics, ch. 5 and 9-10; Golub & Van Lo
 section 2.1.4 (Sherman-Morrison); Casulli & Cheng (1992), Int. J. Numer. Methods Fluids 15, 629-648. Equation numbers
 were not checked.
 
+### 22) Open boundaries for transcritical flow (issue #46)
+
+The number of boundary conditions follows the characteristics $U\pm\sqrt{gh}$ (Fr = $|U|/\sqrt{gh}$):
+
+| boundary | subcritical (Fr < 1) | supercritical (Fr > 1) |
+|---|---|---|
+| inflow | discharge (`left_discharge`) | discharge and level (`left_discharge`, `left_level`) |
+| outflow | level (`right_level`) or free (`right_free`) | free (`right_free`) |
+
+**Supercritical inflow** (`left_level`). The level $\eta_L$ of the inlet face replaces the level of the first cell in the
+face thicknesses: the top layer is $\Delta z+\eta_L$ with the variable top layer, or the cut face layers of the
+wetting-drying step. The discharge scaling then gives the inflow its depth and velocity. On the fixed grid every face
+has the depth $H$, so `left_level` would do nothing there and is rejected.
+
+**Free outflow** (`right_free=true`). The boundary face keeps the momentum equation of the water-level boundary
+(section 21), with a level $\eta_b$ that comes from the interior (`_update_free_outflow_level!`):
+- Supercritical outflow: linear extrapolation, $\eta_b=\tfrac32\eta_{n_x}-\tfrac12\eta_{n_x-1}$.
+- Subcritical outflow: radiation condition for the outgoing long wave, with speed $c=U+\sqrt{gh}$, applied to the
+  deviation from a surface parallel to the bed:
+  ```math
+  \frac{d\eta_b}{dt}+c\Bigl(\frac{\eta_b-\eta_{n_x}}{\Delta x/2}-s_{bed}\Bigr)=0,\qquad s_{bed}=\frac{z_{b,n_x}-z_{b,n_x-1}}{\Delta x}.
+  ```
+  It is backward Euler and implicit in the free-surface solve: with $\mu=c\Delta t/(\Delta x/2)$ the slope of the
+  boundary face at $n+1$ is $w(\eta_{eff}-\eta^{n+1}_{n_x})/(\Delta x/2)$, where $w=1/(1+\mu)$ and
+  $\eta_{eff}=\eta_b^n+\mu s_{bed}\Delta x/2$. That is the Dirichlet entry of the water-level boundary with the weight
+  $w$, so the M-matrix property of the free-surface solve and the positivity of the wetting-drying solve stay as they
+  are.
+
+Two designs that failed, kept here because they look natural:
+1. **The slope of face $n_x$ at the boundary face** (zero gradient of the slope, or $\eta_b$ relaxed to the level
+   extrapolated to the face). The boundary face then moves exactly like face $n_x$, so the last cell keeps its level and
+   an outgoing wave reflects as at a fixed level: 51 % left after the run, the same as `right_level`.
+2. **The radiation condition with $\eta_{n_x}$ of time $n$.** The lag of one step is a whole cell at the gravity-wave
+   Courant number 1, so 41 % was reflected at every resolution. Implicit, the reflected amplitude is 0.7 % ($\Delta x$ =
+   10 m) and 0.55 % (5 m) of the incoming one (`test_validate_free_outflow_transmits_long_wave`).
+
+Face bed at a boundary with a known level (water level, free outflow, `left_level`; wetting-drying step). The level of
+such a face is the level at the end of the domain, so its depth is measured from the bed extrapolated linearly to
+$x=0$ or $L$ (`_wd_face_bed`). The other faces keep the higher neighbouring bed. With the bed of the last column, which
+is $i_b\Delta x/2=1$ mm higher on the #14 slope, the free outflow raised the whole channel by 1.7 cm: nothing pins the
+level, and the outlet face was too shallow. The prescribed level of #14 hid this, and its sloped-bed case is now exact
+as well ($U=1.00000$ m/s).
+
+Results (`test_open_boundaries.jl`):
+- **Supercritical channel** (body force, Fr = 1.6, $\theta=0.9\ge$ `theta_for_froude(1.6)` = 0.81): normal flow is
+  steady to round-off with the variable top layer and in the wetting-drying step, and returns from 0.8 times the
+  velocity.
+- **Subcritical #14 channel with a free outflow:** no level is prescribed anywhere; discharge and friction set the
+  normal depth, which is reached from 0.8 times the normal flow within $10^{-6}$. The volume budget with the boundary
+  fluxes and the kinematic condition hold to round-off.
+- **Real #14 slope with a free outflow:** depth within $3.4\cdot10^{-4}$ m of the normal depth.
+
+Limits:
+- **Neutral level on the fixed grid.** Every face there has depth $H$, so with a free outflow and no prescribed level
+  the mean level is a neutral mode: velocities converge, a uniform level offset stays. Use the variable top layer or
+  the wetting-drying step.
+- **Steep real slopes.** At $i_b=0.01$ (Fr = 1.6) the supercritical flow over the cut cells deepens from the inlet state
+  by up to 1 % along the channel. The flow is supercritical, so the outlet cannot cause this. The cause has not been
+  identified; one candidate is the vertical advection in advective form of the wetting-drying step, through which flow
+  parallel to the bed crosses the fixed layer interfaces with $W=Ui_b$. It matters for #47 (weirs).
+- **A prescribed level at a supercritical outflow, or at a subcritical inflow, over-specifies the flow.** The model
+  warns once per run when the boundary Froude number is beyond 1 ± `BOUNDARY_FROUDE_MARGIN` = 0.05.
+
+References: Orlanski (1976), J. Comput. Phys. 21, 251-269 (radiation condition); Chow (1959), Open-Channel Hydraulics,
+ch. 3 (critical flow). Equation numbers were not checked.
+
 ## Test-by-test documentation
 
 ### test_verify_state_shapes
@@ -2112,6 +2178,25 @@ stated otherwise.
   These are `right_level` together with `right_profile`, a non-finite level, explicit vertical terms, the
   non-hydrostatic mode, `periodic_x`, negative discharge shapes, negative $C$, Chezy with `bed_roughness_length` or
   k-epsilon, and Chezy on a staircase bed or with wetting and drying without implicit vertical terms.
+
+### Open boundary tests (`test_open_boundaries.jl`, section 22)
+
+- `test_verify_supercritical_channel_with_inlet_level_and_free_outflow`: Fr = 1.6 with inlet discharge and level and a
+  free outflow. Normal flow stays to 1e-9, and returns from 0.8 times the velocity within 1e-6 (variable top layer,
+  wetting-drying step). On the fixed grid, without an inlet level, the velocity returns within 1e-4 (neutral level).
+- `test_verify_free_outflow_subcritical_converges_to_normal_flow`: #14 channel with a discharge inlet and a free
+  outflow. Steady to round-off; from 0.8 times the normal flow within 1e-6 after 40000 s; volume budget and kinematic
+  condition to round-off.
+- `test_validate_free_outflow_transmits_long_wave`: a right-going long wave leaves with less than 2 % reflected
+  (measured 0.7 %); with a prescribed level more than 40 % remains (full reflection, $\theta$-damped).
+- `test_validate_free_outflow_over_real_bed_slope`: real #14 slope with cut cells and a free outflow; depth within
+  1e-3 m of normal flow (measured 3.4e-4 m).
+- `test_verify_boundary_froude_warnings`: a level at a supercritical outflow and an inlet level with subcritical inflow
+  warn once; a supercritical inlet with a free outflow does not warn.
+- `test_verify_open_boundary_46_config_checks`: rejected combinations are
+  - `left_level` without discharge, non-finite, or on the fixed grid;
+  - `right_free` together with `right_level` or `right_profile`;
+  - `right_free` with explicit vertical terms or in the non-hydrostatic mode.
 
 ## Additional validation scripts and literature basis
 

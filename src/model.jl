@@ -358,11 +358,16 @@ mutable struct Model{T<:Real}
     x_boundary_u_right_profile::Any
     x_boundary_eta_right::Any   # nothing, or the prescribed water level eta_R (m) at the right boundary face
     x_boundary_q_left::Any      # nothing, or the discharge q (m^2/s) of the left boundary face (profile = shape)
+    x_boundary_eta_left::Any    # nothing, or the level eta_L (m) of the left boundary face (supercritical inflow, #46)
+    x_boundary_right_free::Bool # free outflow at the right boundary face (issue #46)
+    x_boundary_eta_free::Float64  # m, radiated level of the free outflow face (_update_free_outflow_level!)
+    x_boundary_free_dirichlet::Tuple{Float64,Float64}   # (m, -), effective level and weight of the free outflow this step
     geometry::BedGeometry   # staircase bed masks (all cells wet for the flat bed)
     turbulence::Any         # KEpsilonState with turbulence_closure = "k_epsilon", else nothing
     wetdry::Any             # WetDryState with wetting_drying = true, else nothing
     max_surface_froude::Float64   # -, largest surface_froude_number after any step so far (issue #39)
     froude_warning_issued::Bool   # the theta Froude-bound warning has been given (once per model)
+    boundary_froude_warned::Bool  # the boundary-type Froude warning has been given (once per model, issue #46)
 end
 
 function _linspace(start::Real, stop::Real, n::Int)
@@ -833,10 +838,15 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
         nothing,
         nothing,
         nothing,
+        nothing,
+        false,
+        0.0,
+        (0.0, 1.0),
         geometry,
         turbulence_closure(cfg) == "k_epsilon" ? KEpsilonState(cfg.nz, cfg.nx; T=T) : nothing,
         cfg.wetting_drying ? WetDryState(cfg; T=T) : nothing,
         0.0,
+        false,
         false,
     )
 
@@ -850,40 +860,61 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
 end
 
 """
-    set_x_inflow_outflow!(model, left_profile; left_discharge=nothing, open_right=true, right_profile=nothing,
-                          right_level=nothing)
+    set_x_inflow_outflow!(model, left_profile; left_discharge=nothing, left_level=nothing, open_right=true,
+                          right_profile=nothing, right_level=nothing, right_free=false)
 
 Lateral boundary conditions: velocity `left_profile` (m/s, one value per layer) at the left boundary face, or with
 `left_discharge` q (m^2/s) the profile shape scaled to the discharge, u_k = q * left_profile_k / sum_j dZ_j left_profile_j
 with the face layer thicknesses dZ of time level n (variable top layer: dz + eta_1; wetting and drying: the cut face
-layers; dry layers carry no flow), so that the inflow is q whatever the level at the inlet. At the right boundary face a
-wall, a zero-gradient velocity (`open_right=true`), a prescribed velocity `right_profile` (m/s, length nz) or a
-prescribed water level `right_level` (m, surface elevation eta at the boundary face x = L; overrides `open_right`).
+layers; dry layers carry no flow), so that the inflow is q whatever the level at the inlet. `left_level` eta_L (m, with
+`left_discharge`; issue #46) also prescribes the level of the inlet face: the face layers are those of eta_L instead of
+the level of the first cell, so the inflow has the depth and velocity of the prescribed state (supercritical inflow,
+Fr > 1, needs both; for subcritical inflow prescribe the discharge only). Variable top layer or wetting and drying only
+(the fixed grid has the depth H at every face).
 
-Water-level boundary (issue #14): the velocity of the boundary face is computed by its own momentum equation: advection
-in an open control volume (`_open_right_face_velocity!`), the baroclinic pressure gradient and horizontal diffusion of
-face nx (zero gradient), its own implicit vertical column and the surface slope (eta_R - eta_nx)/(dx/2) between the last
-cell centre and the boundary, which enters the free-surface solve implicitly like an interior face. Requires the
-hydrostatic mode, `implicit_vertical_terms=true` and no `periodic_x`. With the variable top layer (and with wetting and
-drying) the top layer of the boundary face has the level eta_R.
+At the right boundary face a wall, a zero-gradient velocity (`open_right=true`), a prescribed velocity `right_profile`
+(m/s, length nz), a prescribed water level `right_level` (m, surface elevation eta at the boundary face x = L) or a free
+outflow (`right_free=true`, issue #46); the last two override `open_right`.
+
+Water-level boundary (issue #14) and free outflow: the velocity of the boundary face is computed by its own momentum
+equation: advection in an open control volume (`_open_right_face_velocity!`), the baroclinic pressure gradient and
+horizontal diffusion of face nx (zero gradient), its own implicit vertical column and the surface slope
+(eta_b - eta_nx)/(dx/2) between the last cell centre and the level eta_b of the boundary face, implicit in the
+free-surface solve like an interior face (`_right_boundary_slope`). With the variable top layer (and with wetting and
+drying) the top layer of the boundary face has the level eta_b; in the wetting-drying step its bed is extrapolated to
+x = L (`_wd_face_bed`).
+- water level: eta_b = eta_R. For subcritical outflow; it reflects outgoing waves completely.
+- free outflow: eta_b from the interior (`_update_free_outflow_level!`): extrapolated for supercritical outflow, an
+  implicit radiation condition for the outgoing long wave for subcritical outflow (reflects < 1 % of a long wave). No
+  level is prescribed: with the fixed grid the mean level is then a neutral mode.
+Both require the hydrostatic mode, `implicit_vertical_terms=true` and no `periodic_x`. `step_forward!` warns once when the
+Froude number at a boundary does not fit its type (`_check_boundary_froude!`).
 """
 function set_x_inflow_outflow!(
     model::Model,
     left_profile::AbstractVector{<:Real};
     left_discharge::Union{Nothing,Real}=nothing,
+    left_level::Union{Nothing,Real}=nothing,
     open_right::Bool=true,
     right_profile::Union{Nothing,AbstractVector{<:Real}}=nothing,
     right_level::Union{Nothing,Real}=nothing,
+    right_free::Bool=false,
 )
     if left_discharge !== nothing
         isfinite(left_discharge) || throw(ArgumentError("left_discharge must be finite"))
         all(>=(0.0), left_profile) && any(>(0.0), left_profile) ||
             throw(ArgumentError("left_discharge needs a profile shape with values >= 0, not all zero"))
     end
+    if left_level !== nothing
+        left_discharge === nothing && throw(ArgumentError("left_level needs left_discharge (supercritical inflow: discharge and level)"))
+        isfinite(left_level) || throw(ArgumentError("left_level must be finite"))
+        _check_left_level_config(model.config)
+    end
     model.wetdry === nothing || (model.wetdry.left_velocity = nothing)
     model.x_boundary_u_left_profile = collect(left_profile)
     model.x_boundary_q_left = left_discharge === nothing ? nothing : Float64(left_discharge)
-    _set_right_boundary!(model, open_right, right_profile, right_level)
+    model.x_boundary_eta_left = left_level === nothing ? nothing : Float64(left_level)
+    _set_right_boundary!(model, open_right, right_profile, right_level, right_free)
     # WHY: the discharge scaling uses the level of time n in ws.eta_old (set by every step); before the first step it
     # is the initial level
     copyto!(model.ws.eta_old, model.state.eta)
@@ -892,7 +923,8 @@ function set_x_inflow_outflow!(
 end
 
 """
-    set_x_inflow_outflow!(model, left_velocity::Function; open_right=false, right_profile=nothing, right_level=nothing)
+    set_x_inflow_outflow!(model, left_velocity::Function; open_right=false, right_profile=nothing, right_level=nothing,
+                          right_free=false)
 
 Wetting-drying mode: time-dependent velocity at the left boundary face, `left_velocity(t)` (m/s; scalar or one value per
 layer) at the model time t (s) of the end of each step; dry layers of the face carry no flow. Right boundary as in the
@@ -904,43 +936,63 @@ function set_x_inflow_outflow!(
     open_right::Bool=false,
     right_profile::Union{Nothing,AbstractVector{<:Real}}=nothing,
     right_level::Union{Nothing,Real}=nothing,
+    right_free::Bool=false,
 )
     model.wetdry === nothing && throw(ArgumentError("a time-dependent boundary velocity requires ModelConfig(wetting_drying=true)"))
     model.wetdry.left_velocity = left_velocity
     model.x_boundary_u_left_profile = nothing
     model.x_boundary_q_left = nothing
-    _set_right_boundary!(model, open_right, right_profile, right_level)
+    model.x_boundary_eta_left = nothing
+    _set_right_boundary!(model, open_right, right_profile, right_level, right_free)
     return model
 end
 
-function _set_right_boundary!(model::Model, open_right::Bool, right_profile, right_level)
+function _set_right_boundary!(model::Model, open_right::Bool, right_profile, right_level, right_free::Bool)
     if right_level !== nothing
         right_profile === nothing || throw(ArgumentError("right_profile and right_level exclude each other"))
+        right_free && throw(ArgumentError("right_level and right_free exclude each other"))
         isfinite(right_level) || throw(ArgumentError("right_level must be finite"))
-        _check_right_level_config(model.config)
     end
-    model.x_boundary_u_right_open = right_level === nothing && open_right
+    right_free && right_profile !== nothing && throw(ArgumentError("right_profile and right_free exclude each other"))
+    (right_level !== nothing || right_free) && _check_right_level_config(model.config)
+    right_free && model.config.nx < 2 && throw(ArgumentError("right_free needs nx >= 2 (the slope of face nx)"))
+    model.x_boundary_u_right_open = right_level === nothing && !right_free && open_right
     model.x_boundary_u_right_profile = right_profile === nothing ? nothing : collect(right_profile)
     model.x_boundary_eta_right = right_level === nothing ? nothing : Float64(right_level)
+    model.x_boundary_right_free = right_free
+    right_free && (model.x_boundary_eta_free = _extrapolated_right_level(model.state.eta))
     return nothing
 end
 
+# Configuration needed by a right boundary face with its own momentum equation (water level or free outflow).
 function _check_right_level_config(cfg::ModelConfig)
-    cfg.periodic_x && throw(ArgumentError("a water-level boundary (right_level) is not possible with periodic_x=true"))
-    cfg.use_hydrostatic || throw(ArgumentError("a water-level boundary (right_level) is implemented for the hydrostatic mode only"))
+    cfg.periodic_x && throw(ArgumentError("a water-level boundary or free outflow (right_level, right_free) is not possible with periodic_x=true"))
+    cfg.use_hydrostatic || throw(ArgumentError("a water-level boundary or free outflow (right_level, right_free) is implemented for the hydrostatic mode only"))
     # WHY implicit vertical terms: the boundary face needs its own vertical viscosity and friction (the explicit
     # diffusion_term! leaves the boundary points out); its implicit column provides them
-    cfg.implicit_vertical_terms || throw(ArgumentError("a water-level boundary (right_level) requires implicit_vertical_terms=true"))
+    cfg.implicit_vertical_terms || throw(ArgumentError("a water-level boundary or free outflow (right_level, right_free) requires implicit_vertical_terms=true"))
     return nothing
 end
+
+function _check_left_level_config(cfg::ModelConfig)
+    # WHY: the level of the inlet face only enters through its layer thicknesses; the fixed grid has dz in every layer
+    (cfg.wetting_drying || use_variable_top_layer(cfg)) ||
+        throw(ArgumentError("left_level needs the variable top layer or wetting_drying=true (the fixed grid has the depth H at every face)"))
+    return nothing
+end
+
+# Whether the right boundary face has its own momentum equation (water-level boundary or free outflow).
+_right_face_computed(model::Model) = model.x_boundary_eta_right !== nothing || model.x_boundary_right_free
 
 function clear_x_inflow_outflow!(model::Model)
     model.wetdry === nothing || (model.wetdry.left_velocity = nothing)
     model.x_boundary_u_left_profile = nothing
     model.x_boundary_q_left = nothing
+    model.x_boundary_eta_left = nothing
     model.x_boundary_u_right_open = false
     model.x_boundary_u_right_profile = nothing
     model.x_boundary_eta_right = nothing
+    model.x_boundary_right_free = false
     return model
 end
 
@@ -1049,8 +1101,8 @@ function _apply_x_boundary_conditions!(model::Model, u::AbstractMatrix{<:Real})
         end
     end
 
-    if model.x_boundary_eta_right !== nothing
-        # water-level boundary: u of the boundary face comes from its own momentum equation (step_forward!)
+    if _right_face_computed(model)
+        # water-level boundary or free outflow: u of the boundary face comes from its own momentum equation
     elseif model.x_boundary_u_right_profile !== nothing
         right_profile = model.x_boundary_u_right_profile
         if length(right_profile) != size(u, 1)
@@ -1069,10 +1121,12 @@ end
 _apply_x_boundary_conditions!(model::Model) = _apply_x_boundary_conditions!(model, model.state.u)
 
 # Transport (m^2/s per unit of the shape) of the profile `shape` (length nz) at the left boundary face: layers dz above the
-# bed face, the top layer dz + eta of level n (ws.eta_old) with the variable top layer.
+# bed face, the top layer dz + eta with the variable top layer (eta of level n in ws.eta_old, or the prescribed inlet
+# level, left_level).
 function _left_face_transport(model::Model, shape::AbstractVector{<:Real})
     nz, dz = model.config.nz, model.dz
-    h_top = use_variable_top_layer(model.config) ? dz + model.ws.eta_old[1] : dz
+    eta_face = model.x_boundary_eta_left === nothing ? model.ws.eta_old[1] : model.x_boundary_eta_left
+    h_top = use_variable_top_layer(model.config) ? dz + eta_face : dz
     kb = model.geometry.has_bed ? model.geometry.k_bed_face[1] : 1
     transport = 0.0
     for k in kb:nz
@@ -1124,47 +1178,87 @@ The surface (barotropic) Froude number of the theta bound `theta_froude_max`; `f
 PERF: O(nz nx) without allocation; evaluated after every step by the Froude-bound check.
 """
 function surface_froude_number(model::Model)
-    cfg = model.config
-    st = model.state
-    geo = model.geometry
-    wd = model.wetdry
-    nz, nx, dz, g = cfg.nz, cfg.nx, model.dz, cfg.g
-    variable_top = use_variable_top_layer(cfg)
     fr_max = 0.0
     face = 0
-    @inbounds for f in 1:(nx + 1)
-        if wd !== nothing
-            depth = 0.0       # m
-            transport = 0.0   # m^2/s
-            for k in 1:nz
-                depth += wd.hf[k, f]
-                transport += wd.hf[k, f] * st.u[k, f]
-            end
-            depth > SURFACE_FROUDE_MIN_DEPTH || continue
-            U = transport / depth
-        else
-            iL = f == 1 ? (cfg.periodic_x ? nx : 1) : f - 1
-            iR = f == nx + 1 ? (cfg.periodic_x ? 1 : nx) : f
-            eta_f = 0.5 * (st.eta[iL] + st.eta[iR])
-            depth = cfg.depth - geo.bed_face_level[f] + eta_f
-            depth > SURFACE_FROUDE_MIN_DEPTH || continue
-            kb = geo.has_bed ? geo.k_bed_face[f] : 1
-            transport = 0.0
-            thickness = 0.0
-            for k in kb:nz
-                dZ = (k == nz && variable_top) ? dz + eta_f : dz
-                transport += dZ * st.u[k, f]
-                thickness += dZ
-            end
-            U = transport / thickness
-        end
-        fr = abs(U) / sqrt(g * depth)
-        if fr > fr_max
+    for f in 1:(model.config.nx + 1)
+        fr = _face_froude(model, f)
+        if fr > fr_max   # NaN (too shallow) compares false
             fr_max = fr
             face = f
         end
     end
     return fr_max, face
+end
+
+# Surface Froude number |U| / sqrt(g h) (-) of u-face f (see surface_froude_number); NaN if the face is shallower than
+# SURFACE_FROUDE_MIN_DEPTH.
+function _face_froude(model::Model, f::Int)
+    U, depth = _face_velocity_depth(model, f)
+    depth > SURFACE_FROUDE_MIN_DEPTH || return NaN
+    return abs(U) / sqrt(model.config.g * depth)
+end
+
+# Depth-averaged velocity U (m/s) and water depth h (m) of u-face f (see surface_froude_number). A boundary face with a
+# known level (right_level or free outflow, left_level) has that level. h <= 0 for a dry face (U = 0 then).
+function _face_velocity_depth(model::Model, f::Int)
+    cfg = model.config
+    st = model.state
+    nz, nx, dz = cfg.nz, cfg.nx, model.dz
+    wd = model.wetdry
+    if wd !== nothing
+        depth = 0.0       # m
+        transport = 0.0   # m^2/s
+        @inbounds for k in 1:nz
+            depth += wd.hf[k, f]
+            transport += wd.hf[k, f] * st.u[k, f]
+        end
+        return (depth > 0.0 ? transport / depth : 0.0), depth
+    end
+    geo = model.geometry
+    iL = f == 1 ? (cfg.periodic_x ? nx : 1) : f - 1
+    iR = f == nx + 1 ? (cfg.periodic_x ? 1 : nx) : f
+    eta_f = 0.5 * (st.eta[iL] + st.eta[iR])
+    if !cfg.periodic_x
+        f == nx + 1 && _right_boundary_level(model) !== nothing && (eta_f = _right_boundary_level(model))
+        f == 1 && model.x_boundary_eta_left !== nothing && (eta_f = model.x_boundary_eta_left)
+    end
+    depth = cfg.depth - geo.bed_face_level[f] + eta_f
+    variable_top = use_variable_top_layer(cfg)
+    kb = geo.has_bed ? geo.k_bed_face[f] : 1
+    transport = 0.0
+    thickness = 0.0
+    @inbounds for k in kb:nz
+        dZ = (k == nz && variable_top) ? dz + eta_f : dz
+        transport += dZ * st.u[k, f]
+        thickness += dZ
+    end
+    return transport / thickness, depth
+end
+
+# Margin (-) around Fr = 1 for the boundary-type warning. WHY: near-critical boundary flow fluctuates about 1 in a
+# transient; only a clear mismatch (a level prescribed at an outflow with Fr > 1.05, a level at an inflow with Fr < 0.95)
+# means the boundary type is wrong.
+const BOUNDARY_FROUDE_MARGIN = 0.05
+
+# Warns once per model when the Froude number at an open boundary does not fit its type (issue #46): a prescribed level
+# at a supercritical outflow over-specifies it (use right_free=true); a prescribed level at a subcritical inflow does too
+# (prescribe the discharge only).
+function _check_boundary_froude!(model::Model)
+    model.boundary_froude_warned && return nothing
+    message = nothing
+    if model.x_boundary_eta_right !== nothing
+        fr = _face_froude(model, model.config.nx + 1)
+        fr > 1 + BOUNDARY_FROUDE_MARGIN && (message = @sprintf("supercritical outflow (Fr = %.2f) at a water-level boundary (right_level): the level over-specifies it; use right_free=true", fr))
+    end
+    if message === nothing && model.x_boundary_eta_left !== nothing
+        fr = _face_froude(model, 1)
+        fr < 1 - BOUNDARY_FROUDE_MARGIN && (message = @sprintf("subcritical inflow (Fr = %.2f) with a prescribed inlet level (left_level): discharge and level over-specify it; prescribe the discharge only", fr))
+    end
+    if message !== nothing
+        model.boundary_froude_warned = true
+        @warn message * ". Warned once per model."
+    end
+    return nothing
 end
 
 # Records the largest surface Froude number of the run and warns once when it exceeds the theta bound by more than
@@ -1178,6 +1272,7 @@ function _check_surface_froude!(model::Model)
         @warn @sprintf("surface Froude number %.3f (u-face %d) exceeds theta_froude_max(theta = %.3g) = %.3f: gravity waves on the mean flow can grow slowly. Use theta >= theta_for_froude(Fr) = %.3f. The bound is sharp with the variable top layer and conservative on the fixed grid (docs/TESTS_TECHNICAL_DOCUMENTATION.md, section 19). Warned once per model.",
             fr, face, theta, theta_froude_max(theta), theta_for_froude(fr))
     end
+    _check_boundary_froude!(model)
     return nothing
 end
 
@@ -1360,6 +1455,93 @@ end
 # level at the end of the domain, x = L, as a measured or normal-depth level is specified.
 _right_level_slope(eta::AbstractVector{<:Real}, eta_right::Real, dx::Real) = (eta_right - eta[end]) / (0.5 * dx)
 
+# Level (m) of the right boundary face at time n: the prescribed water level, the radiated level of a free outflow, or
+# nothing (layer thicknesses of the face, explicit part of its surface slope).
+function _right_boundary_level(model::Model)
+    model.x_boundary_eta_right === nothing || return model.x_boundary_eta_right
+    return model.x_boundary_right_free ? model.x_boundary_eta_free : nothing
+end
+
+# Level eta_eff (m) and weight w (-) of the boundary face in the free-surface solve: the slope of time n + 1 at the face is
+# w (eta_eff - eta_nx^{n+1}) / (dx/2), a Dirichlet condition with the coefficient w 2 theta^2 dt^2 g H / dx^2. Prescribed
+# level: (eta_R, 1). Free outflow: from _update_free_outflow_level!.
+function _right_boundary_dirichlet(model::Model)
+    model.x_boundary_eta_right === nothing || return (Float64(model.x_boundary_eta_right), 1.0)
+    return model.x_boundary_free_dirichlet
+end
+
+# Surface slope (1) at the right boundary face with its own momentum equation: time n (explicit part; old=true) with its
+# level of time n, or time n + 1 (implicit part; old=false) from the solved level eta_nx^{n+1} (_right_boundary_dirichlet).
+function _right_boundary_slope(eta::AbstractVector{<:Real}, model::Model, dx::Real; old::Bool=false)
+    old && return _right_level_slope(eta, _right_boundary_level(model), dx)
+    eta_eff, weight = _right_boundary_dirichlet(model)
+    return weight * _right_level_slope(eta, eta_eff, dx)
+end
+
+# Level (m) at x = L extrapolated linearly from the last two cell centres, eta_nx + (eta_nx - eta_{nx-1}) / 2.
+# WHY linear: uniform flow over a real bed slope has a linear surface; a constant extrapolation would put the level of
+# the last centre at x = L and take the pressure force off the boundary face.
+_extrapolated_right_level(eta::AbstractVector{<:Real}) = 1.5 * eta[end] - 0.5 * eta[end - 1]
+
+"""
+    _update_free_outflow_level!(model)
+
+Free outflow (issue #46): advances the level eta_b (m) of the right boundary face, which then acts as the level of a
+water-level boundary for this step (`_right_boundary_level`), from the state of time n. U (m/s) and h (m) are the
+depth-averaged velocity and the depth of the boundary face.
+
+- Supercritical outflow (U >= sqrt(g h)): both characteristics leave the domain, the level comes from the interior,
+  eta_b = 1.5 eta_nx - 0.5 eta_{nx-1} (linear extrapolation to x = L).
+- Subcritical outflow: outgoing-wave (Sommerfeld) radiation condition with the speed c = U + sqrt(g h) of the outgoing
+  long-wave characteristic, on the deviation from a surface parallel to the bed,
+      deta_b/dt + c [(eta_b - eta_nx)/(dx/2) - s_bed] = 0,   s_bed = (z_b,nx - z_b,nx-1)/dx,
+  backward Euler, eta_b^{n+1} = (eta_b^n + mu (eta_nx^{n+1} + s_bed dx/2)) / (1 + mu), mu = c dt/(dx/2) (a convex
+  combination, stable for any dt). Implicit in the free-surface solve: the slope of the boundary face at n + 1 is
+  (eta_b^{n+1} - eta_nx^{n+1})/(dx/2) = w (eta_eff - eta_nx^{n+1})/(dx/2) with w = 1/(1 + mu), eta_eff = eta_b^n + mu s_bed dx/2,
+  i.e. the Dirichlet condition of a water-level boundary with the coefficient w (`_right_boundary_dirichlet`);
+  `_finish_free_outflow_level!` then sets eta_b^{n+1}. WHY implicit: with eta_nx of time n the lag of one step (c dt = dx
+  at the gravity-wave Courant number 1) reflected 41 % of an outgoing wave at every resolution.
+  WHY the gradient to the last cell centre: a wave leaving the domain then carries its level
+  out, eta_b follows it with the lag of half a cell; relaxing eta_b to the level extrapolated to the face itself instead
+  gives the boundary face the slope of face nx, so it moves exactly as face nx, the last cell keeps its level and the
+  wave is reflected as at a fixed level (measured: the same reflection as `right_level`). WHY s_bed: uniform flow has a
+  surface parallel to the bed, also at the outlet (exact with a real bed slope); without it the boundary face would lose
+  its pressure force there. Other steady outflows (e.g. a backwater curve at the outlet) are pulled towards the
+  bed-parallel continuation: prescribe the level (`right_level`) when the outlet level is known.
+
+The mean level is not fixed by the boundary: with the fixed grid (depth H at every face, variable_top_layer=false) and no
+other level control it is a neutral mode. Source: Orlanski (1976), J. Comput. Phys. 21, 251-269 (radiation condition;
+equation numbers not checked).
+"""
+function _update_free_outflow_level!(model::Model)
+    cfg = model.config
+    nx = cfg.nx
+    eta = model.state.eta
+    U, depth = _face_velocity_depth(model, nx + 1)
+    celerity = depth > 0.0 ? sqrt(cfg.g * depth) : 0.0   # m/s, long-wave speed (0 for a dry face)
+    if U >= celerity
+        # supercritical: the level of the face is the interior one, extrapolated (time n)
+        model.x_boundary_eta_free = _extrapolated_right_level(eta)
+        model.x_boundary_free_dirichlet = (model.x_boundary_eta_free, 1.0)
+        return nothing
+    end
+    bed = model.wetdry === nothing ? model.geometry.bed_level : model.wetdry.bed
+    s_bed = (bed[nx] - bed[nx - 1]) / model.dx   # -, slope of a bed-parallel surface (eta rises with the bed)
+    mu = (U + celerity) * cfg.dt / (0.5 * model.dx)   # >= 0 (U > -celerity: not a supercritical inflow)
+    mu = max(mu, 0.0)
+    model.x_boundary_free_dirichlet = (model.x_boundary_eta_free + mu * s_bed * 0.5 * model.dx, 1.0 / (1.0 + mu))
+    return nothing
+end
+
+# Free outflow after the free-surface solve: the level of the boundary face at n + 1 from its Dirichlet condition,
+# eta_b^{n+1} = eta_nx^{n+1} + w (eta_eff - eta_nx^{n+1}) (_update_free_outflow_level!).
+function _finish_free_outflow_level!(model::Model)
+    eta_eff, weight = model.x_boundary_free_dirichlet
+    eta_nx = model.state.eta[end]
+    model.x_boundary_eta_free = eta_nx + weight * (eta_eff - eta_nx)
+    return nothing
+end
+
 # u[k, f] += factor * slope (* r[k, f], the column response of the implicit vertical terms, if given) on the interior
 # u-faces (all faces with periodic_x); factor in m/s per unit slope.
 function _add_surface_gradient!(u::AbstractMatrix{<:Real}, grad::AbstractVector{<:Real}, factor::Real, periodic_x::Bool;
@@ -1404,8 +1586,8 @@ function _implicit_vertical_terms!(model::Model, variable_top::Bool)
     col = ws.col
     cb = cfg.bed_roughness_length > 0.0 ? bed_friction_coefficient(cfg.bed_roughness_length, 0.5 * dz) : 0.0
     cf = cfg.chezy_coefficient > 0.0 ? cfg.g / cfg.chezy_coefficient^2 : 0.0   # -, Chezy friction coefficient g / C^2
-    # the boundary face of a water-level boundary has its own column (set_x_inflow_outflow!(...; right_level))
-    flo, fhi = cfg.periodic_x ? (1, nx) : (2, model.x_boundary_eta_right === nothing ? nx : nx + 1)
+    # the boundary face of a water-level boundary or free outflow has its own column (set_x_inflow_outflow!)
+    flo, fhi = cfg.periodic_x ? (1, nx) : (2, _right_face_computed(model) ? nx + 1 : nx)
     @inbounds for f in flo:fhi
         iL = cfg.periodic_x ? mod1(f - 1, nx) : f - 1   # cells left and right of face f
         iR = cfg.periodic_x ? mod1(f, nx) : min(f, nx)  # boundary face: w of the last cell (zero gradient)
@@ -1499,8 +1681,11 @@ function step_forward!(model::Model)
     if cfg.wetting_drying != (model.wetdry !== nothing)
         throw(ArgumentError("wetting_drying cannot be changed after Model construction"))
     end
+    # free outflow: radiated level of the boundary face for this step, from the state of time n
+    model.x_boundary_right_free && _update_free_outflow_level!(model)
     if cfg.wetting_drying
         _step_forward_wetting_drying!(model)
+        model.x_boundary_right_free && _finish_free_outflow_level!(model)
         _check_surface_froude!(model)
         return nothing
     end
@@ -1525,19 +1710,24 @@ function step_forward!(model::Model)
         throw(ArgumentError("bed_level is not supported together with vegetation"))
     end
     variable_top = use_variable_top_layer(cfg)
-    # water-level boundary at the right (set_x_inflow_outflow!(...; right_level)): eta_R (m) at the boundary face
-    eta_right = model.x_boundary_eta_right
-    level_bc = eta_right !== nothing
-    level_bc && _check_right_level_config(cfg)
+    # right boundary face with its own momentum equation (set_x_inflow_outflow!): level eta_R (m), prescribed or the
+    # radiated level of a free outflow
+    eta_right = _right_boundary_level(model)
+    open_bc = _right_face_computed(model)
+    open_bc && _check_right_level_config(cfg)
+    eta_left = model.x_boundary_eta_left   # m, prescribed inlet level (supercritical inflow), or nothing
+    eta_left === nothing || _check_left_level_config(cfg)
 
     copyto!(ws.eta_old, st.eta)
     if variable_top
         _check_top_layer_thickness(model, ws.eta_old)
         top_layer_face_thickness!(ws.h_top_face, ws.eta_old, model.dz)
-        if level_bc
-            model.dz + eta_right >= cfg.top_layer_min_fraction * model.dz ||
-                throw(ArgumentError("right_level = $(eta_right) m leaves the top layer (dz = $(model.dz) m)"))
-            ws.h_top_face[cfg.nx + 1] = model.dz + eta_right   # the level of the boundary face is known
+        # the level of a boundary face with a prescribed level is known
+        for (eta_face, f, name) in ((eta_right, cfg.nx + 1, "right_level"), (eta_left, 1, "left_level"))
+            eta_face === nothing && continue
+            model.dz + eta_face >= cfg.top_layer_min_fraction * model.dz ||
+                throw(ArgumentError("$(name) = $(eta_face) m leaves the top layer (dz = $(model.dz) m)"))
+            ws.h_top_face[f] = model.dz + eta_face
         end
     end
 
@@ -1551,7 +1741,7 @@ function step_forward!(model::Model)
     implicit = cfg.implicit_vertical_terms
     # WHY top_row_advective_form=true also on the fixed grid: the grid top carries w = d(eta)/dt but no momentum flux,
     # so the flux form alone advects the top row at about (nz + 1) U (issue #37, _top_row_advective_form!)
-    @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=true, periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing, dt=cfg.dt, vertical=!implicit, open_right=level_bc, h_top_vertical=(implicit && variable_top) ? ws.h_top_face : nothing)
+    @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=true, periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing, dt=cfg.dt, vertical=!implicit, open_right=open_bc, h_top_vertical=(implicit && variable_top) ? ws.h_top_face : nothing)
     @timeit model.timers "step/advection_w" advection_term_w!(ws.adv_w, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_w_ws, ws.interpolation_ws, cfg.periodic_x; active=masked ? geo.w_active : nothing, dt=cfg.dt)
 
     @timeit model.timers "step/hydrostatic_predictor" begin
@@ -1565,7 +1755,7 @@ function step_forward!(model::Model)
         diffusion_term!(ws.diff_u, st.u, ws.nu_eff_u, model.dx, model.dz; periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing, vertical=!implicit)
 
         nz, nxp1 = size(st.u)
-        if level_bc
+        if open_bc
             # WHY the tendencies of face nx: grad_x_c! and diffusion_term! leave the boundary points out (wall values);
             # an outflow boundary assumes zero gradients instead, i.e. the baroclinic pressure gradient and horizontal
             # diffusion of the last interior face (the advection has its own open control volume, open_right)
@@ -1731,8 +1921,8 @@ function step_forward!(model::Model)
             # explicit part of the surface pressure gradient, -(1 - theta) g dt d(eta^n)/dx (Casulli & Cattani 1994)
             _surface_gradient!(ws.eta_grad_x, ws.eta_old, model.dx, cfg.periodic_x)
             _add_surface_gradient!(ws.u_hat, ws.eta_grad_x, -(1.0 - theta) * cfg.g * cfg.dt, cfg.periodic_x)
-            if level_bc
-                slope = _right_level_slope(ws.eta_old, eta_right, model.dx)
+            if open_bc
+                slope = _right_boundary_slope(ws.eta_old, model, model.dx; old=true)
                 @views ws.u_hat[:, nx + 1] .-= (1.0 - theta) * cfg.g * cfg.dt * slope
             end
         end
@@ -1750,7 +1940,9 @@ function step_forward!(model::Model)
         @. ws.u_theta = theta * ws.u_hat + (1.0 - theta) * ws.u_old
         if implicit
             _face_transport!(bsolver.U_hat, ws.u_theta, model, variable_top)
-            solve_effective_depth!(bsolver, st.eta, ws.eta_old, ws.H_face; periodic_x=cfg.periodic_x, right_level=eta_right)
+            eta_eff, weight = open_bc ? _right_boundary_dirichlet(model) : (0.0, 1.0)
+            solve_effective_depth!(bsolver, st.eta, ws.eta_old, ws.H_face; periodic_x=cfg.periodic_x,
+                right_level=open_bc ? eta_eff : nothing, right_weight=weight)
             variable_top && _check_top_layer_thickness(model, st.eta)
         elseif variable_top
             solve_variable_thickness!(bsolver, st.eta, ws.u_theta, ws.eta_old, ws.h_top_face)
@@ -1765,8 +1957,8 @@ function step_forward!(model::Model)
         # WHY: corrects ws.u_hat in place (not yet written to st.u) so a following non-hydrostatic projection acts on
         # this surface-corrected predictor, exactly as it already acted on the (pressure-predictor-only) u_hat before.
         _add_surface_gradient!(ws.u_hat, ws.eta_grad_x, -cfg.g * cfg.dt * theta, cfg.periodic_x; r=implicit ? ws.r_vert : nothing)
-        if level_bc
-            slope = _right_level_slope(st.eta, eta_right, model.dx)
+        if open_bc
+            slope = _right_boundary_slope(st.eta, model, model.dx)
             @views @. ws.u_hat[:, nx + 1] -= cfg.g * cfg.dt * theta * slope * ws.r_vert[:, nx + 1]
         end
 
@@ -1839,7 +2031,7 @@ function step_forward!(model::Model)
     end
 
     @timeit model.timers "step/free_surface_u_update" begin
-        ilo, ihi = cfg.periodic_x ? (1, nx + 1) : (2, level_bc ? nx + 1 : nx)
+        ilo, ihi = cfg.periodic_x ? (1, nx + 1) : (2, open_bc ? nx + 1 : nx)
         @inbounds for i in ilo:ihi
             for k in 1:cfg.nz
                 st.u[k, i] = ws.u_hat[k, i]
@@ -1917,6 +2109,7 @@ function step_forward!(model::Model)
         buoyancy!(model.last_buoy_w, ws.rho_w, model.rho_0_w_2d)
     end
 
+    model.x_boundary_right_free && _finish_free_outflow_level!(model)
     @timeit model.timers "step/froude_check" _check_surface_froude!(model)
     return nothing
 end
@@ -2347,14 +2540,17 @@ H_f = sum_k dZ_k r_k, src/implicit_vertical.jl) and the face transports already 
     a_f = theta^2 dt^2 g H_f / dx^2   (a = 0 at the outer faces unless periodic_x; with periodic_x face 1 = face nx+1).
 
 `right_level` (m): water-level boundary at face nx+1, eta_{nx+1} = right_level at half a cell from the last centre, so
-a_{nx+1} = 2 theta^2 dt^2 g H_{nx+1} / dx^2 and a_{nx+1} right_level moves to the right-hand side (`_right_level_slope`).
+a_{nx+1} = right_weight 2 theta^2 dt^2 g H_{nx+1} / dx^2 and a_{nx+1} right_level moves to the right-hand side
+(`_right_level_slope`). `right_weight` (-, default 1): a free outflow passes its effective level and the weight
+1/(1 + mu) of its implicit radiation condition (`_right_boundary_dirichlet`).
 
 Symmetric, diagonally dominant (H_f >= 0): Thomas algorithm, or with periodic_x the cyclic system by the
 Sherman-Morrison formula (Press et al. 2007, Numerical Recipes, 3rd ed., section 2.7.2).
 PERF: coefficients rebuilt every step (H_f depends on the friction and the flow), O(nx), no allocation.
 """
 function solve_effective_depth!(solver::BarotropicSolver, eta::AbstractVector{<:Real}, eta_old::AbstractVector{<:Real},
-    H_face::AbstractVector{<:Real}; periodic_x::Bool=false, right_level::Union{Nothing,Real}=nothing)
+    H_face::AbstractVector{<:Real}; periodic_x::Bool=false, right_level::Union{Nothing,Real}=nothing,
+    right_weight::Real=1.0)
     nx = solver.nx
     dt, dx = solver.dt, solver.dx
     coeff = solver.theta * solver.theta * dt * dt * solver.g / (dx * dx)   # 1/m
@@ -2372,7 +2568,7 @@ function solve_effective_depth!(solver::BarotropicSolver, eta::AbstractVector{<:
     end
     if right_level !== nothing
         periodic_x && throw(ArgumentError("right_level is not possible with periodic_x=true"))
-        a_bc = 2.0 * coeff * H_face[nx + 1]   # WHY 2: the level lies half a cell from the last centre
+        a_bc = right_weight * 2.0 * coeff * H_face[nx + 1]   # WHY 2: the level lies half a cell from the last centre
         diag[nx] += a_bc
         solver.rhs[nx] += a_bc * right_level
     end

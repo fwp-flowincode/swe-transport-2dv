@@ -189,16 +189,36 @@ function _wd_cell_thicknesses!(h::AbstractMatrix{<:Real}, model::Model, wd::WetD
     return h
 end
 
-# Layer thicknesses at the u-faces: face bed z_b,f and upwind water level (sign of the depth-summed u of time n; the
-# higher level for u = 0), Stelling & Duinmeijer (2003), Sec. 2 (equation numbers not checked). Faces with an upwind
+# Bed level (m) of u-face f for its layer thicknesses: wd.bed_face (the higher neighbour; the adjacent column at the
+# boundaries), except at a boundary face with a known level (water-level boundary or free outflow at the right,
+# left_level at the left): there the bed extrapolated linearly to the end of the domain (x = 0 or L), at least the grid
+# bottom. WHY: the level of such a face is that at the end of the domain (_right_level_slope, _extrapolated_right_level),
+# so its depth must be measured from the bed there. With the bed of the last column (i_b dx/2 higher on a slope), a free
+# outflow over the issue #14 slope raised the level of the whole channel by 1.7 cm (the outlet face too shallow, nothing
+# pinning the level); the prescribed level of #14 hid the 1 mm by fixing the outlet level.
+function _wd_face_bed(model::Model, wd::WetDryState, f::Int)
+    nx = model.config.nx
+    nx >= 2 || return wd.bed_face[f]
+    if f == nx + 1 && _right_face_computed(model)
+        return max(1.5 * wd.bed[nx] - 0.5 * wd.bed[nx - 1], 0.0)
+    elseif f == 1 && model.x_boundary_eta_left !== nothing
+        return max(1.5 * wd.bed[1] - 0.5 * wd.bed[2], 0.0)
+    end
+    return wd.bed_face[f]
+end
+
+# Layer thicknesses at the u-faces: face bed (_wd_face_bed) and upwind water level (sign of the depth-summed u of time n;
+# the higher level for u = 0), Stelling & Duinmeijer (2003), Sec. 2 (equation numbers not checked). Faces with an upwind
 # depth <= dry_depth_threshold are closed (hf = 0). Boundary faces use the adjacent column.
 function _wd_face_thicknesses!(model::Model, wd::WetDryState)
     cfg = model.config
     u = model.state.u
     nx = cfg.nx
     @inbounds for f in 1:(nx + 1)
-        if f == nx + 1 && model.x_boundary_eta_right !== nothing
-            zeta_f = cfg.depth + model.x_boundary_eta_right   # water-level boundary: the level of the face is known
+        if f == nx + 1 && _right_boundary_level(model) !== nothing
+            zeta_f = cfg.depth + _right_boundary_level(model)   # water level or free outflow: the face level is known
+        elseif f == 1 && model.x_boundary_eta_left !== nothing
+            zeta_f = cfg.depth + model.x_boundary_eta_left    # inlet level prescribed (supercritical inflow, #46)
         elseif f == 1 || f == nx + 1
             zeta_f = _wd_level(model, f == 1 ? 1 : nx)
         else
@@ -210,8 +230,9 @@ function _wd_face_thicknesses!(model::Model, wd::WetDryState)
             zeta_f = s > 0 ? zl : (s < 0 ? zr : max(zl, zr))
         end
         hf = view(wd.hf, :, f)
-        if zeta_f - wd.bed_face[f] > cfg.dry_depth_threshold
-            layer_thicknesses!(hf, zeta_f, wd.bed_face[f], model.dz)
+        zb_f = _wd_face_bed(model, wd, f)
+        if zeta_f - zb_f > cfg.dry_depth_threshold
+            layer_thicknesses!(hf, zeta_f, zb_f, model.dz)
         else
             fill!(hf, 0.0)
         end
@@ -224,10 +245,12 @@ end
 # none). PERF: allocates one vector of length nz; called by set_x_inflow_outflow!, not inside the time step.
 function _wd_left_face_transport(model::Model, shape::AbstractVector{<:Real})
     wd = model.wetdry
-    zeta = _wd_level(model, 1)
-    zeta - wd.bed_face[1] > model.config.dry_depth_threshold || return 0.0
+    eta_left = model.x_boundary_eta_left
+    zeta = eta_left === nothing ? _wd_level(model, 1) : model.config.depth + eta_left   # m, level of the inlet face
+    zb = _wd_face_bed(model, wd, 1)
+    zeta - zb > model.config.dry_depth_threshold || return 0.0
     h = zeros(eltype(wd.hf), model.config.nz)
-    layer_thicknesses!(h, zeta, wd.bed_face[1], model.dz)
+    layer_thicknesses!(h, zeta, zb, model.dz)
     return sum(h .* shape)
 end
 
@@ -536,8 +559,8 @@ function _wd_boundary_velocities!(model::Model, wd::WetDryState, u::AbstractMatr
     end
     @inbounds for k in 1:nz
         wet_right = wd.hf[k, nxp1] > 0.0
-        if model.x_boundary_eta_right !== nothing
-            # water-level boundary: u of the boundary face comes from its own momentum equation (predictor)
+        if _right_face_computed(model)
+            # water-level boundary or free outflow: u of the boundary face comes from its own momentum equation
         elseif right_profile !== nothing && wet_right
             u[k, nxp1] = right_profile[k]
         elseif model.x_boundary_u_right_open && wet_right
@@ -664,11 +687,12 @@ function _wd_free_surface_solve!(model::Model, wd::WetDryState)
         a[f] = (f == 1 || f == nx + 1) ? 0.0 : coeff * (cfg.implicit_vertical_terms ? ws.H_face[f] : Hf)
         wd.U_hat[f] = U
     end
-    # water-level boundary: face nx + 1 couples column nx to the prescribed level half a cell away (_right_level_slope);
-    # (P + T) stays an M-matrix (T only gains diagonal weight) and the flux divergence still reproduces V(eta) >= 0
-    eta_right = model.x_boundary_eta_right
-    eta_right === nothing || (a[nx + 1] = 2.0 * coeff * ws.H_face[nx + 1])
-    eta_beyond = eta_right === nothing ? 0.0 : eta_right   # m, level beyond column nx (irrelevant if a[nx + 1] = 0)
+    # water-level boundary (prescribed, or the radiated level of a free outflow, _right_boundary_level): face nx + 1
+    # couples column nx to the level half a cell away (_right_level_slope); (P + T) stays an M-matrix (T only gains
+    # diagonal weight) and the flux divergence still reproduces V(eta) >= 0
+    open_bc = _right_face_computed(model)
+    eta_beyond, weight = open_bc ? _right_boundary_dirichlet(model) : (0.0, 1.0)   # m, level beyond column nx; -
+    open_bc && (a[nx + 1] = weight * 2.0 * coeff * ws.H_face[nx + 1])
     @inbounds for i in 1:nx
         b[i] = max(H + ws.eta_old[i] - wd.bed[i], 0.0) - dt * (wd.U_hat[i + 1] - wd.U_hat[i]) / dx
         eta[i] = ws.eta_old[i]
@@ -725,10 +749,10 @@ function _wd_free_surface_solve!(model::Model, wd::WetDryState)
         end
     end
     @views st.u[:, 1] .= ws.u_hat[:, 1]
-    if eta_right === nothing
+    if !_right_face_computed(model)
         @views st.u[:, nx + 1] .= ws.u_hat[:, nx + 1]
     else
-        grad = _right_level_slope(eta, eta_right, dx)
+        grad = _right_boundary_slope(eta, model, dx)
         @inbounds for k in 1:nz
             st.u[k, nx + 1] = wd.hf[k, nx + 1] > 0.0 ? ws.u_hat[k, nx + 1] - g * dt * theta * grad * ws.r_vert[k, nx + 1] : 0.0
         end
@@ -1005,15 +1029,17 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     implicit = cfg.implicit_vertical_terms
     second_order_momentum = cfg.momentum_advection_scheme == "tvd2"
     damp = cfg.rayleigh_damping > 0.0 ? max(0.0, 1.0 - cfg.rayleigh_damping * dt) : 1.0
-    # water-level boundary (set_x_inflow_outflow!(...; right_level)): the boundary face nx + 1 has its own momentum
-    # equation with the surface slope to the prescribed level and the baroclinic pressure gradient of face nx
-    eta_right = model.x_boundary_eta_right
-    eta_right === nothing || _check_right_level_config(cfg)
-    fhi = eta_right === nothing ? nx : nx + 1
+    # water-level boundary or free outflow (set_x_inflow_outflow!(...; right_level / right_free)): the boundary face
+    # nx + 1 has its own momentum equation with its surface slope (_right_boundary_slope) and the baroclinic pressure
+    # gradient of face nx
+    open_bc = _right_face_computed(model)
+    open_bc && _check_right_level_config(cfg)
+    model.x_boundary_eta_left === nothing || _check_left_level_config(cfg)
+    fhi = open_bc ? nx + 1 : nx
     @inbounds for f in 2:fhi
         depth_totals = _wd_advection_depth_totals(wd, f)
         boundary = f == nx + 1
-        surface_slope = boundary ? _right_level_slope(ws.eta_old, eta_right, dx) : (ws.eta_old[f] - ws.eta_old[f - 1]) / dx
+        surface_slope = boundary ? _right_boundary_slope(ws.eta_old, model, dx; old=true) : (ws.eta_old[f] - ws.eta_old[f - 1]) / dx
         explicit_surface = explicit_weight * g * surface_slope   # m/s^2
         fp = boundary ? nx : f   # face of the baroclinic pressure gradient (zero gradient at the boundary)
         for k in 1:nz

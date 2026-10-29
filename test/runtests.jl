@@ -16,4 +16,5 @@ include("test_common.jl")
     include("test_theta_scheme.jl")
     include("test_implicit_vertical.jl")
     include("test_sloped_channel.jl")
+    include("test_open_boundaries.jl")
 end
