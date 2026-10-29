@@ -975,6 +975,96 @@ $\theta=0.7$, as before): it is a start-up effect, see that test.
 References: Arakawa & Lamb (1977), Methods Comput. Phys. 17, 173-265; Casulli & Walters (2000), Int. J. Numer. Methods
 Fluids 32, 331-348. Equation numbers were not checked.
 
+### 21) Sloped channel: Chezy friction, discharge and water-level boundaries (issue #14)
+
+Channel of the issue: $L=1000$ m, $H=4$ m, $i_b=10^{-4}$, $q=4$ m²/s, $C=50$ m$^{1/2}$/s. The normal (uniform) flow has
+$U=C\sqrt{Hi_b}=1$ m/s, so $q=UH=4$ m²/s: the data of the issue are consistent ($\mathrm{Fr}=0.16$).
+
+**Chezy friction** (`ModelConfig(chezy_coefficient=C)`). The bed stress acts on the depth-averaged velocity of each
+u-face,
+```math
+\frac{\tau_b}{\rho_0}=c_f\lvert U\rvert U,\qquad c_f=\frac{g}{C^2},\qquad U=\frac{1}{H}\sum_k\Delta Z_k u_k,
+```
+as a stress on the lowest open layer. Depth-integrated, the momentum balance contains the Chezy law exactly, whatever the
+vertical viscosity, so uniform flow has $U=C\sqrt{Hi_b}$ and starts from rest as $U(t)=U_{eq}\tanh(t/T)$,
+$T=C\sqrt{H/i_b}/g=1019$ s (`chezy_spinup_velocity`). With a constant viscosity $\nu$ the steady profile is the parabola
+$u(z)=U+(gi_b/\nu)(Hz-z^2/2-H^2/3)$ (`chezy_viscous_profile`). Its bed value $U-gi_bH^2/(3\nu)$ is negative for
+$\nu<gi_bH^2/(3U)=0.005$ m²/s here: the depth-averaged law needs a turbulent viscosity of the order $\kappa u_*H/6$
+(0.017 m²/s here; the tests use 0.02 m²/s). On the layer grid the discrete steady state is that parabola at the layer
+centres plus a constant, because central differences of a quadratic are exact.
+
+- Explicit path (`implicit_vertical_terms=false`): forward Euler with $U^n$, stable for $\Delta t\,c_f|U|/H<1$.
+- Implicit path (`implicit_vertical_terms=true`, also wetting and drying): $c_f|U^n|\,U^{n+1}$ on the lowest layer.
+  This is a rank-one row $A'=A+e_1v^\top$ with $v=\Delta t\,c_f|U^n|\,\Delta Z/H$, solved by the Sherman-Morrison
+  formula with one extra tridiagonal sweep $z=A^{-1}e_1$ (`implicit_vertical_column!`, keyword `gamma_mean`). $A'$ is no
+  M-matrix, but its effective depth is $H/(1+\Delta t\,c_f|U^n|/H)>0$ (flux form, $\mathbf 1^\top A=\Delta Z^\top$),
+  which is all that the free-surface matrix and the positivity of the wetting-drying solve need.
+- Order in time of the spin-up: explicit 1, implicit 2. The product $|U^n|U^{n+1}$ is the geometric mean of the two
+  levels, a midpoint-like approximation of $U^2$.
+- `chezy_roughness_length(C, H)` $=H\exp(-(1+\kappa C/\sqrt g))$ (2.1 mm here) is the log-law roughness whose depth
+  average gives the same $C$, for `bed_roughness_length` with k-epsilon, whose wall functions need $z_0$.
+  `chezy_coefficient` excludes `bed_roughness_length` and k-epsilon.
+
+**Discharge boundary** (`set_x_inflow_outflow!(model, shape; left_discharge=q)`). The profile is a shape, scaled every
+step to $\sum_k\Delta Z_ku_k=q$ with the face layer thicknesses of time $n$: the variable top layer $\Delta z+\eta_1$, or
+the cut face layers in the wetting-drying step. A velocity profile alone carries a transport that changes with the inlet
+level; at the backwater level of the tests that is 10 % of $q$.
+
+**Water-level boundary** (`right_level=eta_R`; hydrostatic, `implicit_vertical_terms=true`, not periodic). The level
+$\eta_R$ lies on the boundary face $x=L$, half a cell from the last centre. The velocity of the boundary face has its own
+momentum equation:
+- surface slope $(\eta_R-\eta_{n_x})/(\Delta x/2)$, implicit in the free-surface solve like an interior face, with
+  $a_{n_x+1}=2\theta^2\Delta t^2gH_{n_x+1}/\Delta x^2$ on the diagonal and $a_{n_x+1}\eta_R$ on the right-hand side;
+- its own implicit vertical column (viscosity, vertical advection, friction);
+- baroclinic pressure gradient and horizontal diffusion of face $n_x$ (zero gradient);
+- advection in an open control volume. Its outer face has the velocity $\tfrac32u_b-\tfrac12u_{n_x}$, that of a ghost
+  cell with the $w$ of the last cell, and carries the zero-gradient flux $u_b$. This keeps the boundary control volume
+  divergence-free, like the interior ones (section 20).
+
+  With a closed outer face, or with the advection tendency of face $n_x$ copied to the boundary face, the normal flow
+  was unstable at the boundary face. A perturbation of the top layer grew by about 0.012 1/s whatever the time step:
+  the top-row correction of face $n_x$ depends on the $w$ of the last cell and so on the lower layers of the boundary
+  face.
+
+The top layer of the boundary face has the level $\eta_R$, both with the variable top layer and in the wetting-drying
+step. In the wetting-drying Newton solve the Dirichlet coupling only adds diagonal weight, so $(P+T)$ stays an M-matrix,
+and the flux divergence still reproduces $V(\eta)\ge0$ (docs/depth_positivity.md).
+
+**Top-row vertical advection with implicit vertical terms** (fixed in this issue). With `implicit_vertical_terms=true`
+and the variable top layer, two terms of the top row disagreed:
+- the implicit column advects the top row vertically with $-Wu_{up}/h_{top}$;
+- the explicit top-row correction added $+u_{top}W/\Delta z$.
+
+A uniform flow with $W\ne0$ below the surface layer, i.e. any gradually varied flow, therefore had the tendency
+$uW(1/\Delta z-1/h_{top})$. The backwater curve came out 0.1-0.2 % of the rise too high, growing with $n_z$
+(3.3e-4 m with 8 layers, 5.9e-4 m with 16). The correction now divides by $h_{top}$ (`_top_row_advective_form!`, keyword
+`h_top_vertical`), and the difference to the reference drops to 3e-5 m; 3e-6 m with a uniform velocity profile. The
+remainder is the momentum-flux coefficient of the sheared profile, which the reference ($\beta=1$) neglects.
+
+Limits:
+- The variable top layer is accurate for $|\eta|\lesssim\Delta z$ (section 13). A 0.5 m level step at the outlet of the
+  normal flow (nz = 10) sends a bore that reflects at the discharge inlet (a discharge boundary reflects waves) and
+  reaches 0.82 m. The top layer is then three times $\Delta z$, and the run failed; the fixed grid and the
+  wetting-drying step run the same case. The backwater tests therefore start from the reference profile with
+  $|\eta_R|=0.3$ m $<\Delta z=0.5$ m.
+- The density is transported through the open boundaries as before: the outer faces carry no density flux, and a
+  uniform density stays uniform through the bounds clipping.
+
+Results (`experiments/sloped_channel/run_cases.jl`, tables in its README):
+- Normal flow is a steady state to round-off of the variable top layer, the fixed grid and the wetting-drying step;
+  from 0.8 times the normal flow it returns to $10^{-13}$.
+- Backwater (M1) and drawdown (M2) curves agree with the gradually-varied-flow equation (`chezy_backwater_depth`) within
+  1e-5 to 8e-5 m (nx = 25 to 100), 0.003-0.03 % of the level change.
+- With a real bed slope (wetting-drying cut cells; the bed falls 0.1 m, a quarter of a layer), the flow is uniform:
+  with nx = 50 the depth is within 1.3e-5 m and the velocity within 2.2e-6 m/s of the normal flow, and the differences
+  halve with each refinement.
+- The log-law friction with `chezy_roughness_length` and k-epsilon gives a flow 4-5 % faster than the Chezy
+  equilibrium (nz = 10 to 40). The conversion is an equivalent roughness within a few percent, not an identity.
+
+References: Chow (1959), Open-Channel Hydraulics, ch. 5 and 9-10; Golub & Van Loan (2013), Matrix Computations, 4th ed.,
+section 2.1.4 (Sherman-Morrison); Casulli & Cheng (1992), Int. J. Numer. Methods Fluids 15, 629-648. Equation numbers
+were not checked.
+
 ## Test-by-test documentation
 
 ### test_verify_state_shapes
@@ -1946,6 +2036,45 @@ Exactness, conservation and positivity tests run for the four variants hydrostat
   runup $R/d=2.831\sqrt{\cot\beta}\thinspace(H/d)^{5/4}$ of Synolakis (1987): 1D within 10 % at $\Delta x=0.05$ m (observed 6.2 %) and
   smaller than at 0.1 m (11.2 %); 2DV non-hydrostatic (12 layers, `tvd2`) within 15 % at 0.1 m (observed 12.9 %). The
   runup converges at first order to the law (1.00 at 0.0125 m); it is set by the wet/dry front.
+
+### Sloped channel tests (`test_sloped_channel.jl`, section 21)
+
+Channel of issue #14: C = 50 m$^{1/2}$/s, H = 4 m, $i_b=10^{-4}$, $\nu=0.02$ m²/s. The slope is a body force unless
+stated otherwise.
+
+- `test_verify_chezy_reference_values_of_issue_14`: $U=1$ m/s and $q=4$ m²/s. $U(T)=\tanh(1)U$. The depth average of
+  `chezy_viscous_profile` is $U$ (Simpson, exact for the parabola). `chezy_roughness_length` inverts
+  $C=(\sqrt g/\kappa)(\ln(H/z_0)-1)$.
+- `test_verify_chezy_column_depth_integrated_balance`: random columns, flux form with the Chezy row:
+  $\Delta Z^\top u=\Delta Z^\top\hat u-\Delta t\gamma\bar u$ and effective depth $H/(1+\Delta t\gamma/H)$ to round-off. The
+  Sherman-Morrison solution equals a dense solve of $A+e_1v^\top$. The missing work vector is rejected.
+- `test_verify_chezy_channel_profile_is_steady_state`: periodic channel, explicit and implicit. The discrete parabola
+  with the Chezy mean stays to 1e-9 (200 steps); a perturbed profile returns to it within 1e-8 after 10 friction times.
+- `test_verify_chezy_spinup_order_in_time`: spin-up from rest against $U_{eq}\tanh(t/T)$ at $t=1000$ s. Observed order
+  1 (explicit) and 2 (implicit) within 0.05.
+- `test_verify_top_row_uniform_flow_with_implicit_vertical_advection`: variable top layer with $h_{top}\ne\Delta z$ and $W\ne0$
+  below it. The explicit top-row correction together with the implicit column keeps a uniform top row unchanged to
+  round-off (before the fix it changed by $\Delta t\,uW(1/\Delta z-1/h_{top})$).
+- `test_verify_level_boundary_keeps_open_channel_equilibrium`: discharge inlet, $\eta_R=0$; variable top layer, fixed
+  grid and wetting-drying step, `upwind1` and `tvd2`. The normal flow stays to 1e-9 for 500 steps (with a closed
+  boundary control volume it grew from round-off to O(1) within 3000 s).
+- `test_verify_level_boundary_converges_to_normal_flow`: from 0.8 times the normal flow, within 1e-8 after 20000 s. Every
+  step closes the volume budget $\Delta V=\Delta t(Q_{in}-Q_{out})$ with the boundary transports, and the kinematic
+  surface condition holds in every column.
+- `test_verify_level_boundary_fills_lake_to_prescribed_level`: no slope, closed inlet. A lake at the boundary level
+  stays at rest to round-off; a lake 0.1 m below it fills to within 1e-4 m in 30000 s.
+- `test_verify_discharge_boundary_transport`: the inflow face carries $q$ to round-off with the thicknesses of time $n$
+  while the inlet level moves.
+- `test_validate_backwater_curve_matches_gradually_varied_flow`: $\eta_R=\pm0.3$ m (M1, M2), variable top layer and
+  wetting-drying step, nx = 50, nz = 8. The steady depth is within 1e-4 m of `chezy_backwater_depth` (observed
+  2-4e-5 m; with the old top-row vertical advection 3.3e-4 and 5.9e-4 m).
+- `test_validate_sloped_bed_channel_normal_flow`: real bed slope in the wetting-drying step (no body force), discharge
+  inlet with the parabolic shape, normal depth at the outlet. Depth and $U(L/2)$ within 1e-4 (relative) of the normal
+  flow.
+- `test_verify_open_boundary_config_checks` and `test_verify_chezy_config_checks`: invalid combinations are rejected.
+  These are `right_level` together with `right_profile`, a non-finite level, explicit vertical terms, the
+  non-hydrostatic mode, `periodic_x`, negative discharge shapes, negative $C$, Chezy with `bed_roughness_length` or
+  k-epsilon, and Chezy on a staircase bed or with wetting and drying without implicit vertical terms.
 
 ## Additional validation scripts and literature basis
 

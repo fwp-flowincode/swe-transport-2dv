@@ -245,7 +245,8 @@ transport (`_density_face_fluxes!`). `dt = 0` (s) gives the semi-discrete MUSCL 
 walls (variable bed), see `BedGeometry`. `vertical = false` leaves out the vertical fluxes (they are then treated
 implicitly, `implicit_vertical_column!`). `faces_given = true`: `ws.vx_face` and `ws.vz_face` already hold the face
 velocities (`vx`, `vz` are ignored); the momentum equations use this with the divergence-free face velocities of
-`_w_at_u_interfaces!` and `_u_at_w_faces!`.
+`_w_at_u_interfaces!` and `_u_at_w_faces!`. `open_right = true`: the outer face of the last control volume carries the
+flux `ws.vx_face[:, nx+1] * phi[:, nx]` instead of none (water-level boundary, see `advection_term_u!`).
 
 WHY the time correction (model passes dt = cfg.dt): the momentum equations are advanced with one forward-Euler step,
 which adds kinetic energy of order (dt^2/2)|A|^2 per step; without the correction the MUSCL/forward-Euler update is
@@ -269,6 +270,7 @@ function _advective_flux_divergence!(
     dt::Real=0.0,
     vertical::Bool=true,
     faces_given::Bool=false,
+    open_right::Bool=false,
 )
     nz, nx = size(phi)
 
@@ -399,6 +401,13 @@ function _advective_flux_divergence!(
         end
     end
 
+    if open_right && !periodic_x
+        # open outer face (water-level boundary): the flux of the face velocity ws.vx_face[:, nx+1] with the value of
+        # the last point (zero gradient; first order like the other boundary points of tvd2, whose slope is zero)
+        @inbounds for k in 1:nz
+            ws.flux_x[k, nx + 1] = ws.vx_face[k, nx + 1] * phi[k, nx]
+        end
+    end
     vertical || fill!(ws.flux_z, 0.0)
     @inbounds for i in 1:nx
         for k in 1:nz
@@ -420,6 +429,11 @@ end
 # On the fixed grid the uncorrected top row advected a surface-wave perturbation at about (nz + 1) U (the missing top
 # flux U w_s with w_s = -H du/dx), which made upwind1 unstable from C = U dt/dx = 0.3 with nz = 8 and tvd2 from C = 0.2
 # with nz = 2 (issue #37). With one layer the top row is the only row and the correction applies as well.
+# `h_top_vertical` (m, per u-point; implicit vertical terms with the variable top layer): the thickness that divides the
+# vertical part of div(v). WHY: the implicit column (implicit_vertical_column!) advects the top row vertically with
+# -W u_up / h_top, so the correction must add +u W / h_top for a uniform phi to stay unchanged; with dz instead, a
+# uniform flow with W != 0 below the surface layer (any gradually varied flow) had the spurious tendency
+# u W (1/dz - 1/h_top), which put the backwater curve of issue #14 0.1-0.2 % of the rise too high, growing with nz.
 # Source: v.grad(phi) = div(v*phi) - phi*div(v); z-layer free-surface treatment as in Casulli & Walters (2000),
 # Int. J. Numer. Methods Fluids 32, 331-348 (equation numbers not checked).
 function _top_row_advective_form!(
@@ -429,13 +443,16 @@ function _top_row_advective_form!(
     dz::Real,
     ws::AdvectionWorkspace;
     periodic_x::Bool=false,
+    open_right::Bool=false,
+    h_top_vertical::Union{Nothing,AbstractVector{<:Real}}=nothing,
 )
     nz, nx = size(phi)
 
     @inbounds for i in 1:nx
         volume_flux_in = i >= 2 ? ws.vx_face[nz, i] : (periodic_x ? ws.vx_face[nz, 1] : 0.0)
-        volume_flux_out = i + 1 <= nx ? ws.vx_face[nz, i + 1] : (periodic_x ? ws.vx_face[nz, nx + 1] : 0.0)
-        div_v = (volume_flux_out - volume_flux_in) / dx - ws.vz_face[nz, i] / dz   # zero volume flux through the top face
+        volume_flux_out = i + 1 <= nx ? ws.vx_face[nz, i + 1] : ((periodic_x || open_right) ? ws.vx_face[nz, nx + 1] : 0.0)
+        h_vertical = h_top_vertical === nothing ? dz : h_top_vertical[i]
+        div_v = (volume_flux_out - volume_flux_in) / dx - ws.vz_face[nz, i] / h_vertical   # no volume flux through the top face
         out[nz, i] -= phi[nz, i] * div_v
     end
 
@@ -456,6 +473,8 @@ function advection_term_u!(
     active::Union{Nothing,AbstractMatrix{Bool}}=nothing,
     dt::Real=0.0,
     vertical::Bool=true,
+    open_right::Bool=false,
+    h_top_vertical::Union{Nothing,AbstractVector{<:Real}}=nothing,
 )
     # ws_interp is no longer needed here (the face velocities come from u and w directly); kept for the public signature
     _w_at_u_interfaces!(ws_adv.vz_face, w; periodic_x=periodic_x)
@@ -466,16 +485,35 @@ function advection_term_u!(
         @views out[:, nx + 1] .= out[:, 1]
     else
         _face_velocity_x!(ws_adv.vx_face, u)
-        _advective_flux_divergence!(out, u, u, w, dx, dz, scheme, ws_adv; active=active, dt=dt, vertical=vertical, faces_given=true)
+        if open_right
+            _open_right_face_velocity!(ws_adv.vx_face, u)
+        end
+        _advective_flux_divergence!(out, u, u, w, dx, dz, scheme, ws_adv; active=active, dt=dt, vertical=vertical, faces_given=true, open_right=open_right)
     end
     if top_row_advective_form
         if periodic_x
             _top_row_advective_form!(@view(out[:, 1:(size(u, 2) - 1)]), @view(u[:, 1:(size(u, 2) - 1)]), dx, dz, ws_adv; periodic_x=true)
         else
-            _top_row_advective_form!(out, u, dx, dz, ws_adv)
+            _top_row_advective_form!(out, u, dx, dz, ws_adv; open_right=open_right, h_top_vertical=h_top_vertical)
         end
     end
     return out
+end
+
+# Velocity (m/s) of the outer face of the last u control volume at an open (water-level) boundary,
+# vx_face[k, nxp1+1] = 1.5 u[k, nxp1] - 0.5 u[k, nxp1-1]: the face velocity of a ghost cell beyond the boundary with the
+# w of the last cell (as _w_at_u_interfaces! takes it one-sided), whose layer continuity then gives the ghost face
+# velocity 2 u_b - u_{nxp1-1}; averaged with u_b it keeps the boundary control volume divergence-free,
+#   (vx_out - vx_in) / dx + (vz_top - vz_bot) / dz = (u_b - u_{nxp1-1}) / dx - (u_b - u_{nxp1-1}) / dx = 0,
+# like the interior ones (Arakawa C-grid, see _w_at_u_interfaces!). WHY: with a closed outer face (or with the tendency
+# of the last interior face copied to the boundary face) the boundary face of a channel at equilibrium was unstable,
+# a perturbation of the top layer grew by about 0.012 1/s independently of dt (issue #14).
+function _open_right_face_velocity!(vx_face::AbstractMatrix{<:Real}, u::AbstractMatrix{<:Real})
+    nz, nxp1 = size(u)
+    @inbounds for k in 1:nz
+        vx_face[k, nxp1 + 1] = nxp1 >= 2 ? 1.5 * u[k, nxp1] - 0.5 * u[k, nxp1 - 1] : u[k, nxp1]
+    end
+    return vx_face
 end
 
 function advection_term_u(

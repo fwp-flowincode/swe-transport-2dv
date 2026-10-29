@@ -87,6 +87,24 @@ the height `z1` (m) of the lowest velocity point; 0 for z0 <= 0 (free-slip bed).
 """
 bed_friction_coefficient(z0::Real, z1::Real) = z0 > 0 ? (KE_KARMAN / log(z1 / z0))^2 : 0.0
 
+"""
+    chezy_roughness_length(C, depth; g=9.81) -> Float64
+
+Roughness length z0 (m) of the log law that gives the Chezy coefficient `C` (m^(1/2)/s, > 0) in water of depth `depth`
+(m): the depth average of u(z) = (u_*/kappa) ln(z/z0) over z0 <= z <= H is U = (u_*/kappa)(ln(H/z0) - 1 + z0/H), and
+C = sqrt(g) U / u_* gives, for z0 << H,
+
+    z0 = H exp(-(1 + kappa C / sqrt(g))).
+
+For the log-law friction (`ModelConfig(bed_roughness_length=...)`, e.g. with k-epsilon), which then reproduces the
+Chezy equilibrium if the velocity profile is logarithmic. Example: C = 50, H = 4 m gives z0 = 2.1 mm. Same relation as the
+2D/3D roughness conversion of Delft3D-FLOW (User Manual, section 9.4; equation numbers not checked).
+"""
+function chezy_roughness_length(C::Real, depth::Real; g::Real=9.81)
+    (C > 0 && depth > 0) || throw(ArgumentError("C and depth must be > 0"))
+    return depth * exp(-(1 + KE_KARMAN * C / sqrt(g)))
+end
+
 # Solves the tridiagonal system (lower, diag, upper) x = rhs in place into `sol` (Thomas algorithm; diagonally dominant).
 function _solve_tridiagonal_column!(sol, lower, diag, upper, rhs, n)
     @inbounds begin

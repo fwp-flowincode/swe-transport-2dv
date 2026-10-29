@@ -1,4 +1,5 @@
-# Analytical reference solutions of the shallow-water equations with wetting and drying (issue #31).
+# Analytical reference solutions: shallow-water equations with wetting and drying (issue #31), uniform channel flow
+# with Chezy friction (issue #14).
 
 const CG_NEWTON_TOL = 1e-13          # -, Newton tolerance on the dimensionless hodograph equations
 const CG_NEWTON_MAXITER = 60         # -, Newton iterations before giving up
@@ -145,4 +146,92 @@ function carrier_greenspan_solution(cg::CarrierGreenspanWave, x::Real, t::Real)
     converged || error("carrier_greenspan_solution: Newton did not converge at x = $x m, t = $t s")
     u, _, _, eta, _, _ = _cg_fields(A, s, lam)
     return (eta * Z, u * sqrt(cg.g * Z), true)
+end
+
+# Uniform open-channel flow with Chezy friction (issue #14). The channel slope i_b (-, > 0: the bed falls in +x) is the
+# body force g i_b of ModelConfig(body_force_x) or a real bed slope; c_f = g / C^2 (-). Depth-integrated momentum
+# balance of a uniform flow U (m/s, depth-averaged) in water of depth H (m):
+#   dU/dt = g i_b - c_f |U| U / H.
+
+"""
+    chezy_equilibrium_velocity(C, depth, slope) -> Float64
+
+Velocity U = C sqrt(H i_b) (m/s) of uniform flow (normal flow) with the Chezy coefficient `C` (m^(1/2)/s), water depth
+`depth` H (m) and channel slope `slope` i_b (-, >= 0); the discharge per unit width is q = U H (m^2/s).
+Example (issue #14): C = 50, H = 4 m, i_b = 1e-4 gives U = 1 m/s, q = 4 m^2/s. Source: Chow (1959), Open-Channel
+Hydraulics, ch. 5 (Chezy formula).
+"""
+function chezy_equilibrium_velocity(C::Real, depth::Real, slope::Real)
+    (C > 0 && depth > 0 && slope >= 0) || throw(ArgumentError("C, depth must be > 0 and slope >= 0"))
+    return C * sqrt(depth * slope)
+end
+
+"""
+    chezy_spinup_velocity(t, C, depth, slope; g=9.81) -> Float64
+
+Depth-averaged velocity U(t) (m/s) of a uniform channel flow that starts from rest at t = 0 (s): the solution of
+dU/dt = g i_b - c_f U^2 / H, U(0) = 0, with c_f = g / C^2,
+
+    U(t) = U_eq tanh(t / T),   U_eq = C sqrt(H i_b),   T = H / (c_f U_eq) = C sqrt(H / i_b) / g.
+
+Arguments as in `chezy_equilibrium_velocity`; T = 1019 s for C = 50, H = 4 m, i_b = 1e-4.
+"""
+function chezy_spinup_velocity(t::Real, C::Real, depth::Real, slope::Real; g::Real=9.81)
+    t >= 0 || throw(ArgumentError("t must be >= 0"))
+    U_eq = chezy_equilibrium_velocity(C, depth, slope)
+    U_eq > 0 || return 0.0
+    T = depth * C^2 / (g * U_eq)
+    return U_eq * tanh(t / T)
+end
+
+"""
+    chezy_viscous_profile(z, C, depth, slope, nu; g=9.81) -> Float64
+
+Velocity u(z) (m/s) at the height `z` (m, 0 <= z <= H above the bed) of uniform channel flow with the constant
+vertical viscosity `nu` (m^2/s), the Chezy stress c_f U^2 at the bed and no stress at the surface: the shear stress
+nu du/dz = g i_b (H - z) gives the parabola
+
+    u(z) = U + (g i_b / nu) (H z - z^2 / 2 - H^2 / 3),   U = C sqrt(H i_b) its depth average.
+
+The slip velocity at the bed is u(0) = U - g i_b H^2 / (3 nu); it is negative (the lowest layer reverses) for
+nu < g i_b H^2 / (3 U), i.e. the depth-averaged Chezy law needs a turbulent viscosity (ModelConfig(chezy_coefficient)).
+On the layer grid the discrete steady state equals this parabola at the layer centres up to a constant (the central
+differences of a quadratic are exact), which `test_verify_chezy_channel_profile_*` uses.
+"""
+function chezy_viscous_profile(z::Real, C::Real, depth::Real, slope::Real, nu::Real; g::Real=9.81)
+    nu > 0 || throw(ArgumentError("nu must be > 0"))
+    U = chezy_equilibrium_velocity(C, depth, slope)
+    return U + g * slope / nu * (depth * z - z^2 / 2 - depth^2 / 3)
+end
+
+const GVF_RK4_STEPS_PER_METRE = 4.0   # 1/m, RK4 steps of chezy_backwater_depth per metre of integration distance
+
+"""
+    chezy_backwater_depth(x, q, C, slope, x_end, depth_end; g=9.81) -> Float64
+
+Water depth h(x) (m) of steady gradually varied flow with the discharge `q` (m^2/s), Chezy coefficient `C`
+(m^(1/2)/s) and channel slope `slope` i_b (-), for the depth `depth_end` (m) prescribed at the downstream end `x_end`
+(m, x <= x_end): the solution of the gradually-varied-flow equation (depth-uniform velocity, Boussinesq coefficient 1)
+
+    dh/dx = (i_b - i_f) / (1 - Fr^2),   i_f = q^2 / (C^2 h^3),   Fr^2 = q^2 / (g h^3),
+
+integrated upstream from x_end with the classical RK4 method (GVF_RK4_STEPS_PER_METRE steps per metre, fourth order;
+the profile is smooth for subcritical flow, Fr < 1). depth_end above the normal depth gives the M1 (backwater) curve,
+below it the M2 (drawdown) curve. Source: Chow (1959), Open-Channel Hydraulics, ch. 9-10.
+"""
+function chezy_backwater_depth(x::Real, q::Real, C::Real, slope::Real, x_end::Real, depth_end::Real; g::Real=9.81)
+    x <= x_end || throw(ArgumentError("x must be <= x_end (integration upstream)"))
+    f(h) = (slope - q^2 / (C^2 * h^3)) / (1 - q^2 / (g * h^3))
+    q^2 / (g * depth_end^3) < 1 || throw(ArgumentError("the flow at x_end must be subcritical"))
+    n = max(1, ceil(Int, GVF_RK4_STEPS_PER_METRE * (x_end - x)))
+    step = (x - x_end) / n   # m, negative
+    h = float(depth_end)
+    for _ in 1:n
+        k1 = f(h)
+        k2 = f(h + step / 2 * k1)
+        k3 = f(h + step / 2 * k2)
+        k4 = f(h + step * k3)
+        h += step / 6 * (k1 + 2k2 + 2k3 + k4)
+    end
+    return h
 end

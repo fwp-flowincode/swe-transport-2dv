@@ -197,7 +197,9 @@ function _wd_face_thicknesses!(model::Model, wd::WetDryState)
     u = model.state.u
     nx = cfg.nx
     @inbounds for f in 1:(nx + 1)
-        if f == 1 || f == nx + 1
+        if f == nx + 1 && model.x_boundary_eta_right !== nothing
+            zeta_f = cfg.depth + model.x_boundary_eta_right   # water-level boundary: the level of the face is known
+        elseif f == 1 || f == nx + 1
             zeta_f = _wd_level(model, f == 1 ? 1 : nx)
         else
             s = zero(eltype(u))
@@ -276,13 +278,16 @@ end
 # Htilde_R (face thicknesses averaged to cells L and R); see `_wd_advection_tendency`.
 # PERF: independent of the layer, so the predictor computes them once per face (O(nx nz) instead of O(nx nz^2)).
 function _wd_advection_depth_totals(wd::WetDryState, f::Int)
+    nx = size(wd.h, 2)
+    R = min(f, nx)                  # right boundary face (water-level boundary): ghost cell = last cell
+    fR = min(f + 1, size(wd.hf, 2))
     Hbar = 0.0
     HtL = 0.0
     HtR = 0.0
     @inbounds for kk in axes(wd.h, 1)
-        Hbar += 0.5 * (wd.h[kk, f - 1] + wd.h[kk, f])
+        Hbar += 0.5 * (wd.h[kk, f - 1] + wd.h[kk, R])
         HtL += 0.5 * (wd.hf[kk, f - 1] + wd.hf[kk, f])
-        HtR += 0.5 * (wd.hf[kk, f] + wd.hf[kk, f + 1])
+        HtR += 0.5 * (wd.hf[kk, f] + wd.hf[kk, fR])
     end
     return Hbar, HtL, HtR
 end
@@ -324,7 +329,9 @@ function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, s
     nz = model.config.nz
     nxp1 = model.config.nx + 1
     dx = model.dx
-    L, R = f - 1, f
+    # right boundary face (f = nx + 1, water-level boundary): the ghost cell beyond it has the thicknesses and w of the
+    # last cell and the velocity of the boundary face (zero gradient), so the cell R terms vanish (aR = 0 below)
+    L, R = f - 1, min(f, nxp1 - 1)
     hbar = 0.5 * (wd.h[k, L] + wd.h[k, R])
     hbar > WD_EMPTY_CELL_THICKNESS || return 0.0
     uf = u[k, f]
@@ -336,9 +343,12 @@ function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, s
         # advective velocities of cells L and R (m/s)
         Hbar, HtL, HtR = depth_totals
         htL = 0.5 * (wd.hf[k, f - 1] + wd.hf[k, f])
-        htR = 0.5 * (wd.hf[k, f] + wd.hf[k, f + 1])
         aL = htL > 0.0 ? 0.5 * (wd.q[k, f - 1] + wd.q[k, f]) / htL * HtL / Hbar : 0.0
-        aR = htR > 0.0 ? 0.5 * (wd.q[k, f] + wd.q[k, f + 1]) / htR * HtR / Hbar : 0.0
+        aR = 0.0
+        if f < nxp1
+            htR = 0.5 * (wd.hf[k, f] + wd.hf[k, f + 1])
+            aR = htR > 0.0 ? 0.5 * (wd.q[k, f] + wd.q[k, f + 1]) / htR * HtR / Hbar : 0.0
+        end
 
         # horizontal
         h2 = second && open_h(f - 2) && open_h(f - 1) && open_h(f + 1) && open_h(f + 2)
@@ -448,7 +458,7 @@ function _wd_implicit_vertical!(model::Model, wd::WetDryState, f::Int)
         return nothing
     end
     m = khi - klo + 1
-    L, R = f - 1, f
+    L, R = f - 1, min(f, cfg.nx)   # right boundary face of a water-level boundary: w and h of the last cell
     @inbounds for j in 1:m
         k = klo + j - 1
         col[j, 3] = ws.u_hat[k, f]
@@ -464,9 +474,19 @@ function _wd_implicit_vertical!(model::Model, wd::WetDryState, f::Int)
         z1 = max(0.5 * wd.hf[klo, f], WD_FRICTION_Z1_MIN_FACTOR * cfg.bed_roughness_length)
         gamma = bed_friction_coefficient(cfg.bed_roughness_length, z1) * abs(ws.u_old[klo, f])
     end
+    gamma_mean = 0.0   # m/s, Chezy: g |U^n| / C^2 with the depth-averaged velocity of time n over the open layers
+    if cfg.chezy_coefficient > 0.0
+        transport = 0.0
+        depth = 0.0
+        @inbounds for j in 1:m
+            transport += col[j, 4] * ws.u_old[klo + j - 1, f]
+            depth += col[j, 4]
+        end
+        gamma_mean = cfg.g / cfg.chezy_coefficient^2 * abs(transport / depth)
+    end
     implicit_vertical_column!(view(col, :, 1), view(col, :, 2), view(col, :, 3), view(col, :, 4), view(col, :, 5),
         view(col, :, 6), gamma, cfg.dt, m, view(col, :, 7), view(col, :, 8), view(col, :, 9); advective=true,
-        h_adv=view(col, :, 10))
+        h_adv=view(col, :, 10), gamma_mean=gamma_mean, zprime=view(col, :, 11))
     H = 0.0
     @inbounds for j in 1:m
         k = klo + j - 1
@@ -492,8 +512,21 @@ function _wd_boundary_velocities!(model::Model, wd::WetDryState, u::AbstractMatr
     @inbounds for k in 1:nz
         wet_left = wd.hf[k, 1] > 0.0
         u[k, 1] = (left === nothing || !wet_left) ? 0.0 : (left isa Real ? left : left[k])
+    end
+    if model.x_boundary_q_left !== nothing
+        # discharge boundary: the shape scaled with the face layer thicknesses of time n (dry layers carry no flow)
+        transport = 0.0
+        @inbounds for k in 1:nz
+            transport += wd.hf[k, 1] * u[k, 1]
+        end
+        transport > 0.0 || throw(DomainError(transport, "left_discharge: the inflow face is dry"))
+        @views u[:, 1] .*= model.x_boundary_q_left / transport
+    end
+    @inbounds for k in 1:nz
         wet_right = wd.hf[k, nxp1] > 0.0
-        if right_profile !== nothing && wet_right
+        if model.x_boundary_eta_right !== nothing
+            # water-level boundary: u of the boundary face comes from its own momentum equation (predictor)
+        elseif right_profile !== nothing && wet_right
             u[k, nxp1] = right_profile[k]
         elseif model.x_boundary_u_right_open && wet_right
             u[k, nxp1] = u[k, nxp1 - 1]
@@ -619,6 +652,11 @@ function _wd_free_surface_solve!(model::Model, wd::WetDryState)
         a[f] = (f == 1 || f == nx + 1) ? 0.0 : coeff * (cfg.implicit_vertical_terms ? ws.H_face[f] : Hf)
         wd.U_hat[f] = U
     end
+    # water-level boundary: face nx + 1 couples column nx to the prescribed level half a cell away (_right_level_slope);
+    # (P + T) stays an M-matrix (T only gains diagonal weight) and the flux divergence still reproduces V(eta) >= 0
+    eta_right = model.x_boundary_eta_right
+    eta_right === nothing || (a[nx + 1] = 2.0 * coeff * ws.H_face[nx + 1])
+    eta_beyond = eta_right === nothing ? 0.0 : eta_right   # m, level beyond column nx (irrelevant if a[nx + 1] = 0)
     @inbounds for i in 1:nx
         b[i] = max(H + ws.eta_old[i] - wd.bed[i], 0.0) - dt * (wd.U_hat[i + 1] - wd.U_hat[i]) / dx
         eta[i] = ws.eta_old[i]
@@ -630,7 +668,7 @@ function _wd_free_surface_solve!(model::Model, wd::WetDryState)
         @inbounds for i in 1:nx
             V = max(H + eta[i] - wd.bed[i], 0.0)
             Tl = a[i] * (eta[i] - (i > 1 ? eta[i - 1] : 0.0))
-            Tr = a[i + 1] * (eta[i] - (i < nx ? eta[i + 1] : 0.0))
+            Tr = a[i + 1] * (eta[i] - (i < nx ? eta[i + 1] : eta_beyond))
             F[i] = V + Tl + Tr - b[i]
             scale = H + V + abs(b[i]) + abs(Tl) + abs(Tr)   # m, magnitudes that enter F_i (round-off scale)
             abs(F[i]) <= max(WD_NEWTON_RTOL, eps(eltype(wd.h))) * scale || (converged = false)
@@ -675,7 +713,14 @@ function _wd_free_surface_solve!(model::Model, wd::WetDryState)
         end
     end
     @views st.u[:, 1] .= ws.u_hat[:, 1]
-    @views st.u[:, nx + 1] .= ws.u_hat[:, nx + 1]
+    if eta_right === nothing
+        @views st.u[:, nx + 1] .= ws.u_hat[:, nx + 1]
+    else
+        grad = _right_level_slope(eta, eta_right, dx)
+        @inbounds for k in 1:nz
+            st.u[k, nx + 1] = wd.hf[k, nx + 1] > 0.0 ? ws.u_hat[k, nx + 1] - g * dt * theta * grad * ws.r_vert[k, nx + 1] : 0.0
+        end
+    end
     return nothing
 end
 
@@ -948,12 +993,20 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     implicit = cfg.implicit_vertical_terms
     second_order_momentum = cfg.momentum_advection_scheme == "tvd2"
     damp = cfg.rayleigh_damping > 0.0 ? max(0.0, 1.0 - cfg.rayleigh_damping * dt) : 1.0
-    @inbounds for f in 2:nx
+    # water-level boundary (set_x_inflow_outflow!(...; right_level)): the boundary face nx + 1 has its own momentum
+    # equation with the surface slope to the prescribed level and the baroclinic pressure gradient of face nx
+    eta_right = model.x_boundary_eta_right
+    eta_right === nothing || _check_right_level_config(cfg)
+    fhi = eta_right === nothing ? nx : nx + 1
+    @inbounds for f in 2:fhi
         depth_totals = _wd_advection_depth_totals(wd, f)
-        explicit_surface = explicit_weight * g * (ws.eta_old[f] - ws.eta_old[f - 1]) / dx   # m/s^2
+        boundary = f == nx + 1
+        surface_slope = boundary ? _right_level_slope(ws.eta_old, eta_right, dx) : (ws.eta_old[f] - ws.eta_old[f - 1]) / dx
+        explicit_surface = explicit_weight * g * surface_slope   # m/s^2
+        fp = boundary ? nx : f   # face of the baroclinic pressure gradient (zero gradient at the boundary)
         for k in 1:nz
             if wd.hf[k, f] > 0.0
-                tend = _wd_advection_tendency(model, wd, k, f, second_order_momentum, depth_totals; vertical=!implicit) - (wd.p_anom[k, f] - wd.p_anom[k, f - 1]) / (cfg.rho0 * dx) + cfg.body_force_x
+                tend = _wd_advection_tendency(model, wd, k, f, second_order_momentum, depth_totals; vertical=!implicit) - (wd.p_anom[k, fp] - wd.p_anom[k, fp - 1]) / (cfg.rho0 * dx) + cfg.body_force_x
                 if theta != 1.0
                     tend -= explicit_surface
                     nonhydro && (tend -= explicit_weight * (wd.q_nh[k, f] - wd.q_nh[k, f - 1]) / (cfg.rho0 * dx))
