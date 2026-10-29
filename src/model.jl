@@ -52,9 +52,9 @@ Base.@kwdef mutable struct ModelConfig
     # damping, theta = 1 (the former scheme) first order with a damping of about 2 pi^2 / N per wave period (N steps per
     # period). Stability: theta >= 1/2 for any time step without mean flow; with a mean flow of Froude number Fr and the
     # explicit momentum advection theta >= (1 + 2 Fr) / (2 (1 + Fr)), i.e. Fr <= theta_froude_max(theta).
-    # WHY 0.7: stable up to Fr = 2/3 (theta = 0.55 only up to Fr = 0.11: a periodic channel at Fr = 0.45 grew by 1e7 in
-    # 50 s), damping 0.8 pi^2 / N per period (2.5 times less than theta = 1). See docs/plan_issue_34_theta_scheme.md,
-    # section 3.
+    # WHY 0.7: stable up to Fr = 2/3 (theta = 0.55 only up to Fr = 0.11: a periodic channel at Fr = 0.45 with tvd2 grew
+    # by 36 in 50 s, and decayed from the predicted theta = 0.59 on), damping 0.8 pi^2 / N per period (2.5 times less
+    # than theta = 1). See docs/plan_issue_34_theta_scheme.md, section 3.
     theta::Float64 = 0.7
     # Implicit vertical terms (issue #34, src/implicit_vertical.jl): vertical viscosity, vertical momentum advection
     # (first-order upwind with the interface velocities of time n) and bed friction (linearised, c_b |u^n|) in one
@@ -1320,7 +1320,9 @@ function step_forward!(model::Model)
     theta = cfg.theta
 
     implicit = cfg.implicit_vertical_terms
-    @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=variable_top, periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing, dt=cfg.dt, vertical=!implicit)
+    # WHY top_row_advective_form=true also on the fixed grid: the grid top carries w = d(eta)/dt but no momentum flux,
+    # so the flux form alone advects the top row at about (nz + 1) U (issue #37, _top_row_advective_form!)
+    @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=true, periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing, dt=cfg.dt, vertical=!implicit)
     @timeit model.timers "step/advection_w" advection_term_w!(ws.adv_w, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_w_ws, ws.interpolation_ws, cfg.periodic_x; active=masked ? geo.w_active : nothing, dt=cfg.dt)
 
     @timeit model.timers "step/hydrostatic_predictor" begin

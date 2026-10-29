@@ -186,6 +186,42 @@ function _face_velocity_x!(vx_face::AbstractMatrix{<:Real}, vx::AbstractMatrix{<
     return vx_face
 end
 
+# Vertical velocity (m/s) at the interfaces of the u control volumes, vz_face[k, i] = (w[k, i-1] + w[k, i]) / 2 at u-point
+# i (between cells i-1 and i; one-sided at the closed outer walls, across the seam with periodic_x). vz_face: (nz+1) x
+# (nx+1), w: (nz+1) x nx.
+# WHY not the w of the layer centres averaged back to the interfaces ((w[k-1] + 2 w[k] + w[k+1]) / 4): only the plain
+# horizontal average makes the u control volume discretely divergence-free with the face velocities of _face_velocity_x!,
+#   ((u[i+1] + u[i]) - (u[i] + u[i-1])) / (2 dx) + (vz_face[k+1] - vz_face[k]) / dz = 0   (layer continuity),
+# so that the flux form div(v u) equals the advective form v.grad(u). With the vertical smoothing a zero-transport mode
+# that alternates over the layers was advected at about 2U with a central part (unconditionally unstable with forward
+# Euler; tvd2 grew at C = 0.1 with nz = 8, issue #37). Arakawa C-grid momentum flux: Arakawa & Lamb (1977), Methods
+# Comput. Phys. 17, 173-265 (equation numbers not checked).
+function _w_at_u_interfaces!(vz_face::AbstractMatrix{<:Real}, w::AbstractMatrix{<:Real}; periodic_x::Bool=false)
+    nzp1, nx = size(w)
+    @inbounds for k in 1:nzp1
+        vz_face[k, 1] = periodic_x ? 0.5 * (w[k, nx] + w[k, 1]) : w[k, 1]
+        for i in 2:nx
+            vz_face[k, i] = 0.5 * (w[k, i - 1] + w[k, i])
+        end
+        vz_face[k, nx + 1] = periodic_x ? vz_face[k, 1] : w[k, nx]
+    end
+    return vz_face
+end
+
+# Horizontal velocity (m/s) at the side faces of the w control volumes, vx_face[k, i] = (u[k-1, i] + u[k, i]) / 2 at
+# u-point i and interface k (the layer itself at the bed and the top interface). vx_face: (nz+1) x (nx+1), u: nz x (nx+1).
+# WHY: the same discrete continuity for the w control volume (spanning the layers k-1 and k) as _w_at_u_interfaces! for
+# u; the former interpolation via the cell centres smoothed u horizontally twice (issue #37).
+function _u_at_w_faces!(vx_face::AbstractMatrix{<:Real}, u::AbstractMatrix{<:Real})
+    nz, nxp1 = size(u)
+    @inbounds for i in 1:nxp1
+        for k in 1:(nz + 1)
+            vx_face[k, i] = 0.5 * (u[max(k - 1, 1), i] + u[min(k, nz), i])
+        end
+    end
+    return vx_face
+end
+
 function _face_velocity_z!(vz_face::AbstractMatrix{<:Real}, vz::AbstractMatrix{<:Real})
     nz, nx = size(vz)
     @inbounds for i in 1:nx
@@ -207,7 +243,9 @@ grid points, with the point velocities `vx`, `vz` (m/s) averaged to the faces. `
 `phi_up + 0.5 (1 - c) s_up` with the face Courant number c = |v| dt/dx (resp. dz) -- the same scheme as the density
 transport (`_density_face_fluxes!`). `dt = 0` (s) gives the semi-discrete MUSCL flux. `active`: points next to solid
 walls (variable bed), see `BedGeometry`. `vertical = false` leaves out the vertical fluxes (they are then treated
-implicitly, `implicit_vertical_column!`).
+implicitly, `implicit_vertical_column!`). `faces_given = true`: `ws.vx_face` and `ws.vz_face` already hold the face
+velocities (`vx`, `vz` are ignored); the momentum equations use this with the divergence-free face velocities of
+`_w_at_u_interfaces!` and `_u_at_w_faces!`.
 
 WHY the time correction (model passes dt = cfg.dt): the momentum equations are advanced with one forward-Euler step,
 which adds kinetic energy of order (dt^2/2)|A|^2 per step; without the correction the MUSCL/forward-Euler update is
@@ -230,6 +268,7 @@ function _advective_flux_divergence!(
     active::Union{Nothing,AbstractMatrix{Bool}}=nothing,
     dt::Real=0.0,
     vertical::Bool=true,
+    faces_given::Bool=false,
 )
     nz, nx = size(phi)
 
@@ -237,8 +276,10 @@ function _advective_flux_divergence!(
         throw(ArgumentError("Unsupported advection scheme '$(scheme)'"))
     end
 
-    _face_velocity_x!(ws.vx_face, vx; periodic_x=periodic_x)
-    _face_velocity_z!(ws.vz_face, vz)
+    if !faces_given
+        _face_velocity_x!(ws.vx_face, vx; periodic_x=periodic_x)
+        _face_velocity_z!(ws.vz_face, vz)
+    end
 
     if scheme == "upwind1"
         @inbounds for k in 1:nz
@@ -368,14 +409,17 @@ function _advective_flux_divergence!(
     return out
 end
 
-# Top-row correction to the advective-form momentum tendency for a variable-thickness top layer.
+# Top-row correction to the advective-form momentum tendency, for the variable top layer and for the fixed grid.
 #
 # WHY: the flux-form tendency div(v*phi) equals v.grad(phi) only if div(v) = 0 for the same discrete fluxes. With a
-# moving free surface the top-layer control volume has div(v) = -(d eta/dt)/h (its volume changes), and the top face
-# carries no flux (material surface). Subtracting phi*div(v), built from the very same face velocities and the same
-# zero-flux conventions as _advective_flux_divergence!, restores the advective form in the top row, so a uniform phi
-# has zero tendency. It is applied to the top row only: below it div(v) vanishes up to interpolation error and the
-# validated legacy scheme is left untouched.
+# moving free surface the top-row control volume has div(v) = -(d eta/dt)/h (variable top layer: its volume changes;
+# fixed grid, h = dz: the grid top carries w = d(eta)/dt), while the top face carries no momentum flux. Subtracting
+# phi*div(v), built from the very same face velocities and the same zero-flux conventions as
+# _advective_flux_divergence!, restores the advective form in the top row, so a uniform phi has zero tendency. Below
+# the top row div(v) vanishes to round-off (divergence-free face velocities, _w_at_u_interfaces!).
+# On the fixed grid the uncorrected top row advected a surface-wave perturbation at about (nz + 1) U (the missing top
+# flux U w_s with w_s = -H du/dx), which made upwind1 unstable from C = U dt/dx = 0.3 with nz = 8 and tvd2 from C = 0.2
+# with nz = 2 (issue #37). With one layer the top row is the only row and the correction applies as well.
 # Source: v.grad(phi) = div(v*phi) - phi*div(v); z-layer free-surface treatment as in Casulli & Walters (2000),
 # Int. J. Numer. Methods Fluids 32, 331-348 (equation numbers not checked).
 function _top_row_advective_form!(
@@ -387,9 +431,6 @@ function _top_row_advective_form!(
     periodic_x::Bool=false,
 )
     nz, nx = size(phi)
-    if nz < 2
-        return out
-    end
 
     @inbounds for i in 1:nx
         volume_flux_in = i >= 2 ? ws.vx_face[nz, i] : (periodic_x ? ws.vx_face[nz, 1] : 0.0)
@@ -416,13 +457,16 @@ function advection_term_u!(
     dt::Real=0.0,
     vertical::Bool=true,
 )
-    _interpolate_w_to_u!(ws_interp.w_u, w, ws_interp.w_center; periodic_x=periodic_x)
+    # ws_interp is no longer needed here (the face velocities come from u and w directly); kept for the public signature
+    _w_at_u_interfaces!(ws_adv.vz_face, w; periodic_x=periodic_x)
     if periodic_x
         nx = size(u, 2) - 1
-        _advective_flux_divergence!(@view(out[:, 1:nx]), @view(u[:, 1:nx]), @view(u[:, 1:nx]), @view(ws_interp.w_u[:, 1:nx]), dx, dz, scheme, ws_adv, true; dt=dt, vertical=vertical)
+        _face_velocity_x!(ws_adv.vx_face, @view(u[:, 1:nx]); periodic_x=true)
+        _advective_flux_divergence!(@view(out[:, 1:nx]), @view(u[:, 1:nx]), u, w, dx, dz, scheme, ws_adv, true; dt=dt, vertical=vertical, faces_given=true)
         @views out[:, nx + 1] .= out[:, 1]
     else
-        _advective_flux_divergence!(out, u, u, ws_interp.w_u, dx, dz, scheme, ws_adv; active=active, dt=dt, vertical=vertical)
+        _face_velocity_x!(ws_adv.vx_face, u)
+        _advective_flux_divergence!(out, u, u, w, dx, dz, scheme, ws_adv; active=active, dt=dt, vertical=vertical, faces_given=true)
     end
     if top_row_advective_form
         if periodic_x
@@ -464,8 +508,10 @@ function advection_term_w!(
     active::Union{Nothing,AbstractMatrix{Bool}}=nothing,
     dt::Real=0.0,
 )
-    _interpolate_u_to_w!(ws_interp.u_w, u, ws_interp.u_center)
-    _advective_flux_divergence!(out, w, ws_interp.u_w, w, dx, dz, scheme, ws_adv, periodic_x; active=active, dt=dt)
+    # ws_interp is no longer needed here (see advection_term_u!); kept for the public signature
+    _u_at_w_faces!(ws_adv.vx_face, u)
+    _face_velocity_z!(ws_adv.vz_face, w)   # (w[k-1] + w[k]) / 2 at the layer centres: the w control volume's top/bottom
+    _advective_flux_divergence!(out, w, u, w, dx, dz, scheme, ws_adv, periodic_x; active=active, dt=dt, faces_given=true)
     return out
 end
 

@@ -22,7 +22,9 @@ Model
 - Hydrostatic or non-hydrostatic pressure. The non-hydrostatic correction uses a pressure
   projection, with a spectral (DCT) or sparse solver.
 - Semi-implicit free surface (Casulli & Cheng 1992 type), theta scheme (Casulli & Cattani 1994; `theta = 0.7` by default, stable for Froude numbers up to `theta_froude_max(theta)` = 2/3; see docs/TESTS_TECHNICAL_DOCUMENTATION.md, section 19).
-- Momentum advection: second-order TVD (MUSCL/MC limiter) or first-order upwind.
+- Momentum advection: second-order TVD (MUSCL/MC limiter) or first-order upwind, in flux form with divergence-free
+  C-grid face velocities; stable with a mean flow up to the advective Courant number 1 (issue #37; see
+  docs/TESTS_TECHNICAL_DOCUMENTATION.md, section 20).
 - Density advection (`transport_advection_scheme`): conservative first-order upwind (default) or
   second-order TVD (flux-limited Lax-Wendroff, MC limiter).
 - Variable bed (`bed_level`): a bed level per column on the z-level grid (staircase), e.g. sills and

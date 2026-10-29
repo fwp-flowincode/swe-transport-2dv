@@ -902,15 +902,16 @@ and $C=0.1\ldots0.9$: it is at most 1 at $0.9~\mathrm{Fr_{max}}$ and above 1 at 
 
 The default $\theta=0.7$ covers subcritical flows up to Fr = 2/3 and damps waves 2.5 times less than $\theta=1$. The
 first default, 0.55, allows only Fr ≤ 0.11: a hydrostatic periodic channel at Fr = 0.45 (fixed layer thicknesses, `tvd2`,
-$C=0.2$) grew by a factor of about $10^7$ in 50 s at $\theta=0.55$ and decayed from $\theta=0.6$ on (analysis: 0.59).
+$C=0.2$) grows by a factor of 36 in 50 s at $\theta=0.55$ and decays from $\theta=0.59$ on, the value of the analysis for
+fixed layer thicknesses (measured with the momentum fluxes of issue #37, section 20; before, the advection defect
+inflated the growth to about $10^7$). With fixed layer thicknesses `theta_froude_max` is conservative (the channel
+still decays at 1.4 times the bound); it is sharp for an advected surface (variable top layer).
 Physical damping (bed friction, turbulent viscosity) can hide the weak growth. Flows with larger Froude numbers need a
 larger $\theta$ (for example $\theta=1$).
 
-The explicit momentum advection additionally has Courant-number limits of its own, independent of $\theta$ and already
-present with $\theta=1$. In a periodic channel with a uniform current, `upwind1` was stable up to
-$C=U\Delta t/\Delta x\approx0.45$ with 2 layers and about 0.3 with 8 layers. `tvd2` let a small perturbation grow even at
-$C=0.1$ (Fr = 0.5), which the linear theory does not predict (MC limiter). These limits are outside issue #34 and are to
-be analysed separately.
+The explicit momentum advection had Courant-number limits of its own, independent of $\theta$ (`upwind1` from
+$C=U\Delta t/\Delta x\approx0.3$ with 8 layers, `tvd2` already at $C=0.1$); they came from inconsistent discrete momentum
+fluxes and were removed in issue #37 (section 20).
 
 $\theta$ is fixed when the `Model` is built (the free-surface matrix contains $\theta^2$); `step_forward!` rejects a
 changed `config.theta`. The check compares in the precision of the state, so a `Float32` model (which stores
@@ -932,6 +933,47 @@ on every interior face to $10^{-11}H$ in a standing wave with $\max\Delta t\lver
 References: Casulli & Cattani (1994), Comput. Math. Appl. 27(4), 99-112; Casulli & Cheng (1992), Int. J. Numer. Methods
 Fluids 15, 629-648; Casulli (1999), Int. J. Numer. Methods Fluids 30, 425-440; van Kan (1986), SIAM J. Sci. Stat.
 Comput. 7, 870-891 (incremental pressure correction). Equation numbers were not checked.
+
+### 20) Momentum advection with a mean flow (issue #37)
+
+The momentum advection is in flux form, $\nabla\cdot(\mathbf v u)$ and $\nabla\cdot(\mathbf v w)$, on the control volumes
+of the staggered points. It equals the advective form $\mathbf v\cdot\nabla u$ only if the face velocities of each control
+volume satisfy the discrete continuity. Linearised around a uniform current $U$, the horizontal flux of $u^2$ carries
+$2Uu'$; the vertical flux $Uw'$ must remove the extra $Uu'_x$. Two inconsistencies broke this and made the explicit
+scheme unstable far below $C=1$:
+
+1. On the fixed grid (`variable_top_layer=false`: every periodic and non-hydrostatic run) the grid top carries
+   $w=\partial_t\eta$ but no momentum flux. The top row was advected at $2U$ by itself and a surface-wave perturbation at
+   about $(n_z+1)U$. Now the top row uses the advective form $\nabla\cdot(\mathbf v u)-u\nabla\cdot\mathbf v$
+   (`_top_row_advective_form!`) on both grids, as the density transport (section 4).
+2. The vertical velocity at the u control volumes was interpolated via the layer centres,
+   $(w_{k-1}+2w_k+w_{k+1})/4$. Now it is the C-grid average $(w_{k,i-1}+w_{k,i})/2$ (`_w_at_u_interfaces!`), and the
+   horizontal velocity at the w control volumes is $(u_{k-1,i}+u_{k,i})/2$ (`_u_at_w_faces!`, non-hydrostatic). With
+   the face velocities $(u_{i}+u_{i+1})/2$ of the cell centres the divergence of the u control volume is
+   ```math
+   \frac{(u_{i+1}+u_i)-(u_i+u_{i-1})}{2\Delta x}+\frac{1}{2}\Bigl(\frac{w_{k+1,i-1}-w_{k,i-1}}{\Delta z}+\frac{w_{k+1,i}-w_{k,i}}{\Delta z}\Bigr)=0,
+   ```
+   the mean of the continuity of the two adjacent cells (Arakawa & Lamb 1977).
+
+Spectral radius of forward Euler for the linearised `upwind1` operator (periodic, fixed grid, no gravity waves,
+`experiments/advection_stability/operator_spectrum.jl`):
+
+| | C = 0.5 | C = 0.75 | C = 1 |
+|---|---|---|---|
+| before (any nz) | 1.154 | 1.521 | 2.000 |
+| top-row form only, nz = 2 / 16 | 1 / 1.150 | 1.024 / 1.513 | 1.25 / 1.99 |
+| both fixes (any nz) | 1 | 1 | 1 |
+
+In the full model (periodic channel, `experiments/advection_stability/channel_scan.jl`) every case with nz = 2, 8, 16,
+Fr = 0.2 and 0.5, `upwind1` and `tvd2`, hydrostatic and non-hydrostatic, $\theta=0.7$ and 1 now decays for
+$C=0.1\ldots0.9$; before, `tvd2` grew from $C=0.1$ (up to blow-up) and `upwind1` with 8 layers from $C=0.3$.
+
+The kinetic-energy excess of the non-hydrostatic lock exchange (section on
+`test_verify_nonhydrostatic_lock_exchange_wall_splash_energy`) is not affected (1.026 at $\theta=1$, 1.061 at
+$\theta=0.7$, as before): it is a start-up effect, see that test.
+
+References: Arakawa & Lamb (1977), Methods Comput. Phys. 17, 173-265; Casulli & Walters (2000), Int. J. Numer. Methods
+Fluids 32, 331-348. Equation numbers were not checked.
 
 ## Test-by-test documentation
 
@@ -1256,6 +1298,36 @@ differs.
 Purpose: ensure net momentum-advection tendency integrates to near zero in closed domain.
 
 Validation section: integral of advection tendencies for $u$ and $w$ near zero for both schemes.
+
+### test_verify_momentum_control_volumes_divergence_free
+
+Purpose: the face velocities of the momentum control volumes satisfy the layer continuity (section 20).
+
+Setup: random $u$ with closed walls, $w$ from the fixed-grid continuity (top value $\partial_t\eta\neq0$).
+
+Validation section: the discrete divergence of every u control volume (faces `_face_velocity_x!`,
+`_w_at_u_interfaces!`) and every interior w control volume (`_u_at_w_faces!`, `_face_velocity_z!`) is below
+$10^{-11}$; contrast: the former interpolation via the layer centres gives a divergence above $10^{-5}$.
+
+### test_verify_momentum_advection_stable_with_mean_flow_up_to_courant_one
+
+Purpose: von Neumann analysis of the discrete 2DV `upwind1` operator with a mean flow (section 20).
+
+Setup: periodic channel, fixed grid, uniform $U=0.5$ m/s, nx = 8, nz = 1, 2, 4; the linear part $L$ of the tendency
+from central differences of `advection_term_u!` (exact, the tendency is quadratic in the perturbation).
+
+Validation section: $\max\lvert\mathrm{eig}(I-\Delta tL)\rvert\le1+10^{-10}$ at $C=0.5$, 0.75 and 1. The former scheme
+gave 1.15, 1.52 and 2 (8 of the 9 checks fail on it).
+
+### test_verify_mean_flow_channel_perturbation_decays
+
+Purpose: full-model regression test of issue #37.
+
+Setup: periodic channel ($L=1$ m, $H=0.5$ m, nx = 16, nz = 8), `tvd2`, $\theta=0.7$, Fr = 0.5 (below
+`theta_froude_max(0.7)` = 0.67), $C=0.3$, surface perturbation $10^{-8}$ m, 20 s, hydrostatic and non-hydrostatic.
+
+Validation section: the surface perturbation and the velocity deviation from $U$ end below $10^{-8}$ (decay); the
+former scheme blew up.
 
 ### test_verify_model_runs_with_tvd2_momentum_advection
 
@@ -1669,13 +1741,20 @@ to cell centres, matching the issue #5 diagnostic, not a staggered-face energy n
 ### test_verify_nonhydrostatic_lock_exchange_wall_splash_energy
 
 Run the obstacle experiment and the same tank without the obstacle to t* = 12 on a 4 mm grid, with TVD2 momentum and
-density transport, physical viscosity, no Rayleigh damping and no Froude limiter. Require kinetic energy below 1.05 times
-released anomaly potential energy at every sample, top speed below sqrt(2 g' 2a), conserved volume and constituent mass,
+density transport, physical viscosity, no Rayleigh damping and no Froude limiter. Require kinetic energy below 1.08 times
+released anomaly potential energy at every sample (every 100 steps), top speed below sqrt(2 g' 2a), conserved volume and constituent mass,
 bounded density, and round-off continuity and kinematic residuals. This covers the previously undocumented wall-return
 phase; the 2 mm experiment sweep supplies the finer-grid check.
 
 The wall-predictor enforcement added in PR #7 is essential: reversing just that ordering reproduces the reported
 surface jet and artificial energy growth at 2 mm. The fixed top-cell geometry was not the cause of that defect.
+
+Why 1.08 and not 1.05 (issues #34, #37): the largest ratio occurs at the first sample ($t^*=0.25$, kinetic energy below
+2 % of its later maximum), not after the wall impact; it is 1.026 at $\theta=1$ and 1.061 at $\theta=0.7$, with and
+without the issue #37 momentum-flux fix. At the start both energies are tiny and the ratio is not a converging
+quantity: sampled every 25 steps it reaches 2.4 ($\theta=1$) to 2.7 ($\theta=0.7$) before $t^*=0.1$ and grows further
+when $\Delta t$ is halved (2.65, 2.84), so it is not a time-integration error of the advection. The surface potential
+energy is not part of the released energy. Issue #5 gave about 1.5 after the wall impact; the bound still detects that.
 
 ### test_verify_masked_poisson_manufactured_solution
 

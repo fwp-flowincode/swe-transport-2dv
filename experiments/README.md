@@ -22,6 +22,7 @@ Structure
 - wind_shear/: wind-driven double gyre in a closed two-layer basin ([README](wind_shear/README.md)).
 - vegetation/: rigid and flexible canopies and stems ([README](vegetation/README.md)).
 - theta_scheme/: stability and accuracy of the theta time integration ([README](theta_scheme/README.md)).
+- advection_stability/: stability of the momentum advection with a mean flow, issue #37 ([README](advection_stability/README.md)).
 - validation/: scripts that compare selected cases to analytic/semianalytic references.
 - common/: helper utilities used by case scripts.
 
