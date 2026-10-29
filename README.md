@@ -21,7 +21,7 @@ Model
   (Boussinesq, reference density rho0).
 - Hydrostatic or non-hydrostatic pressure. The non-hydrostatic correction uses a pressure
   projection, with a spectral (DCT) or sparse solver.
-- Semi-implicit free surface (Casulli & Cheng 1992 type), theta scheme (Casulli & Cattani 1994; `theta = 0.7` by default, stable for Froude numbers up to `theta_froude_max(theta)` = 2/3; see docs/TESTS_TECHNICAL_DOCUMENTATION.md, section 19).
+- Semi-implicit free surface (Casulli & Cheng 1992 type), theta scheme (Casulli & Cattani 1994; `theta = 0.7` by default, stable for Froude numbers up to `theta_froude_max(theta)` = 2/3; the model warns once when the surface Froude number of a run exceeds it, `surface_froude_number`, `theta_for_froude`; see docs/TESTS_TECHNICAL_DOCUMENTATION.md, section 19).
 - Momentum advection: second-order TVD (MUSCL/MC limiter) or first-order upwind, in flux form with divergence-free
   C-grid face velocities; stable with a mean flow up to the advective Courant number 1 (issue #37; see
   docs/TESTS_TECHNICAL_DOCUMENTATION.md, section 20).

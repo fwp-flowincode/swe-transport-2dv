@@ -12,6 +12,7 @@ include("test_common.jl")
 const THETA_WAVE_AMPLITUDE_RATIO = 2.5e-5   # -, A/H: nonlinear effects (advection, top-layer thickness) stay negligible
 const THETA_WAVE_MATCH_MAX = 5e-4           # -, max |eta - A Re(G^n) cos(kx)| / A over the run (observed <= 1.1e-4)
 const THETA_ORDER_TOL = 0.25                # -, allowed deviation of the observed temporal order from 1 or 2
+const FROUDE_RECORD_RTOL = 1e-6             # -, uniform channel after one step: U and eta change only by round-off
 
 theta_amplification(mu::Real, theta::Real) = (1 + im * mu * (1 - theta)) / (1 - im * mu * theta)
 
@@ -298,6 +299,79 @@ end
                 step_forward!(model)
             end
             @test maximum(abs.(model.state.rho .- 1000.0)) < TOL_MODEL_IDENTITY
+        end
+    end
+
+    # Surface Froude number and the warning above the theta bound (issue #39).
+    function froude_channel(; U, theta, H=4.0, kwargs...)
+        cfg = ModelConfig(; nx=8, nz=4, length=80.0, depth=H, dt=1.0, theta=theta, periodic_x=true,
+            pressure_solver_method="sparse", variable_top_layer=false, rayleigh_damping=0.0, apply_froude_limiter=false,
+            nu=0.0, write_plots=false, kwargs...)
+        model = Model(cfg)
+        fill!(model.state.rho, 1000.0)
+        refresh_density_metadata!(model)
+        fill!(model.state.u, U)
+        return model
+    end
+
+    @testset "test_verify_theta_for_froude_inverts_bound" begin
+        for theta in (0.5, 0.55, 0.7, 0.75, 0.9)
+            @test theta_for_froude(theta_froude_max(theta)) ≈ theta rtol = TOL_IDENTITY
+        end
+        @test theta_for_froude(0.0) == 0.5
+        @test theta_for_froude(1.0) ≈ 0.75
+        @test theta_for_froude(Inf) == 1.0
+        @test_throws ArgumentError theta_for_froude(-0.1)
+    end
+
+    @testset "test_verify_surface_froude_number_of_uniform_flow" begin
+        # periodic channel: Fr = U / sqrt(g H) on every face
+        U, H, g = 2.0, 4.0, 9.81
+        fr, face = surface_froude_number(froude_channel(; U=U, theta=1.0, H=H))
+        @test fr ≈ U / sqrt(g * H) rtol = TOL_IDENTITY
+        @test 1 <= face <= 9
+        # variable top layer: the depth of the face includes eta (and the top layer dz + eta)
+        model = Model(ModelConfig(nx=4, nz=4, length=40.0, depth=H, dt=1.0, rayleigh_damping=0.0, write_plots=false))
+        model.state.eta .= 0.5
+        fill!(model.state.u, U)
+        @test surface_froude_number(model)[1] ≈ U / sqrt(g * (H + 0.5)) rtol = TOL_IDENTITY
+        # staircase bed: the shallowest faces are the fastest at the same U
+        model = Model(ModelConfig(nx=4, nz=4, length=40.0, depth=H, dt=1.0, bed_level=[0.0, 2.0, 2.0, 0.0], write_plots=false))
+        fill!(model.state.u, U)
+        fr, face = surface_froude_number(model)
+        @test fr ≈ U / sqrt(g * (H - 2.0)) rtol = TOL_IDENTITY
+        @test face in 2:4   # the faces next to and over the raised bed (bed level of a face: the higher neighbour)
+        # wetting and drying: faces shallower than SURFACE_FROUDE_MIN_DEPTH (a shoreline film) are left out
+        model = Model(ModelConfig(nx=4, nz=2, length=40.0, depth=2.0, dt=1.0, wetting_drying=true, bed_level=zeros(4),
+            write_plots=false))
+        wd = model.wetdry
+        fill!(wd.hf, 0.0)
+        wd.hf[:, 2] .= 1.0                                              # 2 m deep
+        wd.hf[1, 4] = 0.5 * SweTransport2DV.SURFACE_FROUDE_MIN_DEPTH   # film
+        model.state.u[:, 2] .= 1.0
+        model.state.u[:, 4] .= 50.0
+        fr, face = surface_froude_number(model)
+        @test fr ≈ 1.0 / sqrt(g * 2.0) rtol = TOL_IDENTITY
+        @test face == 2
+    end
+
+    @testset "test_verify_froude_bound_warning" begin
+        # theta = 0.7 allows Fr <= 2/3: Fr = 0.8 warns once (with the theta it needs, 0.72), Fr = 0.5 does not; theta = 0.75
+        # allows Fr = 0.8, theta = 1 any Fr. The largest Froude number of the run is recorded in the diagnostics.
+        g, H = 9.81, 4.0
+        model = froude_channel(; U=0.8 * sqrt(g * H), theta=0.7)
+        @test_logs (:warn, r"exceeds theta_froude_max.*theta_for_froude\(Fr\) = 0\.72") step_forward!(model)
+        @test_logs step_forward!(model)   # once per model
+        @test model.froude_warning_issued
+        @test compute_diagnostics(model)["surface_froude_max"] ≈ 0.8 rtol = FROUDE_RECORD_RTOL
+        # below the bound, or above it by less than SURFACE_FROUDE_WARNING_MARGIN (theta = 1/2 has the bound 0: small
+        # wave velocities must not warn)
+        margin = SweTransport2DV.SURFACE_FROUDE_WARNING_MARGIN
+        for (Fr, theta) in ((0.5, 0.7), (0.8, 0.75), (2.0, 1.0), (2 / 3 + 0.5 * margin, 0.7), (1e-5, 0.5))
+            model = froude_channel(; U=Fr * sqrt(g * H), theta=theta)
+            @test_logs step_forward!(model)
+            @test !model.froude_warning_issued
+            @test model.max_surface_froude ≈ Fr rtol = FROUDE_RECORD_RTOL
         end
     end
 end

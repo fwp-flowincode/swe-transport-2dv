@@ -35,7 +35,7 @@ export build_poisson_matrix, solve_nonhydrostatic_pressure, PressureCorrectionSo
 export solve!
 export QUIVER_STRIDE, QUIVER_TARGET_COUNT_X, QUIVER_TARGET_COUNT_Z, QUIVER_TARGET_LENGTH_FACTOR
 export plot_state, create_animation, plot_pressure_buoyancy_diagnostics
-export ModelConfig, Model, BarotropicSolver, theta_froude_max, solve_variable_thickness!, BedGeometry
+export ModelConfig, Model, BarotropicSolver, theta_froude_max, theta_for_froude, surface_froude_number, solve_variable_thickness!, BedGeometry
 export top_layer_face_thickness!, advect_density_top_layer!, use_variable_top_layer
 export VegetationStemConfig, VegetationStem, VegetationModel, VegetationPatch, patch_frontal_area
 export KEpsilonState, k_epsilon_step!, turbulent_viscosity_u!, implicit_vertical_diffusion!, bed_friction_coefficient, turbulence_closure
