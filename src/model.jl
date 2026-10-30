@@ -438,15 +438,17 @@ function _refresh_density_metadata!(model::Model)
     copyto!(model.rho_0_w, rho_0_w)
     model.rho_0_w_2d .= reshape(@view(model.rho_0_w[2:end-1]), :, 1)
 
-    # See the Model struct's grad_p_z_reference field docstring for why this is needed. rho_ref is the SAME
-    # column-1 profile rho_0_w is built from (cell-centered, not yet interpolated to faces), repeated across all
-    # columns: p_ref is then exactly x-independent, so its OWN x-gradient (used elsewhere, e.g. grad_p_x) is
-    # already exactly zero without any correction -- only the z-gradient needs this explicit subtraction.
-    # WHY always computed: it is used whenever the projection has a Dirichlet face (nonhydro_surface_dirichlet, or an
-    # open right boundary, issue #49, which can be set after this refresh); a Neumann projection does not use it.
-    rho_ref = repeat(reshape(collect(@view(st.rho[:, 1])), :, 1), 1, cfg.nx)
-    p_ref = solve_hydrostatic_pressure(zeros(eltype(st.rho), cfg.nz, cfg.nx), rho_ref, cfg.g, model.dz)
-    grad_z_c!(model.grad_p_z_reference, p_ref, model.dz)
+    if cfg.nonhydro_surface_dirichlet
+        # See the Model struct's grad_p_z_reference field docstring for why this is needed. rho_ref is the SAME
+        # column-1 profile rho_0_w is built from (cell-centered, not yet interpolated to faces), repeated across all
+        # columns: p_ref is then exactly x-independent, so its OWN x-gradient (used elsewhere, e.g. grad_p_x) is
+        # already exactly zero without any correction -- only the z-gradient needs this explicit subtraction.
+        rho_ref = repeat(reshape(collect(@view(st.rho[:, 1])), :, 1), 1, cfg.nx)
+        p_ref = solve_hydrostatic_pressure(zeros(eltype(st.rho), cfg.nz, cfg.nx), rho_ref, cfg.g, model.dz)
+        grad_z_c!(model.grad_p_z_reference, p_ref, model.dz)
+    else
+        fill!(model.grad_p_z_reference, 0.0)
+    end
 
     return nothing
 end
@@ -900,9 +902,8 @@ x = L (`_wd_face_bed`).
 - free outflow: eta_b from the interior (`_update_free_outflow_level!`): extrapolated for supercritical outflow, an
   implicit radiation condition for the outgoing long wave for subcritical outflow (reflects < 1 % of a long wave). No
   level is prescribed: with the fixed grid the mean level is then a neutral mode.
-Both require `implicit_vertical_terms=true` and no `periodic_x`; in the non-hydrostatic mode (issue #49) the fixed grid
-needs `pressure_solver_method="sparse"` (q = 0 on the open face, `_sync_pressure_solver!`), the wetting-drying step has
-dq/dx = 0 there (`_wd_nonhydrostatic_correction!`). `step_forward!` warns once when the
+Both require `implicit_vertical_terms=true` and no `periodic_x`; in the non-hydrostatic mode (issue #49) the open face
+has dq/dx = 0 (`_check_right_level_config`, `_wd_nonhydrostatic_correction!`). `step_forward!` warns once when the
 Froude number at a boundary does not fit its type (`_check_boundary_froude!`).
 """
 function set_x_inflow_outflow!(
@@ -993,33 +994,17 @@ function _set_right_boundary!(model::Model, open_right::Bool, right_profile, rig
     model.x_boundary_eta_right = right_level === nothing ? nothing : Float64(right_level)
     model.x_boundary_right_free = right_free
     right_free && (model.x_boundary_eta_free = _extrapolated_right_level(model.state.eta))
-    _sync_pressure_solver!(model)
-    return nothing
-end
-
-# Non-hydrostatic mode on the fixed grid: the pressure solver needs the Dirichlet condition q = 0 on the right boundary
-# face exactly when that face is open (water level or free outflow, issue #49); rebuilt when that changes.
-# PERF: one factorization per change of the boundary type, not per step.
-function _sync_pressure_solver!(model::Model)
-    cfg = model.config
-    (cfg.use_hydrostatic || cfg.wetting_drying) && return nothing
-    solver = model.pressure_correction_solver
-    needed = _right_face_computed(model)
-    solver.right_dirichlet == needed && return nothing
-    geo = model.geometry
-    model.pressure_correction_solver = PressureCorrectionSolver((cfg.nz, cfg.nx), model.dx, model.dz;
-        method=cfg.pressure_solver_method, top_dirichlet=cfg.nonhydro_surface_dirichlet, periodic_x=cfg.periodic_x,
-        wet=geo.any_solid ? geo.wet_cell : nothing, right_dirichlet=needed, T=eltype(model.state.u))
     return nothing
 end
 
 # Configuration needed by a right boundary face with its own momentum equation (water level or free outflow).
 function _check_right_level_config(cfg::ModelConfig)
     cfg.periodic_x && throw(ArgumentError("a water-level boundary or free outflow (right_level, right_free) is not possible with periodic_x=true"))
-    # WHY sparse: the non-hydrostatic pressure has a Dirichlet condition (q = 0) on the open boundary face (issue #49),
-    # which the spectral (DCT) solver cannot represent
-    (cfg.use_hydrostatic || cfg.wetting_drying || cfg.pressure_solver_method == "sparse") ||
-        throw(ArgumentError("a water-level boundary or free outflow (right_level, right_free) in the non-hydrostatic mode requires pressure_solver_method=\"sparse\""))
+    # Non-hydrostatic mode (issue #49): dq/dx = 0 on the open face, so the pressure problem keeps the boundary
+    # conditions of a closed basin and any pressure solver works; the boundary face gets no q correction.
+    # WHY not q = 0 on the face: a dispersive wave (Gaussian of width 1 m in 1 m depth) leaving through the free
+    # outflow reflected 4.4 % with q = 0 and 1.3 % with dq/dx = 0 (fixed grid, nonhydro_surface_dirichlet=true; with
+    # the Neumann top both 0.2 %, the wave is then not dispersive); see also _wd_nonhydrostatic_correction!.
     # WHY implicit vertical terms: the boundary face needs its own vertical viscosity and friction (the explicit
     # diffusion_term! leaves the boundary points out); its implicit column provides them
     cfg.implicit_vertical_terms || throw(ArgumentError("a water-level boundary or free outflow (right_level, right_free) requires implicit_vertical_terms=true"))
@@ -1046,7 +1031,6 @@ function clear_x_inflow_outflow!(model::Model)
     model.x_boundary_u_right_profile = nothing
     model.x_boundary_eta_right = nothing
     model.x_boundary_right_free = false
-    _sync_pressure_solver!(model)
     return model
 end
 
@@ -1596,17 +1580,6 @@ function _finish_free_outflow_level!(model::Model)
     return nothing
 end
 
-# Non-hydrostatic pressure gradient at the open right boundary face (issue #49): q = 0 on the face, half a cell from the
-# centre of the last cell, so u[k, nx+1] -= factor (0 - q[k, nx]) / (dx/2); factor (m^3/kg) = dt/rho0 (or theta dt/rho0).
-# Consistent with the Dirichlet row of the pressure matrix (build_poisson_matrix, right_dirichlet).
-function _add_open_boundary_pressure_gradient!(u::AbstractMatrix{<:Real}, q::AbstractMatrix{<:Real}, factor::Real, dx::Real)
-    nxp1 = size(u, 2)
-    @inbounds for k in axes(u, 1)
-        u[k, nxp1] -= factor * (0.0 - q[k, nxp1 - 1]) / (0.5 * dx)
-    end
-    return u
-end
-
 # u[k, f] += factor * slope (* r[k, f], the column response of the implicit vertical terms, if given) on the interior
 # u-faces (all faces with periodic_x); factor in m/s per unit slope.
 function _add_surface_gradient!(u::AbstractMatrix{<:Real}, grad::AbstractVector{<:Real}, factor::Real, periodic_x::Bool;
@@ -1760,7 +1733,6 @@ function step_forward!(model::Model)
     if cfg.periodic_x != model.pressure_correction_solver.periodic_x
         throw(ArgumentError("periodic_x cannot be changed after Model construction"))
     end
-    _sync_pressure_solver!(model)   # the mode (use_hydrostatic) is mutable; the open-boundary condition follows it
     # WHY the type assertion: the Model field is untyped; a concrete solver type avoids boxing and dynamic dispatch
     bsolver = model.barotropic_solver::BarotropicSolver{eltype(st.eta)}
     # WHY the conversion: the solver stores theta in the state precision; Float32(0.7) != 0.7 in Float64
@@ -1841,9 +1813,9 @@ function step_forward!(model::Model)
             # the splitting error is first order in time (dispersive standing wave at theta = 1/2: observed order
             # 1.49 -> 1.27); the incremental form gives order 2.0 (test_verify_theta_nonhydro_dispersive_temporal_order).
             grad_x_c!(ws.grad_pc_x, ws.p_corr, model.dx; periodic_x=cfg.periodic_x)
+            # WHY no term on an open right boundary face (issue #49): dq/dx = 0 there (grad_x_c! is zero on the
+            # boundary faces), see _check_right_level_config
             @. ws.u_hat -= cfg.dt / cfg.rho0 * ws.grad_pc_x
-            # open right boundary (issue #49): q = 0 on the boundary face, half a cell from the last centre
-            open_bc && _add_open_boundary_pressure_gradient!(ws.u_hat, ws.p_corr, cfg.dt / cfg.rho0, model.dx)
         end
 
         if cfg.wind_stress_x != 0.0
@@ -1944,11 +1916,9 @@ function step_forward!(model::Model)
         buoyancy!(ws.buoy, ws.rho_w, model.rho_0_w_2d)
         copyto!(model.last_buoy_w, ws.buoy)
         grad_z_c!(ws.grad_p_z, ws.p_internal, model.dz)
-        if _has_dirichlet(model.pressure_correction_solver)
+        if cfg.nonhydro_surface_dirichlet
             # See the Model struct's grad_p_z_reference field docstring: removes the reference-density profile's
-            # "trivial" contribution before this feeds the projection's right-hand side. With a Dirichlet face (top, or
-            # the open right boundary of issue #49) the projection cannot absorb it in an x-independent pressure: at
-            # the open boundary it became a horizontal gradient of 2e4 Pa over half a cell (u = 18 m/s after a step).
+            # "trivial" contribution before this feeds the Dirichlet-top projection's right-hand side.
             ws.grad_p_z .-= model.grad_p_z_reference
         end
     end
@@ -2076,9 +2046,7 @@ function step_forward!(model::Model)
             grad_z_c!(ws.grad_pc_z, dq, model.dz)
             ws.p_corr .+= dq   # q^{n+1}
 
-            @. ws.u_hat = ws.u_hat - dt_q * (1.0 / cfg.rho0) * ws.grad_pc_x
-            # open right boundary (issue #49): the boundary face is corrected like an interior one, with dq = 0 on it
-            open_bc && _add_open_boundary_pressure_gradient!(ws.u_hat, dq, dt_q / cfg.rho0, model.dx)
+            @. ws.u_hat = ws.u_hat - dt_q * (1.0 / cfg.rho0) * ws.grad_pc_x   # open right boundary face: dq/dx = 0
             # WHY: only INTERIOR w faces (2:end-1) are corrected, same as the legacy Neumann case. With the
             # homogeneous-Neumann condition this correction is exactly zero at the boundary faces (0 and end), so
             # leaving them uncorrected changes nothing there. With the Dirichlet condition the (unapplied) top-face

@@ -830,9 +830,9 @@ arbitrarily thin; the simple condition keeps the system SPD for every geometry. 
 thickness (period error of a standing wave, test_validate_wd_nonhydro_standing_wave_full_dispersion_*).
 For a lake at rest the right-hand side is exactly zero, so q = 0 and nothing changes.
 Open right boundary (water level or free outflow, issue #49): the boundary face is not corrected (dq/dx = 0 there).
-WHY not q = 0 on the face, as on the fixed grid (_add_open_boundary_pressure_gradient!): q of this scheme is zero in the
-surface cell, not at the surface, so it has a part that a Dirichlet condition at the outlet does not match even for long
-waves. Measured with a Gaussian wave of width 1 to 5 m in 1 m depth leaving through a free outflow (reflected amplitude
+WHY not q = 0 on the face: q of this scheme is zero in the surface cell, not at the surface, so it has a part that a
+Dirichlet condition at the outlet does not match even for long waves (the fixed grid has dq/dx = 0 as well, docs
+section 24). Measured with a Gaussian wave of width 1 to 5 m in 1 m depth leaving through a free outflow (reflected amplitude
 relative to a closed boundary): q = 0 on the face 10-29 %, q = 0 one cell beyond 8-21 %, dq/dx = 0 2-5 %.
 """
 function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)

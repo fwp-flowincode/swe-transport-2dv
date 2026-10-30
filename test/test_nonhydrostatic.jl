@@ -170,10 +170,8 @@ include(joinpath(@__DIR__, "test_common.jl"))
         # Dirichlet-top projection (docs section 15, Model struct docstring). This test guards the mechanism directly:
         # a regression here would silently reintroduce the ~1e4x-oversized, physically-meaningless p_corr magnitude
         # that motivated it (found empirically during development; see docs section 15).
-        # It is always computed (issue #49: an open right boundary can be set after the density refresh) but applied only
-        # when the projection has a Dirichlet face; a Neumann projection (this config) does not subtract it.
         cfg_off = ModelConfig(nx=10, nz=8, use_hydrostatic=false)
-        @test !SweTransport2DV._has_dirichlet(Model(cfg_off).pressure_correction_solver)
+        @test all(iszero, Model(cfg_off).grad_p_z_reference)   # not computed unless nonhydro_surface_dirichlet
 
         L, H, rho0, g = 8.0, 4.0, 1000.0, 9.81
         cfg_on = ModelConfig(nx=10, nz=8, length=L, depth=H, use_hydrostatic=false, pressure_solver_method="sparse", nonhydro_surface_dirichlet=true)

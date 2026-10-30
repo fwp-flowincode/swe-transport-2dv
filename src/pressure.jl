@@ -26,12 +26,7 @@ mutable struct PressureCorrectionSolver{T<:Real}
     # Wet cells (nz x nx) of a variable bed with solid cells, or nothing (rectangular domain). With a mask the Poisson
     # problem is solved on the wet cells only (sparse method); solid cells get p' = 0.
     wet::Union{Nothing,BitMatrix}
-    # Dirichlet p' = 0 on the right boundary face (open right boundary, issue #49; sparse method only)
-    right_dirichlet::Bool
 end
-
-# Whether a Dirichlet condition fixes the level of p' (no null space: no gauge pin, no mean removal).
-_has_dirichlet(solver::PressureCorrectionSolver) = solver.top_dirichlet || solver.right_dirichlet
 
 # `top_half_layer=false` (legacy): p = 0 at the centre of the top cell. `top_half_layer=true`: p at the top-cell centre is
 # the weight of the upper half of the top layer, rho_top*g*dz/2 (Pa; rho in kg/m^3, g in m/s^2, dz in m).
@@ -94,7 +89,7 @@ Verification (`test_verify_poisson_matrix_top_dirichlet_matches_manufactured_sol
 `p(z) = C/2*(z^2 - H^2)` solves `p'' = C` on `z in (0,H)` with `p'(0)=0` (Neumann bottom) and `p(H)=0` (Dirichlet top,
 at the domain edge, matching the ghost closure above).
 """
-function build_poisson_matrix(shape::Tuple{Int, Int}, dx::Real, dz::Real; top_dirichlet::Bool=false, periodic_x::Bool=false, wet::Union{Nothing,AbstractMatrix{Bool}}=nothing, right_dirichlet::Bool=false)
+function build_poisson_matrix(shape::Tuple{Int, Int}, dx::Real, dz::Real; top_dirichlet::Bool=false, periodic_x::Bool=false, wet::Union{Nothing,AbstractMatrix{Bool}}=nothing)
     nz, nx = shape
     is_wet(k, i) = wet === nothing || wet[k, i]
     n = nz * nx
@@ -133,8 +128,6 @@ function build_poisson_matrix(shape::Tuple{Int, Int}, dx::Real, dz::Real; top_di
                 if i < nx && is_wet(k, i + 1)
                     push!(row, r); push!(col, idx(k, i + 1)); push!(val, inv_dx2)
                     diag -= inv_dx2
-                elseif i == nx && right_dirichlet
-                    diag -= 2.0 * inv_dx2   # p' = 0 on the right boundary face, half a cell from the centre
                 end
             end
             if k > 1 && is_wet(k - 1, i)
@@ -153,7 +146,7 @@ function build_poisson_matrix(shape::Tuple{Int, Int}, dx::Real, dz::Real; top_di
     end
 
     A = sparse(row, col, val, n, n)
-    if !(top_dirichlet || right_dirichlet)
+    if !top_dirichlet
         pin = _poisson_pin_index(nz, nx, wet)
         A[pin, :] .= 0.0
         A[pin, pin] = 1.0
@@ -186,10 +179,8 @@ method only works on the rectangle (it is still constructed, so that hydrostatic
 `build_poisson_matrix` for the boundary condition and docs section 15 for why a Dirichlet top condition is needed for
 dispersive non-hydrostatic surface waves.
 """
-function PressureCorrectionSolver(shape::Tuple{Int, Int}, dx::Real, dz::Real; method::String="spectral", top_dirichlet::Bool=false, periodic_x::Bool=false, wet::Union{Nothing,BitMatrix}=nothing, right_dirichlet::Bool=false, T::Type{<:Real}=Float64)
+function PressureCorrectionSolver(shape::Tuple{Int, Int}, dx::Real, dz::Real; method::String="spectral", top_dirichlet::Bool=false, periodic_x::Bool=false, wet::Union{Nothing,BitMatrix}=nothing, T::Type{<:Real}=Float64)
     nz, nx = shape
-    right_dirichlet && (method == "sparse" || throw(ArgumentError("an open right boundary in the non-hydrostatic mode requires pressure_solver_method=\"sparse\" (the spectral solver cannot represent a Dirichlet condition)")))
-    right_dirichlet && periodic_x && throw(ArgumentError("right_dirichlet is not possible with periodic_x=true"))
 
     rhs = zeros(T, nz, nx)
     rhs_hat = zeros(T, nz, nx)
@@ -237,11 +228,11 @@ function PressureCorrectionSolver(shape::Tuple{Int, Int}, dx::Real, dz::Real; me
             ifft_x_plan = nothing
         end
 
-        return PressureCorrectionSolver(shape, T(dx), T(dz), method, top_dirichlet, periodic_x, inv_lambda, nothing, nothing, rhs, rhs_hat, rhs_complex, rhs_hat_complex, p_corr, div_tmp, div_z_tmp, rhs_flat, p_corr_flat, dct_plan, idct_plan, fft_x_plan, ifft_x_plan, TimerOutput(), fftw_threads, wet, false)
+        return PressureCorrectionSolver(shape, T(dx), T(dz), method, top_dirichlet, periodic_x, inv_lambda, nothing, nothing, rhs, rhs_hat, rhs_complex, rhs_hat_complex, p_corr, div_tmp, div_z_tmp, rhs_flat, p_corr_flat, dct_plan, idct_plan, fft_x_plan, ifft_x_plan, TimerOutput(), fftw_threads, wet)
     elseif method == "sparse"
-        A = build_poisson_matrix(shape, dx, dz; top_dirichlet=top_dirichlet, periodic_x=periodic_x, wet=wet, right_dirichlet=right_dirichlet)
+        A = build_poisson_matrix(shape, dx, dz; top_dirichlet=top_dirichlet, periodic_x=periodic_x, wet=wet)
         F = lu(A)
-        return PressureCorrectionSolver(shape, T(dx), T(dz), method, top_dirichlet, periodic_x, nothing, A, F, rhs, rhs_hat, rhs_complex, rhs_hat_complex, p_corr, div_tmp, div_z_tmp, rhs_flat, p_corr_flat, nothing, nothing, nothing, nothing, TimerOutput(), 1, wet, right_dirichlet)
+        return PressureCorrectionSolver(shape, T(dx), T(dz), method, top_dirichlet, periodic_x, nothing, A, F, rhs, rhs_hat, rhs_complex, rhs_hat_complex, p_corr, div_tmp, div_z_tmp, rhs_flat, p_corr_flat, nothing, nothing, nothing, nothing, TimerOutput(), 1, wet)
     else
         throw(ArgumentError("Unsupported pressure solver method '$(method)'"))
     end
@@ -315,7 +306,7 @@ function solve!(solver::PressureCorrectionSolver{T}, u::AbstractMatrix{<:Real}, 
         end
     end
 
-    if !_has_dirichlet(solver)
+    if !solver.top_dirichlet
         @timeit solver.timers "pressure/remove_rhs_mean" begin
             if solver.wet === nothing
                 rhs_mean = mean(solver.rhs)
@@ -393,7 +384,7 @@ function solve!(solver::PressureCorrectionSolver{T}, u::AbstractMatrix{<:Real}, 
         end
     end
 
-    if !_has_dirichlet(solver)
+    if !solver.top_dirichlet
         solver.rhs_flat[_poisson_pin_index(nz, nx, solver.wet)] = 0.0   # gauge pin of build_poisson_matrix (Neumann-Neumann only)
     end
 
@@ -409,7 +400,7 @@ function solve!(solver::PressureCorrectionSolver{T}, u::AbstractMatrix{<:Real}, 
         end
     end
 
-    if !_has_dirichlet(solver)
+    if !solver.top_dirichlet
         @timeit solver.timers "pressure/remove_pcorr_mean" begin
             if solver.wet === nothing
                 p_mean = mean(solver.p_corr)

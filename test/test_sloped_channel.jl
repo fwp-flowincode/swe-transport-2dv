@@ -355,7 +355,6 @@ end
         @test_throws ArgumentError set_x_inflow_outflow!(model, -P; left_discharge=4.0)
         @test_throws ArgumentError set_x_inflow_outflow!(model, P; right_level=NaN)
         for cfg in (ModelConfig(nx=8, nz=4, implicit_vertical_terms=false),
-                    ModelConfig(nx=8, nz=4, implicit_vertical_terms=true, use_hydrostatic=false),
                     ModelConfig(nx=8, nz=4, implicit_vertical_terms=true, periodic_x=true, pressure_solver_method="sparse",
                         variable_top_layer=false))
             @test_throws ArgumentError set_x_inflow_outflow!(Model(cfg), ones(4); right_level=0.0)
