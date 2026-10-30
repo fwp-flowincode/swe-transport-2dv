@@ -1,5 +1,5 @@
-# Open boundaries (issues #46 and #49): a wave leaves the channel through the free outflow (right_free) and is reflected
-# by a prescribed level (right_level) and a closed wall; hydrostatic long wave and non-hydrostatic dispersive wave, fixed
+# Open boundaries (issues #46, #49 and #54): a wave leaves the channel through the free outflow (right_free) and is
+# reflected by a prescribed level (right_level) and a closed wall, partly by a relaxed free outflow (right_relaxation_time); hydrostatic long wave and non-hydrostatic dispersive wave, fixed
 # grid and wetting-drying step; uniform channel flow through discharge inlet and level outlet in the non-hydrostatic mode.
 # The set-ups are those of test/test_open_boundaries.jl. The non-hydrostatic fixed grid uses the Dirichlet top
 # (nonhydro_surface_dirichlet=true): with the default Neumann top its surface waves are not dispersive (docs section 14).
@@ -12,9 +12,11 @@
 # - open_boundaries_reflection.png   gauge record near the outlet and the channel-wide deviation from the reference
 # - open_boundaries_xt.png           x-t diagrams of the surface: hydrostatic long wave and dispersive wave
 # - open_boundaries_uniform.png      non-hydrostatic uniform channel flow stays at round-off
+# - open_boundaries_relaxed.png      relaxed free outflow: reflection |R| against omega tau, return of the mean level,
+#                                    gauge records
 #
 # Usage: julia --project=<path to the repository> experiments/open_boundaries/plot_open_boundaries.jl [product ...]
-# (products: wave pressure reflection xt uniform; default all). Run time: a few minutes for all.
+# (products: wave pressure reflection xt uniform relaxed; default all). Run time: a few minutes for all.
 
 # WHY: batch run without a display; same GR workstation choice as src/visualization.jl.
 get!(ENV, "GKSwstype", "100")
@@ -22,6 +24,7 @@ get!(ENV, "GKSwstype", "100")
 using SweTransport2DV
 using Plots
 using Printf
+using FFTW
 
 const G = 9.81                  # m/s^2, ModelConfig default
 const RHO0 = 1000.0             # kg/m^3
@@ -57,6 +60,23 @@ const UF_DT = 10.0              # s
 const UF_STEPS = 300
 const UF_FLOOR = 1e-17          # m/s and m, plotted instead of an exact zero on the log axis
 
+# Relaxed free outflow (issue #54; test_validate_relaxed_outflow_*): the long wave above in a 4 km channel, starting
+# 400 m before the outlet, gauge 1 km before it; long enough that the reflected tails (time scale 2 tau) have decayed
+# before the wave reflected at the left wall returns (the spectral ratio |R| needs complete records)
+const RX_TAUS = (2.0, 5.0, 10.0, 20.0, 50.0)   # s, omega tau = 0.25 ... 6 at the pulse frequency sqrt(g H)/sigma
+const RX_LENGTH = 4000.0        # m
+const RX_NX = 400
+const RX_START = 400.0          # m, distance of the initial crest from the outlet
+const RX_GAUGE = 1000.0         # m, distance of the gauge from the outlet
+const RX_INCIDENT_PASSED = 140.0   # s, the incident pulse has passed the gauge (crest at 96 s)
+const RX_RECORD_TIME = 1100.0   # s, before the wave reflected at the left wall returns to the gauge (1180 s)
+const RX_PAD = 4                # -, zero padding of the records
+const RX_SPECTRUM_FLOOR = 0.1   # -, frequencies with less than this fraction of the peak are not plotted
+const RX_BASIN_TAUS = (1600.0, 3200.0, 6400.0)   # s, level-return runs (L/sqrt(g H) = 160 s)
+const RX_BASIN_DX = 20.0        # m
+const RX_BASIN_DT = 10.0        # s
+const RX_BASIN_OFFSET = 0.01    # m, initial level offset
+
 const THETA = 0.7               # -, all wave runs (as in the tests)
 const FRAME_STRIDE = 10         # steps between animation frames (0.2 s)
 const ANIMATION_FPS = 12
@@ -83,7 +103,7 @@ nonhydro_pressure(model) = model.wetdry === nothing ? copy(model.ws.p_corr) : co
 
 # Runs a wave case and records the surface (m) every step and the non-hydrostatic pressure (Pa) every FRAME_STRIDE steps.
 # Non-hydrostatic: hump at rest at 3/4 of NH_LENGTH (splits); hydrostatic: right-going Gaussian at 0.6 L.
-function run_wave(; nonhydro, wd, boundary, L=nonhydro ? NH_LENGTH : LW_LENGTH)
+function run_wave(; nonhydro, wd, boundary, L=nonhydro ? NH_LENGTH : LW_LENGTH, tau=Inf)
     cfg = wave_config(; nonhydro=nonhydro, wd=wd, L=L)
     model = Model(cfg)
     fill!(model.state.rho, RHO0)
@@ -101,6 +121,8 @@ function run_wave(; nonhydro, wd, boundary, L=nonhydro ? NH_LENGTH : LW_LENGTH)
     end
     boundary == :free && set_x_inflow_outflow!(model, zeros(cfg.nz); right_free=true)
     boundary == :level && set_x_inflow_outflow!(model, zeros(cfg.nz); open_right=false, right_level=0.0)
+    boundary == :relaxed &&
+        set_x_inflow_outflow!(model, zeros(cfg.nz); right_free=true, right_level=0.0, right_relaxation_time=tau)
     nsteps = round(Int, (nonhydro ? NH_RUN_TIME : LW_RUN_TIME) / cfg.dt)
     eta = [surface(model, H)]
     q = [nonhydro_pressure(model)]
@@ -114,8 +136,8 @@ end
 
 # WHY: several products use the same runs; each is computed once per script invocation.
 const RUNS = Dict{Any,Any}()
-cached_run(; nonhydro, wd, boundary, L=nonhydro ? NH_LENGTH : LW_LENGTH) =
-    get!(() -> run_wave(; nonhydro=nonhydro, wd=wd, boundary=boundary, L=L), RUNS, (nonhydro, wd, boundary, L))
+cached_run(; nonhydro, wd, boundary, L=nonhydro ? NH_LENGTH : LW_LENGTH, tau=Inf) =
+    get!(() -> run_wave(; nonhydro=nonhydro, wd=wd, boundary=boundary, L=L, tau=tau), RUNS, (nonhydro, wd, boundary, L, tau))
 
 # Reference: the twice as long closed channel, cut to the short one (nothing comes back from its far end in the run time)
 function nh_reference(wd)
@@ -271,12 +293,95 @@ function uniform_figure()
     save_figure(plot(p; size=(900, 450), margin=FIGURE_MARGIN_MM), "open_boundaries_uniform.png")
 end
 
+# Closed basin (wall at x = 0) with a level offset and a relaxed free outflow to eta_R = 0 (tau = Inf: plain free
+# outflow): times (s) and mean level (m)
+function basin_run(tau)
+    nx = round(Int, LW_LENGTH / RX_BASIN_DX)
+    cfg = ModelConfig(nx=nx, nz=LW_NZ, length=LW_LENGTH, depth=LW_DEPTH, dt=RX_BASIN_DT, theta=THETA,
+        implicit_vertical_terms=true, nu=1e-6, rayleigh_damping=0.0, apply_froude_limiter=false,
+        momentum_advection_scheme="tvd2", write_plots=false)
+    model = Model(cfg)
+    fill!(model.state.rho, RHO0)
+    refresh_density_metadata!(model)
+    model.state.eta .= RX_BASIN_OFFSET
+    isinf(tau) ? set_x_inflow_outflow!(model, zeros(LW_NZ); right_free=true) :
+        set_x_inflow_outflow!(model, zeros(LW_NZ); right_free=true, right_level=0.0, right_relaxation_time=tau)
+    t = (1:round(Int, 2 * maximum(RX_BASIN_TAUS) / RX_BASIN_DT)) .* RX_BASIN_DT
+    return t, map(_ -> (step_forward!(model); sum(model.state.eta) / nx), t)
+end
+
+# Long wave of run_wave (hydrostatic, fixed grid) in the RX_LENGTH channel: gauge record (m) and times (s)
+function relaxed_gauge_run(boundary, tau)
+    dx = RX_LENGTH / RX_NX
+    cfg = ModelConfig(nx=RX_NX, nz=LW_NZ, length=RX_LENGTH, depth=LW_DEPTH, dt=dx / sqrt(G * LW_DEPTH), theta=THETA,
+        implicit_vertical_terms=true, nu=1e-6, rayleigh_damping=0.0, apply_froude_limiter=false,
+        momentum_advection_scheme="tvd2", write_plots=false)
+    model = Model(cfg)
+    fill!(model.state.rho, RHO0)
+    refresh_density_metadata!(model)
+    x0 = RX_LENGTH - RX_START
+    xc = ((1:RX_NX) .- 0.5) .* dx
+    model.state.eta .= LW_AMPLITUDE .* exp.(-((xc .- x0) ./ LW_SIGMA) .^ 2)
+    for f in 1:(RX_NX + 1)
+        model.state.u[:, f] .= LW_AMPLITUDE * exp(-(((f - 1) * dx - x0) / LW_SIGMA)^2) * sqrt(G / LW_DEPTH)
+    end
+    boundary == :free && set_x_inflow_outflow!(model, zeros(LW_NZ); right_free=true)
+    boundary == :level && set_x_inflow_outflow!(model, zeros(LW_NZ); open_right=false, right_level=0.0)
+    boundary == :relaxed &&
+        set_x_inflow_outflow!(model, zeros(LW_NZ); right_free=true, right_level=0.0, right_relaxation_time=tau)
+    ig = argmin(abs.(xc .- (RX_LENGTH - RX_GAUGE)))
+    t = (1:round(Int, RX_RECORD_TIME / cfg.dt)) .* cfg.dt
+    return t, map(_ -> (step_forward!(model); model.state.eta[ig]), t)
+end
+
+function relaxed_figure()
+    run(boundary; tau=Inf) = relaxed_gauge_run(boundary, tau)[2]
+    t, free = relaxed_gauge_run(:free, Inf)
+    level = run(:level)
+    n = length(t)
+    dt = t[2] - t[1]
+    after = t .> RX_INCIDENT_PASSED
+    reflected(record) = vcat((record .- free) .* after, zeros((RX_PAD - 1) * n))
+    Omega = 2pi .* fftfreq(RX_PAD * n, 1 / dt)
+    level_spectrum = abs.(fft(reflected(level)))
+    resolved = (Omega .> 0) .& (level_spectrum .> RX_SPECTRUM_FLOOR * maximum(level_spectrum))
+    p1 = plot(xscale=:log10, xlabel="ω τ", ylabel="|R|", title="Reflection of the relaxed outflow", legend=:bottomleft)
+    x = 10 .^ range(-1.5, 1.5, length=200)
+    plot!(p1, x, 1 ./ sqrt.(1 .+ 4 .* x .^ 2); color=:black, lw=2, label="theory 1/√(1 + 4ω²τ²)")
+    for (tau, color) in zip(RX_TAUS, palette(:viridis, length(RX_TAUS)))
+        R = abs.(fft(reflected(run(:relaxed; tau=tau)))) ./ level_spectrum
+        scatter!(p1, Omega[resolved] .* tau, R[resolved]; color=color, ms=3, msw=0, label=@sprintf("model, τ = %.0f s", tau))
+    end
+    p2 = plot(xlabel="t (h)", ylabel="mean level / initial offset", title="Return of the mean level (closed basin)",
+        legend=:topright, ylims=(0, 1.05))
+    Lc = LW_LENGTH / sqrt(G * LW_DEPTH)
+    for (tau, color) in zip((RX_BASIN_TAUS..., Inf), (:steelblue, :darkorange, :crimson, :gray40))
+        tb, mean_level = basin_run(tau)
+        plot!(p2, tb ./ 3600, mean_level ./ RX_BASIN_OFFSET; color=color, lw=2,
+            label=isinf(tau) ? "free outflow (τ = ∞)" : @sprintf("τ = %.0f s", tau))
+        if !isinf(tau)
+            rate = (1 - sqrt(1 - 4 * Lc / tau)) / (2 * Lc)   # 1/s, lowest mode
+            plot!(p2, tb ./ 3600, exp.(-rate .* tb); color=:black, ls=:dot, lw=1.5, label="")
+        end
+    end
+    plot!(p2, [NaN], [NaN]; color=:black, ls=:dot, label="theory, lowest mode")
+    p3 = plot(t, 100 .* level; color=:darkorange, lw=1.5, label="prescribed level (τ → 0)", xlabel="t (s)",
+        ylabel="η (cm)", title=@sprintf("Gauge %.0f m before the outlet", RX_GAUGE), legend=:bottomright, xlims=(0, 600))
+    for (tau, color) in ((5.0, :purple), (20.0, :seagreen))
+        plot!(p3, t, 100 .* run(:relaxed; tau=tau); color=color, lw=1.5, label=@sprintf("relaxed, τ = %.0f s", tau))
+    end
+    plot!(p3, t, 100 .* free; color=:crimson, lw=1.5, label="free outflow (τ = ∞)")
+    save_figure(plot(p1, p2, p3; layout=(1, 3), size=(1500, 460), margin=FIGURE_MARGIN_MM, bottom_margin=10Plots.mm,
+        left_margin=10Plots.mm),
+        "open_boundaries_relaxed.png")
+end
+
 const PRODUCTS = Dict("wave" => wave_animation, "pressure" => pressure_animation, "reflection" => reflection_figure,
-    "xt" => xt_figure, "uniform" => uniform_figure)
+    "xt" => xt_figure, "uniform" => uniform_figure, "relaxed" => relaxed_figure)
 
 mkpath(OUTPUT_DIR)
 mkpath(FIGURES_DIR)
 # all products, or those named on the command line (e.g. `... plot_open_boundaries.jl reflection xt`)
-for name in (isempty(ARGS) ? ["wave", "pressure", "reflection", "xt", "uniform"] : ARGS)
+for name in (isempty(ARGS) ? ["wave", "pressure", "reflection", "xt", "uniform", "relaxed"] : ARGS)
     PRODUCTS[name]()
 end
