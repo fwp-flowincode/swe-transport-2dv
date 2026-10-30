@@ -1,14 +1,15 @@
-Open boundaries (issues #46 and #49)
-====================================
+Open boundaries (issues #46, #49 and #54)
+=========================================
 
 A wave runs against the right boundary of a channel: free outflow (`right_free`, radiation condition), prescribed
-level (`right_level`) or wall. Hydrostatic long wave and non-hydrostatic dispersive wave, fixed grid and wetting-drying
+level (`right_level`), wall, or a free outflow relaxed to a target level
+(`right_relaxation_time`). Hydrostatic long wave and non-hydrostatic dispersive wave, fixed grid and wetting-drying
 step; uniform channel flow through a discharge inlet and a level outlet in the non-hydrostatic mode. Theory and
-implementation: [docs/TESTS_TECHNICAL_DOCUMENTATION.md](../../docs/TESTS_TECHNICAL_DOCUMENTATION.md), sections 22 and
-24; the set-ups are those of `test/test_open_boundaries.jl`.
+implementation: [docs/TESTS_TECHNICAL_DOCUMENTATION.md](../../docs/TESTS_TECHNICAL_DOCUMENTATION.md), sections 22, 24
+and 25; the set-ups are those of `test/test_open_boundaries.jl`.
 
 Run: `julia --project experiments/open_boundaries/plot_open_boundaries.jl [product ...]` (products: `wave pressure
-reflection xt uniform`, default all; about 3 min for all).
+reflection xt uniform relaxed`, default all; about 3 min for all).
 
 Cases
 -----
@@ -36,6 +37,10 @@ Figures
 - `open_boundaries_xt.png`: x-t diagrams of the surface, long wave (top) and dispersive wave (bottom, fixed grid).
 - `open_boundaries_uniform.png`: deviation of the uniform flow, fixed grid (Neumann and Dirichlet top) and
   wetting-drying step.
+- `open_boundaries_relaxed.png`: relaxed free outflow (issue #54). Left: |R| from the spectral ratio of the reflected
+  records (4 km channel, long wave, tau = 2 to 50 s) against 1/sqrt(1 + 4 omega^2 tau^2). Middle: return of a 1 cm
+  level offset in a closed 1 km basin against the lowest mode; the free outflow alone keeps the offset. Right: gauge
+  records for the prescribed level, tau = 5 and 20 s, and the free outflow.
 
 Results
 -------

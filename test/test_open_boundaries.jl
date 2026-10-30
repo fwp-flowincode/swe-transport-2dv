@@ -1,8 +1,10 @@
 include("test_common.jl")
+using FFTW
 
 # Open boundaries for transcritical flow (issue #46): free outflow at the right boundary (right_free, radiation condition
 # for subcritical outflow, extrapolation for supercritical outflow) and supercritical inflow (left_discharge with
-# left_level), sections 22; in the non-hydrostatic mode (issue #49), section 24 of docs/TESTS_TECHNICAL_DOCUMENTATION.md.
+# left_level), sections 22; in the non-hydrostatic mode (issue #49), section 24; free outflow relaxed to a target level
+# (right_relaxation_time, issue #54), section 25 of docs/TESTS_TECHNICAL_DOCUMENTATION.md.
 
 const OB_G = 9.81                 # m/s^2, ModelConfig default
 const OB_C = 50.0                 # m^(1/2)/s, Chezy coefficient
@@ -83,6 +85,7 @@ const NH_REFLECTION_MAX_DISPERSIVE = 0.03   # -, dispersive: fixed grid with the
                                             # wetting-drying step (measured 0.0115)
 const NH_REFLECTION_LEVEL_MIN = 0.15   # -, a prescribed level (measured 0.23-0.35)
 const NH_DISPERSIVE_TROUGH_MIN = 0.1   # -, depth of the dispersive trough behind the crest over A (measured 0.16-0.17)
+const NH_RELAX_TIME = 50.0         # s, relaxed free outflow of the dispersive wave (omega tau ~ 150 for k H ~ 1)
 function nh_wave(; wd, boundary, L, check_budget=false, surface_dirichlet=false)
     nx = round(Int, L / NH_WAVE_DX)
     nz = 10
@@ -98,6 +101,8 @@ function nh_wave(; wd, boundary, L, check_budget=false, surface_dirichlet=false)
     wd ? initialize_water_level!(model, NH_WAVE_DEPTH .+ eta0) : (model.state.eta .= eta0)
     boundary == :free && set_x_inflow_outflow!(model, zeros(nz); right_free=true)
     boundary == :level && set_x_inflow_outflow!(model, zeros(nz); open_right=false, right_level=0.0)
+    boundary == :relaxed &&
+        set_x_inflow_outflow!(model, zeros(nz); right_free=true, right_level=0.0, right_relaxation_time=NH_RELAX_TIME)
     budget_error = 0.0
     for _ in 1:round(Int, 0.5 * NH_WAVE_LENGTH / sqrt(OB_G * NH_WAVE_DEPTH) / NH_WAVE_DT)
         V0 = water_volume_of(model)
@@ -124,7 +129,68 @@ function theta_boundary_discharges(model)
     return (Q(1), Q(model.config.nx + 1))
 end
 
-@testset "Open boundaries: transcritical (issue #46) and non-hydrostatic (issue #49)" begin
+# Relaxed free outflow (issue #54): right-going long wave of ob_wave on a finer grid (dx = 5 m, gravity-wave Courant
+# number 1, theta = 1/2), level recorded at a gauge in the middle of the channel (m, one value per step).
+const RX_NX = 200
+const RX_THETA = 0.5                  # -, least damping of the reflected wave
+const RX_GAUGE_X = 500.0              # m
+const RX_RECORD_TIME = 320.0          # s, until the wave reflected at the left wall would return to the gauge
+const RX_INCIDENT_PASSED = 40.0       # s, the incident pulse has passed the gauge (crest at 16 s, width 8 s)
+const RX_TAUS = (2.0, 5.0, 10.0, 20.0, 50.0)   # s, omega tau = 0.25 ... 6 at the pulse frequency sqrt(g H)/sigma
+const RX_REFLECTION_TOL = 0.02        # -, max |reflected - theory| / A (measured 0.004-0.014; the radiation error of the
+                                      # free outflow itself is 0.7 %)
+const RX_PAD = 4                      # -, zero padding of the records: the reflected tail (time scale 2 tau) must not wrap
+const RX_LIMIT_TOL = 1e-6             # -, max |relaxed - prescribed level| / A for dt/tau = 1e8 (measured 2e-9)
+const RX_BASIN_TAU = 3200.0           # s, 20 L/sqrt(g H) for the level-return test
+const RX_RATE_RTOL = 0.02             # -, relative error of the decay rate (measured 0.002)
+const RX_CHANNEL_TAU = 1000.0         # s, relaxed outflow of the #14 channel
+function rx_wave(; wd, boundary, tau=Inf)
+    H, L, A, sigma = 4.0, 1000.0, 0.01, 50.0
+    c = sqrt(OB_G * H)
+    dx = L / RX_NX
+    cfg = ModelConfig(nx=RX_NX, nz=4, length=L, depth=H, dt=dx / c, theta=RX_THETA, implicit_vertical_terms=true, nu=1e-6,
+        rayleigh_damping=0.0, apply_froude_limiter=false, momentum_advection_scheme="tvd2", wetting_drying=wd,
+        bed_level=wd ? zeros(RX_NX) : nothing, write_plots=false)
+    model = Model(cfg)
+    fill!(model.state.rho, 1000.0)
+    refresh_density_metadata!(model)
+    x0 = 0.6 * L
+    xc = ((1:RX_NX) .- 0.5) .* dx
+    eta0 = A .* exp.(-((xc .- x0) ./ sigma) .^ 2)
+    wd ? initialize_water_level!(model, H .+ eta0) : (model.state.eta .= eta0)
+    for f in 1:(RX_NX + 1)
+        model.state.u[:, f] .= A * exp(-(((f - 1) * dx - x0) / sigma)^2) * sqrt(OB_G / H)
+    end
+    boundary == :free && set_x_inflow_outflow!(model, zeros(4); right_free=true)
+    boundary == :level && set_x_inflow_outflow!(model, zeros(4); open_right=false, right_level=0.0)
+    boundary == :relaxed && set_x_inflow_outflow!(model, zeros(4); right_free=true, right_level=0.0, right_relaxation_time=tau)
+    ig = argmin(abs.(xc .- RX_GAUGE_X))
+    record = map(1:round(Int, RX_RECORD_TIME / cfg.dt)) do _
+        step_forward!(model)
+        wd ? water_depth(model)[ig] - H : model.state.eta[ig]
+    end
+    return record, cfg.dt, A, model
+end
+
+# Closed basin (wall at x = 0) with a level offset delta, relaxed free outflow to eta_R = 0: mean level (m) over time (s).
+function rx_basin(; wd, tau, delta=0.01, L=1000.0, H=4.0, nx=50, dt=10.0)
+    cfg = ModelConfig(nx=nx, nz=4, length=L, depth=H, dt=dt, theta=0.7, implicit_vertical_terms=true, nu=1e-6,
+        rayleigh_damping=0.0, apply_froude_limiter=false, momentum_advection_scheme="tvd2", wetting_drying=wd,
+        bed_level=wd ? zeros(nx) : nothing, write_plots=false)
+    model = Model(cfg)
+    fill!(model.state.rho, 1000.0)
+    refresh_density_metadata!(model)
+    wd ? initialize_water_level!(model, fill(H + delta, nx)) : (model.state.eta .= delta)
+    set_x_inflow_outflow!(model, zeros(4); right_free=true, right_level=0.0, right_relaxation_time=tau)
+    t = (1:round(Int, 2 * RX_BASIN_TAU / dt)) .* dt
+    mean_level = map(t) do _
+        step_forward!(model)
+        wd ? sum(water_depth(model)) / nx - H : sum(model.state.eta) / nx
+    end
+    return t, mean_level
+end
+
+@testset "Open boundaries: transcritical (issue #46), non-hydrostatic (issue #49), relaxed outflow (issue #54)" begin
     @testset "test_verify_supercritical_channel_with_inlet_level_and_free_outflow" begin
         # Normal flow at Fr = 1.6 with discharge and level at the inlet and a free outflow is a steady state, and a
         # perturbed start (0.8 times the velocity) returns to it: supercritical, the perturbation leaves downstream.
@@ -306,5 +372,100 @@ end
             set_x_inflow_outflow!(model, ones(4); right_free=true)
             @test model.x_boundary_right_free
         end
+    end
+
+    # ---- relaxed free outflow (issue #54) ----
+
+    @testset "test_verify_relaxed_outflow_limits" begin
+        # tau = Inf is the free outflow bit for bit (r = dt/tau = 0); dt/tau -> infinity the prescribed level
+        for wd in (false, true)
+            free, _, A, mf = rx_wave(; wd=wd, boundary=:free)
+            relaxed, _, _, mr = rx_wave(; wd=wd, boundary=:relaxed, tau=Inf)
+            @test relaxed == free && mr.state.u == mf.state.u
+            level, dt, _, _ = rx_wave(; wd=wd, boundary=:level)
+            stiff, _, _, _ = rx_wave(; wd=wd, boundary=:relaxed, tau=1e-8 * dt)
+            @test maximum(abs.(stiff .- level)) / A < RX_LIMIT_TOL
+        end
+    end
+
+    @testset "test_validate_relaxed_outflow_reflection_matches_theory" begin
+        # A right-going long wave (Gaussian, width 50 m) meets the relaxed outflow. Continuous theory (Blayo & Debreu
+        # 2005): R(omega) = -1/(1 - 2 i omega tau) for exp(i(k x - omega t)); the FFT expands in exp(+i Omega t), so the
+        # reflected record is that of the prescribed level (R = -1, same grid propagation) filtered with
+        # 1/(1 + 2 i Omega tau). Reflected parts: records minus the free-outflow record, after the incident pulse.
+        for wd in (false, true)
+            free, dt, A, _ = rx_wave(; wd=wd, boundary=:free)
+            level, _, _, _ = rx_wave(; wd=wd, boundary=:level)
+            n = length(free)
+            after = (1:n) .* dt .> RX_INCIDENT_PASSED
+            Omega = 2pi .* fftfreq(RX_PAD * n, 1 / dt)
+            level_spectrum = fft(vcat((level .- free) .* after, zeros((RX_PAD - 1) * n)))
+            for tau in RX_TAUS
+                relaxed, _, _, _ = rx_wave(; wd=wd, boundary=:relaxed, tau=tau)
+                theory = real(ifft(level_spectrum ./ (1 .+ 2im .* Omega .* tau)))[1:n]
+                @test maximum(abs.((relaxed .- free) .* after .- theory)) / A < RX_REFLECTION_TOL
+            end
+        end
+    end
+
+    @testset "test_validate_relaxed_outflow_mean_level_returns" begin
+        # A level offset in a closed basin decays with the lowest mode, eta_t + (L/c) eta_tt = -eta/tau, i.e. the rate
+        # lambda = (1 - sqrt(1 - 4 (L/c)/tau)) / (2 L/c) (1/tau for tau >> L/c); fitted after tau/2. The plain free
+        # outflow keeps the offset (neutral mode), see test_verify_free_outflow_subcritical_converges_to_normal_flow.
+        L, H = 1000.0, 4.0
+        Lc = L / sqrt(OB_G * H)
+        rate = (1 - sqrt(1 - 4 * Lc / RX_BASIN_TAU)) / (2 * Lc)
+        for wd in (false, true)
+            t, mean_level = rx_basin(; wd=wd, tau=RX_BASIN_TAU)
+            fit = t .> 0.5 * RX_BASIN_TAU
+            tf, y = t[fit], log.(mean_level[fit])
+            slope = sum((tf .- sum(tf) / length(tf)) .* (y .- sum(y) / length(y))) / sum((tf .- sum(tf) / length(tf)) .^ 2)
+            @test abs(-slope - rate) / rate < RX_RATE_RTOL
+        end
+    end
+
+    @testset "test_verify_relaxed_outflow_uniform_flow" begin
+        # #14 channel with a relaxed outflow to the normal level: steady to round-off, and from 0.8 times the normal flow
+        # it returns to it including the level, also on the fixed grid (with the plain free outflow the mean level is a
+        # neutral mode there).
+        for (vt, wd) in ((false, false), (nothing, false), (nothing, true)), start in (1.0, 0.8)
+            model, P = ob_channel(; supercritical=false, vt=vt, wd=wd, start=start)
+            set_x_inflow_outflow!(model, P; left_discharge=chezy_equilibrium_velocity(OB_C, SUB_DEPTH, SUB_SLOPE) * SUB_DEPTH,
+                right_free=true, right_level=0.0, right_relaxation_time=RX_CHANNEL_TAU)
+            for _ in 1:(start == 1.0 ? 300 : 4000)
+                step_forward!(model)
+            end
+            eta = wd ? water_depth(model) .- SUB_DEPTH : model.state.eta
+            @test maximum(abs.(model.state.u .- P)) < TOL_MODEL_IDENTITY
+            @test maximum(abs, eta) < TOL_MODEL_IDENTITY
+        end
+    end
+
+    @testset "test_validate_relaxed_outflow_nonhydro_dispersive_wave" begin
+        # The dispersive wave of issue #49 leaves through a relaxed outflow (tau = 50 s): reflection within the bound of
+        # the plain free outflow (the relaxation adds a low-frequency tail of order A sigma / (c tau)). Measured: fixed
+        # grid 1.60 % (free outflow 1.36 %), wetting-drying step 1.40 % (1.15 %).
+        for (wd, surface_dirichlet) in ((false, true), (true, false))
+            reference = nh_wave(; wd=wd, boundary=:closed, L=2 * NH_WAVE_LENGTH, surface_dirichlet=surface_dirichlet)
+            n = round(Int, NH_WAVE_LENGTH / NH_WAVE_DX)
+            relaxed = nh_wave(; wd=wd, boundary=:relaxed, L=NH_WAVE_LENGTH, check_budget=true,
+                surface_dirichlet=surface_dirichlet)
+            @test maximum(abs.(relaxed .- reference[1:n])) / NH_WAVE_AMPLITUDE < NH_REFLECTION_MAX_DISPERSIVE
+        end
+    end
+
+    @testset "test_verify_relaxed_outflow_config_checks" begin
+        model, P = ob_channel(; supercritical=false)
+        @test_throws ArgumentError set_x_inflow_outflow!(model, P; right_free=true, right_level=0.0)   # no tau
+        @test_throws ArgumentError set_x_inflow_outflow!(model, P; right_free=true, right_relaxation_time=10.0)   # no target
+        @test_throws ArgumentError set_x_inflow_outflow!(model, P; right_level=0.0, right_relaxation_time=10.0)   # not free
+        for tau in (0.0, -1.0, NaN)
+            @test_throws ArgumentError set_x_inflow_outflow!(model, P; right_free=true, right_level=0.0,
+                right_relaxation_time=tau)
+        end
+        set_x_inflow_outflow!(model, P; right_free=true, right_level=0.0, right_relaxation_time=10.0)
+        @test model.x_boundary_right_free && model.x_boundary_eta_right === nothing
+        clear_x_inflow_outflow!(model)
+        @test model.x_boundary_relaxation_time == Inf
     end
 end

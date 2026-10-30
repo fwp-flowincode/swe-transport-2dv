@@ -1258,6 +1258,68 @@ Results:
   kinematic condition holds in every column, which includes the divergence of the boundary column.
 - Figures: `experiments/open_boundaries/`.
 
+### 25) Relaxed free outflow (issue #54)
+
+The prescribed level (section 21) reflects every outgoing wave completely, with inverted sign. The free outflow
+(section 22) lets waves out, but no level is prescribed; on the fixed grid the mean level is then a neutral mode. The
+relaxed free outflow lies in between: outgoing waves leave, and the level returns to a target $\eta_R$ on the time
+scale $\tau$ (radiation plus nudging; Chapman 1985; Marchesiello, McWilliams & Shchepetkin 2001; Blayo & Debreu 2005).
+
+`set_x_inflow_outflow!(model, P; right_free=true, right_level=η_R, right_relaxation_time=τ)`, with $\tau$ in s and
+$\tau>0$. `right_free` together with `right_level` is still an error without $\tau$.
+
+**Formulation.** The subcritical radiation condition of section 22 gains a relaxation term:
+
+$$\partial_t\eta_b + c\left[\frac{\eta_b-\eta_{n_x}}{\Delta x/2} - s_b\right] = -\frac{\eta_b-\eta_R}{\tau}, \qquad c = U+\sqrt{gh}.$$
+
+Backward Euler with $\mu = c\,\Delta t/(\Delta x/2)$ and $r=\Delta t/\tau$:
+
+$$\eta_b^{n+1}\,(1+\mu+r) = \eta_b^n + \mu\left(\eta_{n_x}^{n+1} + s_b\,\Delta x/2\right) + r\,\eta_R.$$
+
+This is the weighted Dirichlet condition of the free outflow, $\eta_b = w\,\eta_\text{eff} + (1-w)\,\eta_{n_x}^{n+1}$, with
+$w=(1+r)/(1+\mu+r)$ and $\eta_\text{eff} = (\eta_b^n + \mu s_b\Delta x/2 + r\eta_R)/(1+r)$. Only these two numbers
+change (`_update_free_outflow_level!`), so the free-surface solve, the wetting-drying Newton solve and the
+non-hydrostatic mode carry over. The limits are:
+- $\tau=\infty$ ($r=0$) gives the free outflow, bit for bit;
+- $\tau\to0$ gives the prescribed level.
+
+Supercritical outflow ignores the relaxation, because no information enters the domain there.
+
+**Reflection.** For a wave $e^{i(kx-\omega t)}$ with $c=\omega/k$, the continuous condition gives
+
+$$R = \frac{-1}{1-2i\omega\tau}, \qquad |R| = \frac{1}{\sqrt{1+4\omega^2\tau^2}}.$$
+
+The condition is a low-pass filter. Periods much longer than $\tau$ are imposed by the target level, and shorter ones are
+radiated. For a reflection below $\varepsilon$ at frequency $\omega$, choose $\tau \gtrsim 1/(2\omega\varepsilon)$.
+For example, a tidal period (12.4 h) cannot be both prescribed and radiated. A wind wave or a seiche of a few minutes
+leaves with less than 1 % reflection if $\tau$ is an hour (period 5 min: $\omega\tau = 75$, $|R| = 0.7$ %).
+
+**Return of the level.** In a basin of length $L$ closed at $x=0$, the lowest mode follows from the boundary condition
+with $u_b = -L\,\eta_t/h$ and $\eta_x(L) = L\,\eta_{tt}/(gh)$:
+
+$$\eta_t + \frac{L}{c}\,\eta_{tt} = -\frac{\eta}{\tau}.$$
+
+A level offset therefore decays at the rate $\lambda = \bigl(1-\sqrt{1-4(L/c)/\tau}\bigr)/(2L/c)$, which is $\approx1/\tau$ for
+$\tau \gg L/c$.
+
+**Results** (`test_open_boundaries.jl`, figure `experiments/open_boundaries/figures/open_boundaries_relaxed.png`):
+- **Limits.** $\tau=\infty$ reproduces the free outflow bit for bit. With $\Delta t/\tau=10^8$ the result deviates from
+  the prescribed level by $2\cdot10^{-9}\,A$.
+- **Reflection.** A Gaussian long wave of width 50 m in 4 m depth, with $\tau$ = 2 to 50 s ($\omega\tau$ = 0.25 to 6 at the
+  pulse frequency). The reflected record is compared with the prescribed-level record (R = −1, same grid propagation)
+  filtered with $R(\omega)/(-1)$; the filter is causal, so a finite record is compared exactly. The difference is
+  0.4–1.4 % of the amplitude, on the fixed grid and in the wetting-drying step, for reflected waves of 15–85 %. It does
+  not decrease with resolution beyond the 0.7 % radiation error of the free outflow itself. In a 4 km channel (complete
+  records), the spectral ratio $|R(\omega)|$ follows the theory over $\omega\tau$ from 0.005 to 10.
+- **Return of the level.** With $\tau = 20\,L/c$, the fitted decay rate agrees with $\lambda$ within 0.2 % (fixed grid
+  and wetting-drying step); within 0.5 % at $\tau=10\,L/c$. The free outflow alone keeps the offset.
+- **Uniform flow** in the #14 channel with the target equal to the normal level ($\tau$ = 1000 s): steady to round-off.
+  From 0.8 times the normal flow it returns within $10^{-9}$, including the level, also on the fixed grid without the
+  variable top layer.
+- **Non-hydrostatic.** The dispersive wave of section 24 with $\tau$ = 50 s reflects 1.60 % (fixed grid, Dirichlet top)
+  and 1.40 % (wetting-drying step), against 1.36 % and 1.15 % for the free outflow. The relaxation adds a low-frequency
+  tail of order $A\sigma/(c\tau)$.
+
 ## Test-by-test documentation
 
 ### test_verify_state_shapes
@@ -2297,6 +2359,19 @@ stated otherwise.
     step) and below 1 % for the long wave of the Neumann top (measured 0.23 %). A prescribed level reflects more than
     15 %. Also checks the volume budget, and with the Neumann top the kinematic condition, every step.
   - `test_verify_nonhydro_open_boundary_any_pressure_solver`: the spectral and the sparse solver are accepted.
+- Relaxed free outflow (section 25):
+  - `test_verify_relaxed_outflow_limits`: $\tau=\infty$ equals the free outflow bit for bit; $\Delta t/\tau=10^8$ equals
+    the prescribed level within $10^{-6}A$ (measured $2\cdot10^{-9}$); fixed grid and wetting-drying step.
+  - `test_validate_relaxed_outflow_reflection_matches_theory`: reflected record against the prescribed-level record
+    filtered with $1/(1+2i\Omega\tau)$, $\tau$ = 2 to 50 s; difference below 2 % of $A$ (measured 0.4-1.4 %).
+  - `test_validate_relaxed_outflow_mean_level_returns`: decay rate of a level offset in a closed basin against the
+    lowest mode, within 2 % (measured 0.2 %).
+  - `test_verify_relaxed_outflow_uniform_flow`: #14 channel, steady and returning from 0.8 times the normal flow to
+    1e-9, fixed grid, variable top layer and wetting-drying step.
+  - `test_validate_relaxed_outflow_nonhydro_dispersive_wave`: the dispersive wave of section 24 with $\tau$ = 50 s
+    reflects below 3 % (measured 1.6 % and 1.4 %); volume budget every step.
+  - `test_verify_relaxed_outflow_config_checks`: `right_free` with `right_level` needs $\tau$; $\tau$ needs both;
+    $\tau \le 0$ or NaN is rejected; `clear_x_inflow_outflow!` resets $\tau$.
 
 ### Obstacle tests (`test_obstacles.jl`, section 23)
 

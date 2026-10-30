@@ -363,6 +363,8 @@ mutable struct Model{T<:Real}
     x_boundary_right_free::Bool # free outflow at the right boundary face (issue #46)
     x_boundary_eta_free::Float64  # m, radiated level of the free outflow face (_update_free_outflow_level!)
     x_boundary_free_dirichlet::Tuple{Float64,Float64}   # (m, -), effective level and weight of the free outflow this step
+    x_boundary_eta_target::Float64        # m, target level of a relaxed free outflow (issue #54)
+    x_boundary_relaxation_time::Float64   # s, relaxation time of the free outflow to x_boundary_eta_target; Inf: none
     geometry::BedGeometry   # staircase bed masks (all cells wet for the flat bed)
     turbulence::Any         # KEpsilonState with turbulence_closure = "k_epsilon", else nothing
     wetdry::Any             # WetDryState with wetting_drying = true, else nothing
@@ -855,6 +857,8 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
         false,
         0.0,
         (0.0, 1.0),
+        0.0,
+        Inf,
         geometry,
         turbulence_closure(cfg) == "k_epsilon" ? KEpsilonState(cfg.nz, cfg.nx; T=T) : nothing,
         cfg.wetting_drying ? WetDryState(cfg; T=T) : nothing,
@@ -874,7 +878,8 @@ end
 
 """
     set_x_inflow_outflow!(model, left_profile; left_discharge=nothing, left_level=nothing, left_rho=nothing,
-                          open_right=true, right_profile=nothing, right_level=nothing, right_free=false)
+                          open_right=true, right_profile=nothing, right_level=nothing, right_free=false,
+                          right_relaxation_time=nothing)
 
 Lateral boundary conditions: velocity `left_profile` (m/s, one value per layer) at the left boundary face, or with
 `left_discharge` q (m^2/s) the profile shape scaled to the discharge, u_k = q * left_profile_k / sum_j dZ_j left_profile_j
@@ -889,7 +894,8 @@ transport, so a new extreme is not clipped.
 
 At the right boundary face a wall, a zero-gradient velocity (`open_right=true`), a prescribed velocity `right_profile`
 (m/s, length nz), a prescribed water level `right_level` (m, surface elevation eta at the boundary face x = L) or a free
-outflow (`right_free=true`, issue #46); the last two override `open_right`.
+outflow (`right_free=true`, issue #46); the last two override `open_right`. Both together with
+`right_relaxation_time` tau (s, > 0; issue #54): a free outflow whose level relaxes to the target `right_level`.
 
 Water-level boundary (issue #14) and free outflow: the velocity of the boundary face is computed by its own momentum
 equation: advection in an open control volume (`_open_right_face_velocity!`), the baroclinic pressure gradient and
@@ -902,6 +908,9 @@ x = L (`_wd_face_bed`).
 - free outflow: eta_b from the interior (`_update_free_outflow_level!`): extrapolated for supercritical outflow, an
   implicit radiation condition for the outgoing long wave for subcritical outflow (reflects < 1 % of a long wave). No
   level is prescribed: with the fixed grid the mean level is then a neutral mode.
+- relaxed free outflow: the radiation condition with the relaxation term -(eta_b - eta_R)/tau. Outgoing waves of
+  angular frequency omega are reflected by |R| = 1/sqrt(1 + 4 omega^2 tau^2), and the mean level returns to eta_R
+  within about tau (for tau >> L/sqrt(g H)). tau = Inf is `right_free`, tau -> 0 `right_level`.
 Both require `implicit_vertical_terms=true` and no `periodic_x`; in the non-hydrostatic mode (issue #49) the open face
 has dq/dx = 0 (`_check_right_level_config`, `_wd_nonhydrostatic_correction!`). `step_forward!` warns once when the
 Froude number at a boundary does not fit its type (`_check_boundary_froude!`).
@@ -916,6 +925,7 @@ function set_x_inflow_outflow!(
     right_profile::Union{Nothing,AbstractVector{<:Real}}=nothing,
     right_level::Union{Nothing,Real}=nothing,
     right_free::Bool=false,
+    right_relaxation_time::Union{Nothing,Real}=nothing,
 )
     if left_discharge !== nothing
         isfinite(left_discharge) || throw(ArgumentError("left_discharge must be finite"))
@@ -932,7 +942,7 @@ function set_x_inflow_outflow!(
     model.x_boundary_q_left = left_discharge === nothing ? nothing : Float64(left_discharge)
     model.x_boundary_eta_left = left_level === nothing ? nothing : Float64(left_level)
     _set_inflow_density!(model, left_rho)
-    _set_right_boundary!(model, open_right, right_profile, right_level, right_free)
+    _set_right_boundary!(model, open_right, right_profile, right_level, right_free, right_relaxation_time)
     # WHY: the discharge scaling uses the level of time n in ws.eta_old (set by every step); before the first step it
     # is the initial level
     copyto!(model.ws.eta_old, model.state.eta)
@@ -942,7 +952,7 @@ end
 
 """
     set_x_inflow_outflow!(model, left_velocity::Function; open_right=false, right_profile=nothing, right_level=nothing,
-                          right_free=false)
+                          right_free=false, right_relaxation_time=nothing)
 
 Wetting-drying mode: time-dependent velocity at the left boundary face, `left_velocity(t)` (m/s; scalar or one value per
 layer) at the model time t (s) of the end of each step; dry layers of the face carry no flow. Right boundary as in the
@@ -955,6 +965,7 @@ function set_x_inflow_outflow!(
     right_profile::Union{Nothing,AbstractVector{<:Real}}=nothing,
     right_level::Union{Nothing,Real}=nothing,
     right_free::Bool=false,
+    right_relaxation_time::Union{Nothing,Real}=nothing,
     left_rho::Union{Nothing,Real}=nothing,
 )
     model.wetdry === nothing && throw(ArgumentError("a time-dependent boundary velocity requires ModelConfig(wetting_drying=true)"))
@@ -963,7 +974,7 @@ function set_x_inflow_outflow!(
     model.x_boundary_q_left = nothing
     model.x_boundary_eta_left = nothing
     _set_inflow_density!(model, left_rho)
-    _set_right_boundary!(model, open_right, right_profile, right_level, right_free)
+    _set_right_boundary!(model, open_right, right_profile, right_level, right_free, right_relaxation_time)
     return model
 end
 
@@ -980,10 +991,17 @@ function _set_inflow_density!(model::Model, left_rho)
     return nothing
 end
 
-function _set_right_boundary!(model::Model, open_right::Bool, right_profile, right_level, right_free::Bool)
+function _set_right_boundary!(model::Model, open_right::Bool, right_profile, right_level, right_free::Bool,
+        right_relaxation_time)
+    relaxed = right_relaxation_time !== nothing
+    if relaxed
+        (right_free && right_level !== nothing) ||
+            throw(ArgumentError("right_relaxation_time needs right_free=true and the target level right_level"))
+        right_relaxation_time > 0 || throw(ArgumentError("right_relaxation_time must be > 0 (Inf: no relaxation)"))
+    end
     if right_level !== nothing
         right_profile === nothing || throw(ArgumentError("right_profile and right_level exclude each other"))
-        right_free && throw(ArgumentError("right_level and right_free exclude each other"))
+        right_free && !relaxed && throw(ArgumentError("right_level and right_free exclude each other (unless right_relaxation_time is given: relaxed free outflow)"))
         isfinite(right_level) || throw(ArgumentError("right_level must be finite"))
     end
     right_free && right_profile !== nothing && throw(ArgumentError("right_profile and right_free exclude each other"))
@@ -991,8 +1009,11 @@ function _set_right_boundary!(model::Model, open_right::Bool, right_profile, rig
     right_free && model.config.nx < 2 && throw(ArgumentError("right_free needs nx >= 2 (the slope of face nx)"))
     model.x_boundary_u_right_open = right_level === nothing && !right_free && open_right
     model.x_boundary_u_right_profile = right_profile === nothing ? nothing : collect(right_profile)
-    model.x_boundary_eta_right = right_level === nothing ? nothing : Float64(right_level)
+    # relaxed free outflow: a free outflow (x_boundary_eta_right stays nothing) with the target level
+    model.x_boundary_eta_right = (right_level === nothing || relaxed) ? nothing : Float64(right_level)
     model.x_boundary_right_free = right_free
+    model.x_boundary_eta_target = relaxed ? Float64(right_level) : 0.0
+    model.x_boundary_relaxation_time = relaxed ? Float64(right_relaxation_time) : Inf
     right_free && (model.x_boundary_eta_free = _extrapolated_right_level(model.state.eta))
     return nothing
 end
@@ -1031,6 +1052,7 @@ function clear_x_inflow_outflow!(model::Model)
     model.x_boundary_u_right_profile = nothing
     model.x_boundary_eta_right = nothing
     model.x_boundary_right_free = false
+    model.x_boundary_relaxation_time = Inf
     return model
 end
 
@@ -1546,10 +1568,20 @@ depth-averaged velocity and the depth of the boundary face.
   surface parallel to the bed, also at the outlet (exact with a real bed slope); without it the boundary face would lose
   its pressure force there. Other steady outflows (e.g. a backwater curve at the outlet) are pulled towards the
   bed-parallel continuation: prescribe the level (`right_level`) when the outlet level is known.
+- Relaxed free outflow (issue #54, `right_relaxation_time` tau): the subcritical radiation condition gains the
+  relaxation to the target level eta_R,
+      deta_b/dt + c [(eta_b - eta_nx)/(dx/2) - s_bed] = -(eta_b - eta_R)/tau,
+  backward Euler with r = dt/tau: eta_b^{n+1} (1 + mu + r) = eta_b^n + mu (eta_nx^{n+1} + s_bed dx/2) + r eta_R, the same
+  Dirichlet form with w = (1 + r)/(1 + mu + r) and eta_eff = (eta_b^n + mu s_bed dx/2 + r eta_R)/(1 + r) (r = 0: the
+  plain free outflow, bit for bit). For a wave exp(i(k x - omega t)) with c = omega/k the continuous condition reflects
+  R = -1/(1 - 2 i omega tau) (Blayo & Debreu 2005): periods much longer than tau are imposed, shorter ones radiated. In
+  a basin of length L closed at x = 0 a level offset decays as exp(-t/tau) for tau >> L/c (lowest mode,
+  eta_t + (L/c) eta_tt = -eta/tau). Supercritical outflow ignores the relaxation (no information enters).
 
 The mean level is not fixed by the boundary: with the fixed grid (depth H at every face, variable_top_layer=false) and no
 other level control it is a neutral mode. Source: Orlanski (1976), J. Comput. Phys. 21, 251-269 (radiation condition;
-equation numbers not checked).
+equation numbers not checked); relaxation: Chapman (1985), J. Phys. Oceanogr. 15, 1060-1075; Marchesiello, McWilliams
+& Shchepetkin (2001), Ocean Modelling 3, 1-20; Blayo & Debreu (2005), Ocean Modelling 9, 231-252.
 """
 function _update_free_outflow_level!(model::Model)
     cfg = model.config
@@ -1567,7 +1599,9 @@ function _update_free_outflow_level!(model::Model)
     s_bed = (bed[nx] - bed[nx - 1]) / model.dx   # -, slope of a bed-parallel surface (eta rises with the bed)
     mu = (U + celerity) * cfg.dt / (0.5 * model.dx)   # >= 0 (U > -celerity: not a supercritical inflow)
     mu = max(mu, 0.0)
-    model.x_boundary_free_dirichlet = (model.x_boundary_eta_free + mu * s_bed * 0.5 * model.dx, 1.0 / (1.0 + mu))
+    r = cfg.dt / model.x_boundary_relaxation_time   # -, relaxation to the target level (0: none)
+    eta_eff = (model.x_boundary_eta_free + mu * s_bed * 0.5 * model.dx + r * model.x_boundary_eta_target) / (1.0 + r)
+    model.x_boundary_free_dirichlet = (eta_eff, (1.0 + r) / (1.0 + mu + r))
     return nothing
 end
 
