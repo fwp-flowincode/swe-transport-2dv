@@ -39,7 +39,8 @@ Model
     `left_level` for supercritical inflow, `left_rho` for the density of the inflow in the wetting-drying step),
     outflow with zero-gradient velocity, a prescribed velocity, a prescribed
     water level (`right_level`) or a free outflow (`right_free`, radiation condition; issue #46); the last two
-    hydrostatic with `implicit_vertical_terms=true` (docs/TESTS_TECHNICAL_DOCUMENTATION.md, sections 21 and 22);
+    with `implicit_vertical_terms=true`, also in the non-hydrostatic mode (issue #49)
+    (docs/TESTS_TECHNICAL_DOCUMENTATION.md, sections 21, 22 and 24);
   - wind stress and wind-induced mixing;
   - Rayleigh damping and a Froude limiter for numerical stabilisation;
   - vegetation: canopy patches and individual stems, rigid or flexible (quasi-static elastica);

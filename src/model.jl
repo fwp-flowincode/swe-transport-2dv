@@ -902,7 +902,8 @@ x = L (`_wd_face_bed`).
 - free outflow: eta_b from the interior (`_update_free_outflow_level!`): extrapolated for supercritical outflow, an
   implicit radiation condition for the outgoing long wave for subcritical outflow (reflects < 1 % of a long wave). No
   level is prescribed: with the fixed grid the mean level is then a neutral mode.
-Both require the hydrostatic mode, `implicit_vertical_terms=true` and no `periodic_x`. `step_forward!` warns once when the
+Both require `implicit_vertical_terms=true` and no `periodic_x`; in the non-hydrostatic mode (issue #49) the open face
+has dq/dx = 0 (`_check_right_level_config`, `_wd_nonhydrostatic_correction!`). `step_forward!` warns once when the
 Froude number at a boundary does not fit its type (`_check_boundary_froude!`).
 """
 function set_x_inflow_outflow!(
@@ -999,7 +1000,11 @@ end
 # Configuration needed by a right boundary face with its own momentum equation (water level or free outflow).
 function _check_right_level_config(cfg::ModelConfig)
     cfg.periodic_x && throw(ArgumentError("a water-level boundary or free outflow (right_level, right_free) is not possible with periodic_x=true"))
-    cfg.use_hydrostatic || throw(ArgumentError("a water-level boundary or free outflow (right_level, right_free) is implemented for the hydrostatic mode only"))
+    # Non-hydrostatic mode (issue #49): dq/dx = 0 on the open face, so the pressure problem keeps the boundary
+    # conditions of a closed basin and any pressure solver works; the boundary face gets no q correction.
+    # WHY not q = 0 on the face: a dispersive wave (Gaussian of width 1 m in 1 m depth) leaving through the free
+    # outflow reflected 4.4 % with q = 0 and 1.3 % with dq/dx = 0 (fixed grid, nonhydro_surface_dirichlet=true; with
+    # the Neumann top both 0.2 %, the wave is then not dispersive); see also _wd_nonhydrostatic_correction!.
     # WHY implicit vertical terms: the boundary face needs its own vertical viscosity and friction (the explicit
     # diffusion_term! leaves the boundary points out); its implicit column provides them
     cfg.implicit_vertical_terms || throw(ArgumentError("a water-level boundary or free outflow (right_level, right_free) requires implicit_vertical_terms=true"))
@@ -1808,6 +1813,8 @@ function step_forward!(model::Model)
             # the splitting error is first order in time (dispersive standing wave at theta = 1/2: observed order
             # 1.49 -> 1.27); the incremental form gives order 2.0 (test_verify_theta_nonhydro_dispersive_temporal_order).
             grad_x_c!(ws.grad_pc_x, ws.p_corr, model.dx; periodic_x=cfg.periodic_x)
+            # WHY no term on an open right boundary face (issue #49): dq/dx = 0 there (grad_x_c! is zero on the
+            # boundary faces), see _check_right_level_config
             @. ws.u_hat -= cfg.dt / cfg.rho0 * ws.grad_pc_x
         end
 
@@ -2039,7 +2046,7 @@ function step_forward!(model::Model)
             grad_z_c!(ws.grad_pc_z, dq, model.dz)
             ws.p_corr .+= dq   # q^{n+1}
 
-            @. ws.u_hat = ws.u_hat - dt_q * (1.0 / cfg.rho0) * ws.grad_pc_x
+            @. ws.u_hat = ws.u_hat - dt_q * (1.0 / cfg.rho0) * ws.grad_pc_x   # open right boundary face: dq/dx = 0
             # WHY: only INTERIOR w faces (2:end-1) are corrected, same as the legacy Neumann case. With the
             # homogeneous-Neumann condition this correction is exactly zero at the boundary faces (0 and end), so
             # leaving them uncorrected changes nothing there. With the Dirichlet condition the (unapplied) top-face

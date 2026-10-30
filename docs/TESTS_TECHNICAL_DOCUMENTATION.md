@@ -1212,11 +1212,51 @@ $\Delta t\,(q_{in}\rho_{in}-q_{out}\rho_{nx})$, and the values stay within $[\rh
 other modes has no flux through the outer faces, so `left_rho` is rejected there.
 
 Not covered: the sharp-crested (thin-plate) weir. Its curved nappe needs the non-hydrostatic pressure, and open
-boundaries in the non-hydrostatic mode are issue #49.
+boundaries in the non-hydrostatic mode came with issue #49 (section 24); the weir case is still to be set up.
 
 References: Delestre et al. (2013), SWASHES, Int. J. Numer. Methods Fluids 72, 269-300, section 3.1.1; Chow (1959),
 Open-Channel Hydraulics, ch. 3, 14 and 15; Henderson (1966), Open Channel Flow, ch. 6 (weirs). Equation numbers were
 not checked.
+
+### 24) Open boundaries in the non-hydrostatic mode (issue #49)
+
+The water-level outlet and the free outflow (sections 21 and 22) now also work in the non-hydrostatic mode. The boundary
+face keeps its own momentum equation; the open boundary needs a condition for the non-hydrostatic pressure $q$. The
+discharge inlet stays a prescribed velocity, with no correction ($\partial q/\partial x=0$).
+
+**$\partial q/\partial x=0$ on the open face, fixed grid and wetting-drying step.** The boundary face gets no $q$
+correction, so the pressure problem keeps the boundary conditions of a closed basin. On the fixed grid, both pressure
+solvers (sparse and spectral) work, with the Neumann or the Dirichlet top (section 15).
+
+**Why not $q=0$ on the face.** That was the first design: a Dirichlet row in the Poisson matrix, with the face
+corrected by $(0-q_{n_x})/(\Delta x/2)$. It reflects much more of a dispersive wave. Measured with a Gaussian wave of
+width 1 m in 1 m depth leaving through a free outflow, as a fraction of its amplitude:
+
+| condition on the open face | wetting-drying step | fixed grid, Dirichlet top | fixed grid, Neumann top |
+|---|---|---|---|
+| $q=0$ on the face | 10-29 % (widths 1-5 m) | 4.4 % | 0.25 % |
+| $q=0$ one cell beyond | 8-21 % | | |
+| $\partial q/\partial x=0$ | 1.15 % (2-5 % for widths 1-5 m) | 1.34 % | 0.23 % |
+
+In the wetting-drying step, $q$ is zero in the surface cell rather than at the surface. On the fixed grid with the
+Neumann top, surface waves do not disperse (section 14); there the wave reaches the outlet as a long wave, and both
+conditions transmit it equally well. The first version of issue #49 was tested only in this mode, which hid the
+difference. The test now checks that the reference wave has its dispersive trough.
+
+The remaining reflection of a dispersive wave (1.2-1.3 %) comes mainly from the radiation condition of the free outflow.
+It uses the long-wave speed $\sqrt{gH}$, while the dispersive components are slower; a component with phase speed $c$
+is reflected by about $(\sqrt{gH}-c)/(\sqrt{gH}+c)$.
+
+Results:
+- **Uniform flow** in the #14 channel with a water-level outlet stays steady to $10^{-9}$ for 300 steps (fixed grid
+  with both solvers and with the Dirichlet top, wetting-drying step). With the Neumann projection, $q$ holds the
+  $x$-independent hydrostatic part of the reference density (about $1.7\cdot10^4$ Pa here); it exerts no force,
+  also on the open face.
+- **A dispersive wave** leaves through the free outflow with 1.34 % (fixed grid, Dirichlet top) and 1.15 %
+  (wetting-drying step) of its amplitude reflected; a prescribed level reflects it completely.
+- The volume budget with the boundary transports closes to round-off. On the fixed grid with the Neumann top, the
+  kinematic condition holds in every column, which includes the divergence of the boundary column.
+- Figures: `experiments/open_boundaries/`.
 
 ## Test-by-test documentation
 
@@ -2226,8 +2266,8 @@ stated otherwise.
   inlet with the parabolic shape, normal depth at the outlet. Depth and $U(L/2)$ within 1e-4 (relative) of the normal
   flow.
 - `test_verify_open_boundary_config_checks` and `test_verify_chezy_config_checks`: invalid combinations are rejected.
-  These are `right_level` together with `right_profile`, a non-finite level, explicit vertical terms, the
-  non-hydrostatic mode, `periodic_x`, negative discharge shapes, negative $C$, Chezy with `bed_roughness_length` or
+  These are `right_level` together with `right_profile`, a non-finite level, explicit vertical terms,
+  `periodic_x`, negative discharge shapes, negative $C$, Chezy with `bed_roughness_length` or
   k-epsilon, and Chezy on a staircase bed or with wetting and drying without implicit vertical terms.
 
 ### Open boundary tests (`test_open_boundaries.jl`, section 22)
@@ -2247,7 +2287,16 @@ stated otherwise.
 - `test_verify_open_boundary_46_config_checks`: rejected combinations are
   - `left_level` without discharge, non-finite, or on the fixed grid;
   - `right_free` together with `right_level` or `right_profile`;
-  - `right_free` with explicit vertical terms or in the non-hydrostatic mode.
+  - `right_free` with explicit vertical terms.
+- Non-hydrostatic mode (section 24):
+  - `test_verify_nonhydro_open_channel_uniform_flow_is_steady`: fixed grid (sparse, spectral, Dirichlet top) and
+    wetting-drying step; $u$ and $\eta$ stay to 1e-9 for 300 steps.
+  - `test_validate_nonhydro_free_outflow_transmits_dispersive_wave`: the reference (a twice as long channel) shows
+    the dispersive trough (> 10 % of $A$; fixed grid with the Dirichlet top, wetting-drying step). Reflection is below
+    3 % for the dispersive wave (measured 1.34 % on the fixed grid with the Dirichlet top, 1.15 % in the wetting-drying
+    step) and below 1 % for the long wave of the Neumann top (measured 0.23 %). A prescribed level reflects more than
+    15 %. Also checks the volume budget, and with the Neumann top the kinematic condition, every step.
+  - `test_verify_nonhydro_open_boundary_any_pressure_solver`: the spectral and the sparse solver are accepted.
 
 ### Obstacle tests (`test_obstacles.jl`, section 23)
 

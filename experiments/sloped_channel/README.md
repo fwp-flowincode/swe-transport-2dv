@@ -143,4 +143,4 @@ Limits
   flow (nz = 10, dz = 0.4 m) sends a bore that reflects at the discharge inlet and reaches 0.8 m, and the run fails.
   For such cases use the fixed grid or the wetting-drying step. The backwater cases above start from the reference
   profile.
-- The water-level boundary is hydrostatic only and needs `implicit_vertical_terms=true`.
+- The water-level boundary needs `implicit_vertical_terms=true` (also in the non-hydrostatic mode; issue #49).
