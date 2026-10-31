@@ -22,6 +22,18 @@
 # for eps the Dirichlet value eps_s = C_mu^(3/4) k_s^(3/2) / (kappa 0.07 H) (Rodi 1993; default, as in Lopez & Garcia
 # 1997) or zero flux.
 # Density: implicit vertical diffusion with K = nu_t / sigma_rho at the w-faces (conservative, layer thicknesses).
+# Variable top layer (issue #30, `top_thickness`): the top row has the thickness h_t = dz + eta of its column; it enters
+# the centre distances (dudz, N², diffusion), the finite-volume diffusion of the top row, its vertical advection and the
+# depth of the surface condition, and dw/dz = -du/dx there (the top flux w includes the volume change of the row).
+#
+# Realizability time-scale bound (issue #30; Durbin 1996, Int. J. Heat Fluid Flow 17, 89-90; Medic & Durbin 2002,
+# J. Turbomach. 124, 187-192; equation numbers not checked): the turbulence time scale
+#     T = min(k/eps, alpha / (sqrt(6) C_mu |S|)),   |S|^2 = S_ij S_ij,   alpha = 0.6,
+# replaces k/eps in nu_t = C_mu k T and in the eps equation (sources and sink divided by T). In equilibrium shear flow
+# (P = eps: k/eps |S| = 1/sqrt(2 C_mu) = 2.36 < alpha/(sqrt(6) C_mu) = 2.72) the bound is inactive. WHY: where the strain
+# rises faster than eps can follow (a dam-break front, a stagnation point in front of an obstacle), the explicit
+# production lets k grow by orders of magnitude in one step while eps lags, and k^2/eps gave nu_t = 40 m^2/s in a
+# wetting-drying dam break (the k-epsilon stagnation-point anomaly).
 
 const KE_C_MU = 0.09            # -, Launder & Spalding (1974)
 const KE_C1 = 1.44              # -
@@ -42,6 +54,23 @@ const KE_EPS_MIN = 1e-14        # m^2/s^3, floor of eps
 const KE_K_INIT = 1e-8          # m^2/s^2, initial k (quiescent)
 const KE_NU_T_INIT = 1e-6       # m^2/s, initial nu_t (sets the initial eps)
 const KE_SURFACE_LENGTH = 0.07   # -, free-surface dissipation length 0.07 H of Rodi (1993) (surface_condition = :rodi)
+const KE_REALIZABILITY_ALPHA = 0.6   # -, time-scale bound of Durbin (1996)
+
+"""
+    ke_time_scale(k, eps, strain2) -> Float64
+
+Turbulence time scale T (s) = min(k/eps, alpha / (sqrt(6) C_mu |S|)) with the realizability bound of Durbin (1996), for
+`k` (m²/s²), `eps` (m²/s³) and `strain2` = 2 S_ij S_ij (1/s², the bracket of the shear production P = nu_t strain2),
+i.e. |S| = sqrt(strain2 / 2). See the file header.
+"""
+@inline function ke_time_scale(k::Real, eps::Real, strain2::Real)
+    strain2 > 0 || return k / eps
+    return min(k / eps, KE_REALIZABILITY_ALPHA / (sqrt(6) * KE_C_MU * sqrt(0.5 * strain2)))
+end
+
+# Time scale (s) of the closure `ke`: bounded (ke_time_scale) or, with ke.realizability = false, k/eps.
+@inline _ke_time(ke, k::Real, eps::Real, strain2::Real) =
+    ke.realizability ? ke_time_scale(k, eps, strain2) : k / eps
 
 """
     KEpsilonState(nz, nx; T=Float64)
@@ -55,9 +84,11 @@ mutable struct KEpsilonState{T<:Real}
     nu_t::Matrix{T}
     veg_work::Matrix{T}
     production::Matrix{T}
+    strain2::Matrix{T}          # 1/s², 2 S_ij S_ij of the production (time-scale bound)
     buoyancy::Matrix{T}
     k_adv::Matrix{T}
     eps_adv::Matrix{T}
+    h_top::Vector{T}            # m, top-row thickness of the variable top layer (work vector, set by step_forward!)
     lower::Vector{T}
     diag::Vector{T}
     upper::Vector{T}
@@ -66,17 +97,19 @@ mutable struct KEpsilonState{T<:Real}
     cfk::Float64                # -, vegetation weight in the k equation
     cfe::Float64                # -, vegetation weight in the eps equation
     surface_condition::Symbol   # :zero_flux or :rodi (eps_s = C_mu^(3/4) k_s^(3/2) / (kappa 0.07 H))
+    realizability::Bool         # time-scale bound of Durbin (1996) on (default); false: T = k/eps (for comparisons)
 end
 
-function KEpsilonState(nz::Int, nx::Int; T::Type{<:Real}=Float64, cfk::Real=KE_VEG_CFK, cfe::Real=KE_VEG_CFE, surface_condition::Symbol=:rodi)
+function KEpsilonState(nz::Int, nx::Int; T::Type{<:Real}=Float64, cfk::Real=KE_VEG_CFK, cfe::Real=KE_VEG_CFE, surface_condition::Symbol=:rodi,
+    realizability::Bool=true)
     nz >= 2 || throw(ArgumentError("k-epsilon requires nz >= 2"))
     surface_condition in (:zero_flux, :rodi) || throw(ArgumentError("surface_condition must be :zero_flux or :rodi"))
     k = fill(T(KE_K_INIT), nz, nx)
     eps = fill(T(KE_C_MU * KE_K_INIT^2 / KE_NU_T_INIT), nz, nx)
     nu_t = fill(T(KE_NU_T_INIT), nz, nx)
     z() = zeros(T, nz, nx)
-    return KEpsilonState{T}(k, eps, nu_t, z(), z(), z(), z(), z(), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz),
-        Float64(cfk), Float64(cfe), surface_condition)
+    return KEpsilonState{T}(k, eps, nu_t, z(), z(), z(), z(), z(), z(), zeros(T, nx), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz),
+        Float64(cfk), Float64(cfe), surface_condition, realizability)
 end
 
 """
@@ -125,21 +158,25 @@ function _solve_tridiagonal_column!(sol, lower, diag, upper, rhs, n)
 end
 
 """
-    implicit_vertical_diffusion!(phi, diffusivity_w, thickness, dt, dz; first=1, wall_value=nothing, ws)
+    implicit_vertical_diffusion!(phi, diffusivity_w, thickness, dt, dz, ws; top_thickness=nothing)
 
 One backward-Euler step of d(h phi)/dt = d/dz(K d phi/dz) per column for the cell-centred field `phi` (nz x nx), with
 the diffusivity `diffusivity_w(k, i)` (m²/s) at the face between rows k and k+1 (k = 1 .. nz-1), the layer thicknesses
-`thickness(k, i)` (m) and zero flux through the bed and the surface. Conservative: sum_k h_k phi_k is unchanged.
+`thickness(k, i)` (m) and zero flux through the bed and the surface. The centres are dz apart; with `top_thickness` (m,
+per column, variable top layer) the top row is (dz + h_t)/2 above the one below. Conservative: sum_k h_k phi_k is
+unchanged.
 """
-function implicit_vertical_diffusion!(phi::AbstractMatrix{<:Real}, diffusivity_w, thickness, dt::Real, dz::Real, ws::KEpsilonState)
+function implicit_vertical_diffusion!(phi::AbstractMatrix{<:Real}, diffusivity_w, thickness, dt::Real, dz::Real, ws::KEpsilonState;
+    top_thickness::Union{Nothing,AbstractVector{<:Real}}=nothing)
     nz, nx = size(phi)
     nz >= 2 || return phi
     lower, diag, upper, rhs, sol = ws.lower, ws.diag, ws.upper, ws.rhs, ws.sol
     @inbounds for i in 1:nx
+        dtop = top_thickness === nothing ? dz : 0.5 * (dz + top_thickness[i])   # m, distance of the top two centres
         for k in 1:nz
             h = thickness(k, i)
-            kd = k > 1 ? dt * diffusivity_w(k - 1, i) / dz : 0.0      # face below (distance between centres: dz)
-            ku = k < nz ? dt * diffusivity_w(k, i) / dz : 0.0         # face above
+            kd = k > 1 ? dt * diffusivity_w(k - 1, i) / (k == nz ? dtop : dz) : 0.0   # face below
+            ku = k < nz ? dt * diffusivity_w(k, i) / (k == nz - 1 ? dtop : dz) : 0.0  # face above
             lower[k] = -kd
             upper[k] = -ku
             diag[k] = h + kd + ku
@@ -155,10 +192,12 @@ end
 
 # Conservative first-order upwind advection of the cell-centred scalar `phi` with the face velocities u (nz x (nx+1))
 # and w ((nz+1) x nx); closed outer faces have u = 0 / w = 0; at inflow faces (u > 0 at i = 1, u < 0 at i = nx+1) the
-# boundary cell value is used (zero gradient); periodic_x wraps.
-function _advect_upwind_scalar!(out, phi, u, w, dt, dx, dz, periodic_x)
+# boundary cell value is used (zero gradient); periodic_x wraps. `top_thickness` (m, per column): thickness of the top
+# row of the variable top layer for its vertical terms.
+function _advect_upwind_scalar!(out, phi, u, w, dt, dx, dz, periodic_x; top_thickness=nothing)
     nz, nx = size(phi)
     @inbounds for i in 1:nx, k in 1:nz
+        hv = (k == nz && top_thickness !== nothing) ? top_thickness[i] : dz   # m, thickness of the vertical terms
         il = periodic_x ? mod1(i - 1, nx) : max(i - 1, 1)
         ir = periodic_x ? mod1(i + 1, nx) : min(i + 1, nx)
         ul, ur = u[k, i], u[k, i + 1]
@@ -169,40 +208,49 @@ function _advect_upwind_scalar!(out, phi, u, w, dt, dx, dz, periodic_x)
         flux_t = k == nz ? 0.0 : (wt >= 0 ? wt * phi[k, i] : wt * phi[k + 1, i])
         # WHY the divergence correction phi * div(u): keeps a uniform field uniform when the discrete velocity field is
         # not exactly divergence-free in a cell (free surface, inflow), i.e. advective form for the non-solenoidal part.
-        div = (ur - ul) / dx + ((k == nz ? 0.0 : wt) - (k == 1 ? 0.0 : wb)) / dz
-        out[k, i] = phi[k, i] - dt * ((flux_r - flux_l) / dx + (flux_t - flux_b) / dz - phi[k, i] * div)
+        div = (ur - ul) / dx + ((k == nz ? 0.0 : wt) - (k == 1 ? 0.0 : wb)) / hv
+        out[k, i] = phi[k, i] - dt * ((flux_r - flux_l) / dx + (flux_t - flux_b) / hv - phi[k, i] * div)
     end
     return out
 end
 
 """
-    k_epsilon_step!(ke, u, w, rho, dt, dx, dz, nu, g, rho0; periodic_x=false, bed_roughness=0.0)
+    k_epsilon_step!(ke, u, w, rho, dt, dx, dz, nu, g, rho0; periodic_x=false, bed_roughness=0.0, top_thickness=nothing)
 
 Advances k and eps by one time step for the velocities `u`, `w` (m/s) and the density `rho` (kg/m³) of the new time
 level (see the file header) and updates `ke.nu_t`. `ke.veg_work` (m²/s³) holds the vegetation production of the step.
+`top_thickness` (m, per column): top-row thickness dz + eta of the variable top layer; `nothing` on the fixed grid.
 """
 function k_epsilon_step!(ke::KEpsilonState, u::AbstractMatrix{<:Real}, w::AbstractMatrix{<:Real}, rho::AbstractMatrix{<:Real},
-    dt::Real, dx::Real, dz::Real, nu::Real, g::Real, rho0::Real; periodic_x::Bool=false, bed_roughness::Real=0.0)
+    dt::Real, dx::Real, dz::Real, nu::Real, g::Real, rho0::Real; periodic_x::Bool=false, bed_roughness::Real=0.0,
+    top_thickness::Union{Nothing,AbstractVector{<:Real}}=nothing)
     nz, nx = size(ke.k)
     k, eps, nu_t = ke.k, ke.eps, ke.nu_t
+    variable_top = top_thickness !== nothing
     # cell-centred horizontal velocity
     uc(kk, i) = 0.5 * (u[kk, i] + u[kk, i + 1])
+    # thickness (m) and centre height (m) of row kk; distance (m) between the centres of rows ka < kb
+    th(kk, i) = (variable_top && kk == nz) ? top_thickness[i] : dz
+    zc(kk, i) = (variable_top && kk == nz) ? (nz - 1) * dz + 0.5 * top_thickness[i] : (kk - 0.5) * dz
+    dist(ka, kb, i) = (variable_top && kb == nz) ? zc(kb, i) - zc(ka, i) : (kb - ka) * dz
     @inbounds for i in 1:nx, kk in 1:nz
         k_up, k_dn = min(kk + 1, nz), max(kk - 1, 1)
-        dudz = (uc(k_up, i) - uc(k_dn, i)) / ((k_up - k_dn) * dz)
+        dudz = (uc(k_up, i) - uc(k_dn, i)) / dist(k_dn, k_up, i)
         il = periodic_x ? mod1(i - 1, nx) : max(i - 1, 1)
         ir = periodic_x ? mod1(i + 1, nx) : min(i + 1, nx)
         wc(ii) = 0.5 * (w[kk, ii] + w[kk + 1, ii])
         dwdx = ir == il ? 0.0 : (wc(ir) - wc(il)) / ((ir > il ? ir - il : ir - il + nx) * dx)
         dudx = (u[kk, i + 1] - u[kk, i]) / dx
-        dwdz = (w[kk + 1, i] - w[kk, i]) / dz
-        ke.production[kk, i] = nu_t[kk, i] * ((dudz + dwdx)^2 + 2 * dudx^2 + 2 * dwdz^2)
-        n2 = -(g / rho0) * (rho[k_up, i] - rho[k_dn, i]) / ((k_up - k_dn) * dz)
+        # WHY -du/dx in the variable top row: its top flux includes the volume change of the row
+        dwdz = (variable_top && kk == nz) ? -dudx : (w[kk + 1, i] - w[kk, i]) / dz
+        ke.strain2[kk, i] = (dudz + dwdx)^2 + 2 * dudx^2 + 2 * dwdz^2
+        ke.production[kk, i] = nu_t[kk, i] * ke.strain2[kk, i]
+        n2 = -(g / rho0) * (rho[k_up, i] - rho[k_dn, i]) / dist(k_dn, k_up, i)
         ke.buoyancy[kk, i] = -(nu_t[kk, i] / KE_SIGMA_RHO) * n2
     end
     # advection (explicit upwind)
-    _advect_upwind_scalar!(ke.k_adv, k, u, w, dt, dx, dz, periodic_x)
-    _advect_upwind_scalar!(ke.eps_adv, eps, u, w, dt, dx, dz, periodic_x)
+    _advect_upwind_scalar!(ke.k_adv, k, u, w, dt, dx, dz, periodic_x; top_thickness=top_thickness)
+    _advect_upwind_scalar!(ke.eps_adv, eps, u, w, dt, dx, dz, periodic_x; top_thickness=top_thickness)
     @. k = max(ke.k_adv, KE_K_MIN)
     @. eps = max(ke.eps_adv, KE_EPS_MIN)
     # implicit vertical diffusion with sources and implicit sinks, column by column
@@ -218,16 +266,18 @@ function k_epsilon_step!(ke::KEpsilonState, u::AbstractMatrix{<:Real}, w::Abstra
             for j in 1:n
                 kk = j + first - 1
                 ratio = eps[kk, i] / k[kk, i]                              # 1/s, old (after advection) eps/k
-                kd = kk > first ? dt * (nu + 0.5 * (nu_t[kk, i] + nu_t[kk - 1, i]) / sigma) / dz^2 : 0.0
-                ku = kk < nz ? dt * (nu + 0.5 * (nu_t[kk, i] + nu_t[kk + 1, i]) / sigma) / dz^2 : 0.0
+                inv_t = 1 / _ke_time(ke, k[kk, i], eps[kk, i], ke.strain2[kk, i])   # 1/s, >= eps/k
+                # finite volumes: K / (centre distance * row thickness); dz^2 on the fixed grid
+                kd = kk > first ? dt * (nu + 0.5 * (nu_t[kk, i] + nu_t[kk - 1, i]) / sigma) / (dist(kk - 1, kk, i) * th(kk, i)) : 0.0
+                ku = kk < nz ? dt * (nu + 0.5 * (nu_t[kk, i] + nu_t[kk + 1, i]) / sigma) / (dist(kk, kk + 1, i) * th(kk, i)) : 0.0
                 p, gb, pv = ke.production[kk, i], ke.buoyancy[kk, i], ke.veg_work[kk, i]
                 if field === :k
                     source = p + max(gb, 0.0) + ke.cfk * pv
                     sink = ratio + max(-gb, 0.0) / k[kk, i]               # implicit: eps/k and negative buoyancy
                 else
                     c3 = gb > 0 ? KE_C3_UNSTABLE : KE_C3_STABLE
-                    source = ratio * (KE_C1 * (p + ke.cfe * pv) + c3 * max(gb, 0.0))
-                    sink = KE_C2 * ratio
+                    source = inv_t * (KE_C1 * (p + ke.cfe * pv) + c3 * max(gb, 0.0))
+                    sink = KE_C2 * inv_t
                 end
                 lower[j] = -kd
                 upper[j] = -ku
@@ -240,13 +290,14 @@ function k_epsilon_step!(ke::KEpsilonState, u::AbstractMatrix{<:Real}, w::Abstra
                 ustar2 = cb * u1^2
                 bed_value = field === :k ? ustar2 / sqrt(KE_C_MU) : (sqrt(ustar2))^3 / (KE_KARMAN * z1)
                 phi[1, i] = max(bed_value, field === :k ? KE_K_MIN : KE_EPS_MIN)
-                kd = dt * (nu + 0.5 * (nu_t[2, i] + nu_t[1, i]) / sigma) / dz^2
+                kd = dt * (nu + 0.5 * (nu_t[2, i] + nu_t[1, i]) / sigma) / (dist(1, 2, i) * th(2, i))
                 diag[1] += kd
                 rhs[1] += kd * phi[1, i]
             end
             if field === :eps && ke.surface_condition === :rodi
                 # free-surface dissipation (Rodi 1993): Dirichlet value in the top cell from its k
-                eps_s = KE_C_MU^0.75 * k[nz, i]^1.5 / (KE_KARMAN * KE_SURFACE_LENGTH * nz * dz)
+                depth = variable_top ? (nz - 1) * dz + top_thickness[i] : nz * dz   # m
+                eps_s = KE_C_MU^0.75 * k[nz, i]^1.5 / (KE_KARMAN * KE_SURFACE_LENGTH * depth)
                 lower[n] = 0.0
                 diag[n] = 1.0
                 rhs[n] = eps_s
@@ -258,7 +309,7 @@ function k_epsilon_step!(ke::KEpsilonState, u::AbstractMatrix{<:Real}, w::Abstra
             end
         end
     end
-    @. nu_t = KE_C_MU * k^2 / eps
+    nu_t .= KE_C_MU .* k .* _ke_time.(Ref(ke), k, eps, ke.strain2)
     return ke
 end
 

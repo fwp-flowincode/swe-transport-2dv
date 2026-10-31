@@ -31,8 +31,9 @@ Model
   obstacles; the non-hydrostatic projection then uses the sparse solver on the wet cells.
 - Optional extras:
   - molecular viscosity;
-  - mixing-length turbulence, or a k-epsilon closure with buoyancy and vegetation terms (`turbulence_closure`; flat bed,
-    fixed top layer);
+  - mixing-length turbulence, or a k-epsilon closure with buoyancy and vegetation terms and a realizability bound
+    (`turbulence_closure`; fixed grid with a flat bed or the variable top layer, and with wetting and drying; issue #30,
+    docs/TESTS_TECHNICAL_DOCUMENTATION.md, sections 17 and 27);
   - log-law bed friction with wall functions (`bed_roughness_length`), or Chezy friction on the depth-averaged velocity
     (`chezy_coefficient`; issue #14, docs/TESTS_TECHNICAL_DOCUMENTATION.md, section 21);
   - lateral boundaries (`set_x_inflow_outflow!`): inflow velocity profile or discharge (`left_discharge`, with

@@ -1073,9 +1073,6 @@ function _check_model_config(cfg::ModelConfig)
     if !(cfg.turbulence_closure in ("none", "mixing_length", "k_epsilon"))
         throw(ArgumentError("turbulence_closure must be \"none\", \"mixing_length\" or \"k_epsilon\", got \"$(cfg.turbulence_closure)\""))
     end
-    if turbulence_closure(cfg) == "k_epsilon" && use_variable_top_layer(cfg)
-        throw(ArgumentError("turbulence_closure=\"k_epsilon\" does not support variable_top_layer=true"))
-    end
     if cfg.bed_roughness_length < 0.0 || cfg.bed_roughness_length >= 0.5 * cfg.depth / cfg.nz
         throw(ArgumentError("bed_roughness_length must be in [0, dz/2)"))
     end
@@ -1105,7 +1102,9 @@ end
 function _check_wetting_drying_config(cfg::ModelConfig)
     cfg.periodic_x && throw(ArgumentError("wetting_drying=true does not support periodic_x=true"))
     cfg.momentum_advection_scheme in ("upwind1", "tvd2") || throw(ArgumentError("momentum_advection_scheme must be \"upwind1\" or \"tvd2\", got \"$(cfg.momentum_advection_scheme)\""))
-    turbulence_closure(cfg) == "none" || throw(ArgumentError("wetting_drying=true does not support a turbulence closure"))
+    turbulence_closure(cfg) in ("none", "k_epsilon") || throw(ArgumentError("wetting_drying=true supports turbulence_closure=\"none\" or \"k_epsilon\""))
+    turbulence_closure(cfg) == "k_epsilon" && !cfg.implicit_vertical_terms &&
+        throw(ArgumentError("wetting_drying=true with turbulence_closure=\"k_epsilon\" requires implicit_vertical_terms=true (the eddy viscosity enters the implicit vertical column)"))
     (cfg.bed_roughness_length == 0.0 && cfg.chezy_coefficient == 0.0) || cfg.implicit_vertical_terms ||
         throw(ArgumentError("wetting_drying=true supports bed_roughness_length and chezy_coefficient only with implicit_vertical_terms=true (the cut layers at the bed can be arbitrarily thin)"))
     cfg.wind_stress_x == 0.0 || throw(ArgumentError("wetting_drying=true does not support wind_stress_x"))
@@ -2150,11 +2149,13 @@ function step_forward!(model::Model)
         end
         _apply_wind_surface_density_mixing!(ws.rho_new, cfg, model.dz)
         if model.turbulence !== nothing
-            # turbulent density diffusion K = nu_t / sigma_rho at the w-faces (implicit, conservative; k-epsilon runs on the
-            # fixed grid only, so every layer has the thickness dz)
+            # turbulent density diffusion K = nu_t / sigma_rho at the w-faces (implicit, conservative), with the top-row
+            # thickness dz + eta^{n+1} of the variable top layer (issue #30)
             ke = model.turbulence
+            variable_top && (@. ke.h_top = model.dz + st.eta)
             implicit_vertical_diffusion!(ws.rho_new, (k, i) -> 0.5 * (ke.nu_t[k, i] + ke.nu_t[k + 1, i]) / KE_SIGMA_RHO,
-                (k, i) -> model.dz, cfg.dt, model.dz, ke)
+                (k, i) -> (variable_top && k == cfg.nz) ? ke.h_top[i] : model.dz, cfg.dt, model.dz, ke;
+                top_thickness=variable_top ? ke.h_top : nothing)
         end
         copyto!(st.rho, ws.rho_new)
         _correct_constituent_mass!(model)
@@ -2163,7 +2164,8 @@ function step_forward!(model::Model)
     if model.turbulence !== nothing
         model.vegetation === nothing && fill!(model.turbulence.veg_work, 0.0)
         @timeit model.timers "step/k_epsilon" k_epsilon_step!(model.turbulence, st.u, st.w, st.rho, cfg.dt, model.dx, model.dz, cfg.nu,
-            cfg.g, cfg.rho0; periodic_x=cfg.periodic_x, bed_roughness=cfg.bed_roughness_length)
+            cfg.g, cfg.rho0; periodic_x=cfg.periodic_x, bed_roughness=cfg.bed_roughness_length,
+            top_thickness=variable_top ? model.turbulence.h_top : nothing)
     end
 
     @timeit model.timers "step/final_pressure" begin

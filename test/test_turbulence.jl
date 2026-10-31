@@ -19,6 +19,32 @@ function turbulence_channel_model(; use_hydrostatic=true, depth, nz, dt, t_end, 
     return model
 end
 
+# Wetting-drying open channel with k-epsilon (issue #30): discharge q at the inlet, the normal depth `depth` as outlet
+# level, the slope as body force; flat bed or the bed raised by `bed` (m) in a grid of depth `grid_depth` (m).
+# Returns the model and the column index at 3/4 of the reach.
+function wd_channel_model(; q, depth, slope, z0, nz, grid_depth=depth, bed=0.0, length=80.0, nx=80, dt=0.25, t_end=900.0)
+    cfg = ModelConfig(; length=length, depth=grid_depth, nx=nx, nz=nz, dt=dt, use_hydrostatic=true, nu=1e-6,
+        body_force_x=9.81 * slope, turbulence_closure="k_epsilon", bed_roughness_length=z0, rayleigh_damping=0.0,
+        apply_froude_limiter=false, momentum_advection_scheme="tvd2", wetting_drying=true, implicit_vertical_terms=true,
+        theta=1.0, bed_level=bed == 0.0 ? nothing : fill(bed, nx), write_plots=false)
+    model = Model(cfg)
+    fill!(model.state.rho, TURB_RHO0)
+    refresh_density_metadata!(model)
+    initialize_water_level!(model, fill(bed + depth, nx))
+    set_x_inflow_outflow!(model, ones(nz); left_discharge=q, right_level=bed + depth - grid_depth)
+    for _ in 1:round(Int, t_end / dt)
+        step_forward!(model)
+    end
+    return model, round(Int, 0.75nx)
+end
+
+# Wet-cell profiles of column i: thicknesses (m), cell-centred velocity (m/s), eddy viscosity (m^2/s), k (m^2/s^2)
+function wd_column(model, i)
+    wet = findall(>(1e-12), model.wetdry.h[:, i])
+    u = [0.5 * (model.state.u[k, i] + model.state.u[k, i + 1]) for k in wet]
+    return model.wetdry.h[wet, i], u, model.turbulence.nu_t[wet, i], model.turbulence.k[wet, i]
+end
+
 @testset "Turbulence" begin
     @testset "test_verify_k_epsilon_decaying_homogeneous_turbulence" begin
         # No shear, no gradients: dk/dt = -eps, deps/dt = -C2 eps²/k, exact solution
@@ -94,6 +120,174 @@ end
             z_peak = (argmax(nut) - 0.5) * model.dz / H
             @test NU_T_PEAK_RANGE[1] < z_peak < NU_T_PEAK_RANGE[2]
         end
+    end
+
+    @testset "test_verify_k_epsilon_time_step_independence" begin
+        # implicit vertical terms (issue #30): the eddy viscosity enters the implicit column, so the steady channel does
+        # not depend on dt, also 50 times above the explicit diffusion limit 0.2 dz^2 / nu_t = 0.04 s (observed: equal
+        # to 5 digits for dt = 0.1 and 2 s)
+        H, SLOPE, Z0 = 0.5, 1e-3, 1e-3
+        DT_RTOL = 1e-4
+        runs = map((0.1, 2.0)) do dt
+            model = turbulence_channel_model(; depth=H, nz=20, dt=dt, t_end=900.0, slope=SLOPE, z0=Z0, implicit_vertical_terms=true)
+            for _ in 1:model.config.nt
+                step_forward!(model)
+            end
+            (vec(mean(model.state.u[:, 1:end-1]; dims=2)), vec(mean(model.turbulence.nu_t; dims=2)))
+        end
+        @test 2.0 > 40 * 0.2 * (H / 20)^2 / maximum(runs[2][2])
+        @test runs[2][1] ≈ runs[1][1] rtol = DT_RTOL
+        @test runs[2][2] ≈ runs[1][2] rtol = DT_RTOL
+    end
+
+    @testset "test_validate_k_epsilon_wetting_drying_open_channel" begin
+        # k-epsilon in the wetting-drying step (issue #30): the developed flow of an open channel (80 m, inlet discharge of
+        # the periodic equilibrium, outlet at the normal depth) equals the periodic fixed-grid channel (observed within
+        # 1e-4 at 3/4 of the reach; 6 % in nu_t on a 40 m reach, where the flow still develops); also with dt = 0.25 s
+        H, SLOPE, Z0, NZ = 0.5, 1e-3, 1e-3, 20
+        PROFILE_RTOL = 2e-3
+        ref = turbulence_channel_model(; depth=H, nz=NZ, dt=0.1, t_end=900.0, slope=SLOPE, z0=Z0, implicit_vertical_terms=true)
+        for _ in 1:ref.config.nt
+            step_forward!(ref)
+        end
+        uref = vec(mean(ref.state.u[:, 1:end-1]; dims=2))
+        nutref = vec(mean(ref.turbulence.nu_t; dims=2))
+        model, i = wd_channel_model(; q=mean(uref) * H, depth=H, slope=SLOPE, z0=Z0, nz=NZ)
+        h, u, nut, k = wd_column(model, i)
+        @test sum(h) ≈ H rtol = PROFILE_RTOL
+        @test u ≈ uref rtol = PROFILE_RTOL
+        @test maximum(nut) ≈ maximum(nutref) rtol = PROFILE_RTOL
+        @test k[1] ≈ ref.turbulence.k[1, 1] rtol = PROFILE_RTOL
+        @test k[1] * sqrt(KE_C_MU_VALUE) ≈ 9.81 * SLOPE * H rtol = PROFILE_RTOL   # wall function: u*^2 = g S H
+    end
+
+    @testset "test_validate_k_epsilon_variable_top_layer_open_channel" begin
+        # variable top layer (issue #30): open channel on the fixed grid (80 m, inlet discharge of the periodic equilibrium,
+        # outlet at the normal depth) with the grid 1 cm below the water level, so that the top row is 0.0345 m thick
+        # against dz = 0.0245 m; the developed flow equals the periodic channel (observed: U 6e-5, k_1 1.3e-3, nu_t 3e-3)
+        H, SLOPE, Z0, NZ, GAP = 0.5, 1e-3, 1e-3, 20, 0.01
+        VTOP_RTOL = 1e-2
+        ref = turbulence_channel_model(; depth=H, nz=NZ, dt=0.1, t_end=900.0, slope=SLOPE, z0=Z0, implicit_vertical_terms=true)
+        for _ in 1:ref.config.nt
+            step_forward!(ref)
+        end
+        q = mean(ref.state.u[:, 1:end-1]) * H
+        cfg = ModelConfig(; length=80.0, depth=H - GAP, nx=80, nz=NZ, dt=0.25, use_hydrostatic=true, variable_top_layer=true,
+            nu=1e-6, body_force_x=9.81 * SLOPE, turbulence_closure="k_epsilon", bed_roughness_length=Z0, rayleigh_damping=0.0,
+            apply_froude_limiter=false, momentum_advection_scheme="tvd2", implicit_vertical_terms=true, theta=1.0,
+            write_plots=false, write_animation=false, write_pressure_buoyancy_diagnostics=false)
+        model = Model(cfg)
+        fill!(model.state.rho, TURB_RHO0)
+        refresh_density_metadata!(model)
+        model.state.eta .= GAP
+        set_x_inflow_outflow!(model, ones(NZ); left_discharge=q, right_level=GAP)
+        for _ in 1:round(Int, 900.0 / cfg.dt)
+            step_forward!(model)
+        end
+        i = 60
+        h_top = model.dz + model.state.eta[i]
+        @test h_top > 1.3 * model.dz
+        th = [k == NZ ? h_top : model.dz for k in 1:NZ]
+        u = [0.5 * (model.state.u[k, i] + model.state.u[k, i + 1]) for k in 1:NZ]
+        @test sum(th .* u) / sum(th) ≈ q / H rtol = VTOP_RTOL
+        @test model.turbulence.k[1, i] * sqrt(KE_C_MU_VALUE) ≈ 9.81 * SLOPE * H rtol = VTOP_RTOL
+        @test maximum(model.turbulence.nu_t[:, i]) ≈ maximum(ref.turbulence.nu_t) rtol = VTOP_RTOL
+    end
+
+    @testset "test_verify_k_epsilon_wetting_drying_raised_bed" begin
+        # the same channel over a bed raised by whole layers is the flat channel shifted (round-off); over a bed that cuts
+        # a layer (lowest wet cell 0.015 m instead of 0.025 m) the depth-mean velocity and the bed stress are unchanged
+        # (observed 1e-5 and 6e-4) while the lowest velocity point moves down
+        H, SLOPE, Z0, NZ = 0.5, 1e-3, 1e-3, 20
+        q = 0.4721   # m^2/s, the equilibrium discharge of the periodic channel (test above)
+        CUT_RTOL = 2e-3
+        flat, i = wd_channel_model(; q=q, depth=H, slope=SLOPE, z0=Z0, nz=NZ)
+        hf, uf, nf, kf = wd_column(flat, i)
+        aligned, _ = wd_channel_model(; q=q, depth=H, slope=SLOPE, z0=Z0, nz=28, grid_depth=H + 0.2, bed=0.2)
+        ha, ua, na, ka = wd_column(aligned, i)
+        @test ha ≈ hf rtol = TOL_MODEL_IDENTITY
+        @test ua ≈ uf rtol = TOL_MODEL_IDENTITY
+        @test na ≈ nf rtol = TOL_MODEL_IDENTITY
+        cut, _ = wd_channel_model(; q=q, depth=H, slope=SLOPE, z0=Z0, nz=28, grid_depth=H + 0.2, bed=0.21)
+        hc, uc, nc, kc = wd_column(cut, i)
+        @test hc[1] < 0.7 * hf[1]
+        @test sum(hc .* uc) / sum(hc) ≈ sum(hf .* uf) / sum(hf) rtol = CUT_RTOL
+        @test kc[1] ≈ kf[1] rtol = CUT_RTOL
+    end
+
+    @testset "test_verify_k_epsilon_wetting_drying_moving_shoreline" begin
+        # dam break of a stratified column (1010 / 1000 kg/m^3) onto a dry slope, hydrostatic and non-hydrostatic, 40 s:
+        # volume and density mass to round-off, k and eps positive and finite; the realizability time-scale bound keeps
+        # nu_t physical (observed max 2.6e-3 m^2/s; without the bound 41 m^2/s at the front in the second step)
+        NU_T_MAX = 1e-2   # m^2/s
+        L, nx, nz = 10.0, 100, 10
+        xc = ((1:nx) .- 0.5) .* (L / nx)
+        for nonhydro in (false, true)
+            cfg = ModelConfig(; length=L, depth=0.5, nx=nx, nz=nz, dt=0.005, use_hydrostatic=!nonhydro, nu=1e-6,
+                turbulence_closure="k_epsilon", bed_roughness_length=1e-3, rayleigh_damping=0.0, apply_froude_limiter=false,
+                momentum_advection_scheme="tvd2", wetting_drying=true, implicit_vertical_terms=true, theta=1.0,
+                bed_level=[max(0.0, 0.06 * (x - 4.0)) for x in xc], write_plots=false)
+            model = Model(cfg)
+            for i in 1:nx, k in 1:nz
+                model.state.rho[k, i] = k <= 4 ? 1010.0 : 1000.0
+            end
+            refresh_density_metadata!(model)
+            initialize_water_level!(model, [x < 3.0 ? 0.4 : 0.0 for x in xc])
+            mass() = sum(model.wetdry.h .* model.state.rho)
+            volume() = sum(model.wetdry.h)
+            M0, V0 = mass(), volume()
+            ke = model.turbulence
+            nut_max = 0.0
+            positive = true
+            for _ in 1:round(Int, 40.0 / cfg.dt)
+                step_forward!(model)
+                nut_max = max(nut_max, maximum(ke.nu_t))
+                positive &= all(isfinite, ke.k) && all(isfinite, ke.eps) && minimum(ke.k) > 0 && minimum(ke.eps) > 0
+            end
+            @test positive
+            @test nut_max < NU_T_MAX
+            @test abs(mass() - M0) < TOL_MODEL_IDENTITY * M0
+            @test abs(volume() - V0) < TOL_MODEL_IDENTITY * V0
+        end
+    end
+
+    @testset "test_verify_k_epsilon_realizability_bound" begin
+        # T = min(k/eps, alpha/(sqrt(6) C_mu |S|)), |S| = sqrt(strain2/2) (Durbin 1996): inactive without strain and in
+        # equilibrium shear (k/eps |S| = 1/sqrt(2 C_mu) = 2.36 < 2.72), active above
+        k, eps = 1e-3, 1e-4
+        @test ke_time_scale(k, eps, 0.0) == k / eps
+        S_eq = 1 / (sqrt(KE_C_MU_VALUE) * k / eps)   # 1/s, du/dz of equilibrium shear (P = eps)
+        @test ke_time_scale(k, eps, S_eq^2) == k / eps
+        S = 10 * S_eq
+        @test ke_time_scale(k, eps, S^2) ≈ 0.6 / (sqrt(6) * KE_C_MU_VALUE * S / sqrt(2)) rtol = TOL_IDENTITY
+        @test ke_time_scale(k, eps, S^2) < k / eps
+        @test KEpsilonState(4, 3).realizability
+    end
+
+    @testset "test_verify_k_epsilon_realizability_switch" begin
+        # the same dam-break start without the bound: the explicit production at the front raises k while eps lags, and
+        # nu_t exceeds 1 m^2/s within ten steps (observed 41 m^2/s in the second step); with the bound it stays physical
+        NU_T_UNBOUNDED_MIN, NU_T_BOUNDED_MAX = 1.0, 1e-2   # m^2/s
+        L, nx, nz, dt = 10.0, 100, 10, 0.005
+        xc = ((1:nx) .- 0.5) .* (L / nx)
+        peak = map((true, false)) do realizable
+            cfg = ModelConfig(; length=L, depth=0.5, nx=nx, nz=nz, dt=dt, nu=1e-6, turbulence_closure="k_epsilon",
+                bed_roughness_length=1e-3, rayleigh_damping=0.0, apply_froude_limiter=false, momentum_advection_scheme="tvd2",
+                wetting_drying=true, implicit_vertical_terms=true, theta=1.0, write_plots=false)
+            model = Model(cfg)
+            model.turbulence.realizability = realizable
+            fill!(model.state.rho, TURB_RHO0)
+            refresh_density_metadata!(model)
+            initialize_water_level!(model, [x < 3.0 ? 0.4 : 0.0 for x in xc])
+            nut = 0.0
+            for _ in 1:10
+                step_forward!(model)
+                nut = max(nut, maximum(model.turbulence.nu_t))
+            end
+            nut
+        end
+        @test peak[1] < NU_T_BOUNDED_MAX
+        @test peak[2] > NU_T_UNBOUNDED_MIN
     end
 
     @testset "test_verify_k_epsilon_vegetation_balance" begin
@@ -196,8 +390,9 @@ end
 
     @testset "test_verify_turbulence_closure_selection" begin
         # The default and the legacy flag keep their meaning; k_epsilon creates the state (with the fixed top layer as the
-        # automatic default); invalid choices (unknown closure, bed geometry, explicit variable top layer, nz = 1) and a
-        # change of the closure across the k-epsilon boundary after construction are rejected.
+        # automatic default); invalid choices (unknown closure, bed geometry without wetting and drying, nz = 1) and a
+        # change of the closure across the k-epsilon boundary after construction are rejected. The variable top layer is
+        # allowed explicitly (issue #30).
         @test turbulence_closure(ModelConfig()) == "none"
         @test turbulence_closure(ModelConfig(use_turbulence_model=true)) == "mixing_length"
         @test Model(ModelConfig(turbulence_closure="k_epsilon", write_plots=false)).turbulence isa KEpsilonState
@@ -207,7 +402,13 @@ end
         @test_throws ArgumentError KEpsilonState(1, 3)
         @test_throws ArgumentError Model(ModelConfig(turbulence_closure="k_omega"))
         @test_throws ArgumentError Model(ModelConfig(turbulence_closure="k_epsilon", variable_top_layer=false, bed_level=zeros(100)))
-        @test_throws ArgumentError Model(ModelConfig(turbulence_closure="k_epsilon", variable_top_layer=true))
+        @test Model(ModelConfig(turbulence_closure="k_epsilon", variable_top_layer=true, write_plots=false)).turbulence isa KEpsilonState
+
+        # wetting and drying (issue #30): k-epsilon with the implicit vertical terms; no mixing length
+        wd = (nx=10, nz=4, wetting_drying=true, write_plots=false)
+        @test Model(ModelConfig(; turbulence_closure="k_epsilon", implicit_vertical_terms=true, wd...)).turbulence isa KEpsilonState
+        @test_throws ArgumentError Model(ModelConfig(; turbulence_closure="k_epsilon", implicit_vertical_terms=false, wd...))
+        @test_throws ArgumentError Model(ModelConfig(; turbulence_closure="mixing_length", implicit_vertical_terms=true, wd...))
 
         model_ke = Model(ModelConfig(turbulence_closure="k_epsilon", variable_top_layer=false, write_plots=false))
         model_ke.config.turbulence_closure = "none"

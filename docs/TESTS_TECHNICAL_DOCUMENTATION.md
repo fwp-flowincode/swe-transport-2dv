@@ -622,15 +622,17 @@ amplitude by about $10^{-15}$ and the lock-exchange front by less than one cell.
 
 ### 17) k-epsilon turbulence closure (`src/turbulence.jl`, issue #8)
 
-Selected with `turbulence_closure = "k_epsilon"` (flat bed and fixed top layer only: the closure assumes layers of
-equal thickness, so the automatic default of `variable_top_layer` is false with it and an explicit
-`variable_top_layer=true` is rejected; the closure cannot be switched on or off after the model is built). Standard high-Reynolds-number k-epsilon (Launder &
-Spalding 1974; Rodi 1993) on the cell centres:
+Selected with `turbulence_closure = "k_epsilon"`, on the fixed grid with a flat bed, with the variable top layer
+(`variable_top_layer=true` explicitly; the automatic default stays the fixed top layer) and with wetting and drying,
+which covers any bed and the cut cells at the surface (section 27, issue #30). The closure cannot be switched on or off
+after the model is built. Standard high-Reynolds-number k-epsilon (Launder & Spalding 1974; Rodi 1993) on the cell
+centres:
 
 ```math
 \frac{Dk}{Dt}=\partial_z\!\left(\Big(\nu+\frac{\nu_t}{\sigma_k}\Big)\partial_z k\right)+P+G+C_{fk}P_v-\varepsilon,\qquad
 \frac{D\varepsilon}{Dt}=\partial_z\!\left(\Big(\nu+\frac{\nu_t}{\sigma_\varepsilon}\Big)\partial_z\varepsilon\right)
-+\frac{\varepsilon}{k}\left(C_1(P+C_{f\varepsilon}P_v)+C_3\max(G,0)-C_2\varepsilon\right),\qquad \nu_t=C_\mu\frac{k^2}{\varepsilon},
++\frac{1}{T}\left(C_1(P+C_{f\varepsilon}P_v)+C_3\max(G,0)-C_2\varepsilon\right),\qquad \nu_t=C_\mu kT,\qquad
+T=\min\Big(\frac{k}{\varepsilon},\ \frac{\alpha}{\sqrt6\,C_\mu|S|}\Big),
 ```
 
 with $P=\nu_t[(\partial_zu+\partial_xw)^2+2(\partial_xu)^2+2(\partial_zw)^2]$, the buoyancy term
@@ -639,6 +641,15 @@ production $P_v$, the work of the drag per unit mass (from the u-face accelerati
 averaged to the cells; $\tfrac12C_Da|u|^3$ for a rigid canopy). Constants: $C_\mu=0.09$, $C_1=1.44$, $C_2=1.92$,
 $\sigma_k=1.0$, $\sigma_\varepsilon=1.3$, $\sigma_\rho=0.7$; vegetation weights $C_{fk}=1.0$, $C_{f\varepsilon}=1.33$
 (Lopez & Garcia 1997, WES Technical Report WRP-CP-10, Eqs. 26-27 and p. 58; adjustable per `KEpsilonState`).
+
+**Realizability bound (issue #30).** The time scale $T$ is $k/\varepsilon$, bounded by $\alpha/(\sqrt6C_\mu|S|)$ with
+$|S|^2=S_{ij}S_{ij}$ and $\alpha=0.6$ (Durbin 1996, Int. J. Heat Fluid Flow 17, 89-90; Medic & Durbin 2002). In
+equilibrium shear flow ($P=\varepsilon$) $k|S|/\varepsilon=1/\sqrt{2C_\mu}=2.36$, below the bound 2.72, so the channel and
+canopy results are unchanged (the open channel to all printed digits). Where the strain rises faster than
+$\varepsilon$ can follow, the explicit production lets k grow by orders of magnitude in one step while $\varepsilon$
+lags: in a wetting-drying dam break $k^2/\varepsilon$ gave $\nu_t=41$ m²/s at the front in the second step, against
+$2.6\cdot10^{-3}$ m²/s with the bound (the k-epsilon stagnation-point anomaly, also expected in front of gates and
+obstacles).
 
 Numerics after each flow and density update: explicit first-order upwind advection (conservative, closed walls,
 periodic or zero-gradient inflow), then per column a backward-Euler vertical diffusion with the sinks linearised
@@ -649,6 +660,8 @@ $k_1=u_{\ast}^2/\sqrt{C_\mu}$, $\varepsilon_1=u_{\ast}^3/(\kappa z_1)$ (Rodi 199
 zero flux for $k$; for $\varepsilon$ the value $\varepsilon_s=C_\mu^{3/4}k_s^{3/2}/(\kappa\thinspace 0.07H)$ (Rodi 1993; default, as
 in Lopez & Garcia 1997) or zero flux.
 The momentum equation uses $\nu+\nu_t$ (u-faces: mean of the neighbouring cells; the mixing-length cap does not apply).
+With `implicit_vertical_terms=true` the vertical part is implicit (section 19): the steady channel is the same to five
+digits for $\Delta t=0.1$ and 2 s, the latter about 50 times the explicit limit $0.2\Delta z^2/\nu_t$ (test).
 Density gets the turbulent diffusivity $\nu_t/\sigma_\rho$ (implicit, conservative with the layer thicknesses, top layer
 $\Delta z+\eta$).
 
@@ -813,8 +826,9 @@ $\omega^2=gk\tanh(kH)$ (the shallow-water period is 24 % shorter): period error 
 
 **Boundaries and restrictions.** Closed walls; a prescribed left velocity, constant (`set_x_inflow_outflow!` with a
 profile) or time-dependent (`set_x_inflow_outflow!(model, t -> u)`); right: wall, prescribed or zero-gradient. Rejected
-with wetting and drying: `periodic_x`, vegetation, k-epsilon, `bed_roughness_length`, `wind_stress_x`. Not applied: the
-Froude limiter and the horizontal viscosity.
+with wetting and drying: `periodic_x`, vegetation, `wind_stress_x`, the mixing-length model; `bed_roughness_length`,
+Chezy friction and k-epsilon (section 27) need `implicit_vertical_terms=true`. Not applied: the Froude limiter and the
+horizontal viscosity.
 
 **Reference solutions** (`src/reference_solutions.jl`).
 - Ritter (1892) dam break on a dry bed: $h=(2c_0-\xi)^2/(9g)$, $u=\tfrac23(\xi+c_0)$ for $-c_0<\xi<2c_0$,
@@ -1471,6 +1485,55 @@ Open-Channel Hydraulics, ch. 17; von Mises (1917), Berechnung von Ausfluss- und 
 contraction coefficient 0.611 of a slot); Stelling & Duinmeijer (2003), Int. J. Numer. Methods Fluids 43, 1329-1354
 (energy head in contractions, momentum in expansions); Chow (1959), ch. 9-10 (gradually varied flow) and 15 (hydraulic
 jump). Equation numbers were not checked.
+
+### 27) k-epsilon with wetting and drying and the variable top layer (issue #30)
+
+**Wetting and drying.** The closure of section 17 runs on the cut cells of the new geometry $h^{n+1}$
+(`_wd_k_epsilon_step!`, after the constituent transport). Wet cells are thicker than `WD_EMPTY_CELL_THICKNESS`; in a
+column they run without gaps from the lowest wet cell (cut by the bed) to the top wet cell (cut by the surface).
+- Production from the velocities of time $n+1$: cell-centred $u$ from the open faces of the step, $\partial_zu$ between
+  the cell centres, and $2(\partial_xu)^2+2(\partial_zw)^2=4(\partial_xu)^2$. The interface fluxes $w$ of a cut cell
+  include its volume change, so $(w_{k+1}-w_k)/h$ is no strain rate in a thin cut cell (it grows without bound as
+  $h\to0$).
+- Advection: conservative first-order upwind with the layer discharges and interface fluxes of the step, in the
+  increment form of the density transport (a uniform field stays uniform while cells fill and empty).
+- Diffusion, sources and sinks: per column backward Euler in finite volumes with the cell thicknesses and centre
+  distances $(h_k+h_{k+1})/2$, Patankar sinks; positive for any $\Delta t$.
+- Bed: the wall functions in the lowest wet cell at $z_1=\max(h/2,\,10z_0)$, the height of the log-law friction of the
+  implicit column (section 18). Surface: $\varepsilon_s$ in the top wet cell with the water depth of the column.
+- Momentum: $\nu+\nu_t$ at the interfaces of the implicit vertical column of each face (`implicit_vertical_terms=true`
+  required), $\nu_t$ of a layer at the face from its wet cells. Density: implicit vertical diffusion with $\nu_t/\sigma_\rho$
+  on the wet cells, conservative. Empty cells keep their k and $\varepsilon$ and have $\nu_t=0$.
+
+**Variable top layer.** The top row has the thickness $h_t=\Delta z+\eta$ of its column. It enters the centre distances
+($\partial_zu$, $N^2$, diffusion), the finite-volume diffusion of the top row, its vertical advection, the depth of the
+surface condition and the density diffusion; $\partial_zw=-\partial_xu$ in the top row, as in the cut cells.
+
+**Results** ($H=0.5$ m, $S=10^{-3}$, $z_0=1$ mm, 20 layers; reference: the periodic fixed-grid channel of section 17):
+
+| case | result |
+|---|---|
+| wetting-drying open channel, 80 m (inlet discharge of the periodic equilibrium, outlet at the normal depth), at 60 m | velocity profile, $k_1$, max $\nu_t$ within $10^{-4}$ of the periodic channel (6 % in $\nu_t$ at 30 m of a 40 m reach: still developing; equal to four digits at 120 m of 160 m) |
+| the same with $\Delta t=0.5$ s instead of 0.05 s (40 m) | within $10^{-3}$ |
+| bed raised by 0.2 m (whole layers) | the flat channel shifted, to round-off |
+| bed raised by 0.21 m (lowest wet cell 0.015 m) | depth-mean velocity $10^{-5}$, bed stress $6\cdot10^{-4}$ |
+| variable top layer, grid 1 cm below the water level (top row 0.0345 m, $\Delta z=0.0245$ m), 80 m | depth-mean velocity $6\cdot10^{-5}$, $k_1$ $1.3\cdot10^{-3}$, max $\nu_t$ $3\cdot10^{-3}$ |
+| dam break of a stratified column onto a dry slope, hydrostatic and non-hydrostatic, 40 s | volume and density mass to round-off; k, $\varepsilon$ positive; max $\nu_t$ $2.6\cdot10^{-3}$ m²/s |
+
+In the dam break (`experiments/k_epsilon_wetting_drying`) the stratification is mixed almost completely by the overturning
+flow: a density range of 0.8 kg/m³ of the initial 10 kg/m³ is left after 40 s with k-epsilon and 2.3 kg/m³ without a
+closure, on a coarse grid ($\Delta x=0.1$ m, $\Delta z=0.05$ m) that does not separate turbulent from numerical mixing. The
+bound removes the peak of $\nu_t$ in the first second and changes the end state little (0.7 kg/m³ without it). A seiche
+in a closed basin is damped the same with and without k-epsilon (bed friction dominates), with the fixed and with the
+variable top layer.
+
+`KEpsilonState.realizability = false` switches the bound off for such comparisons. A cell of 10-50 µm that has just got
+wet can briefly hold a density far from its neighbours (within the initial bounds, mass exact), with and without a
+closure.
+
+Limitations: no horizontal eddy viscosity in the wetting-drying step (as for the molecular viscosity); k and
+$\varepsilon$ are advected first-order upwind and have no horizontal diffusion (as on the fixed grid); first order in
+time.
 
 ## Test-by-test documentation
 
@@ -2364,8 +2427,24 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\thinspace p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). 
   see section 17), n increasing with density. The figures are labelled q = 1.21 m²/s; the text and the digitized H and n
   give 1.12-1.13 m²/s.
 - `test_verify_turbulence_closure_selection`: default and legacy flag, state creation with the fixed top layer as the
-  automatic default, invalid choices (unknown closure, bed geometry, explicit variable top layer, nz = 1) and a change
-  of the closure across the k-epsilon boundary after construction rejected.
+  automatic default, the explicit variable top layer and wetting and drying (with implicit vertical terms) accepted,
+  invalid choices (unknown closure, bed geometry without wetting and drying, wetting and drying without implicit
+  vertical terms or with the mixing length, nz = 1) and a change of the closure across the k-epsilon boundary after
+  construction rejected.
+- `test_verify_k_epsilon_time_step_independence` (section 27): the steady channel with implicit vertical terms is the
+  same for $\Delta t=0.1$ and 2 s ($10^{-4}$; observed five digits).
+- `test_validate_k_epsilon_wetting_drying_open_channel`: the developed wetting-drying channel equals the periodic one
+  ($2\cdot10^{-3}$: depth, velocity profile, max $\nu_t$, $k_1$, $u_\ast^2=gSH$).
+- `test_validate_k_epsilon_variable_top_layer_open_channel`: open channel with the variable top layer and a top row
+  1.4 times $\Delta z$: depth-mean velocity, $u_\ast^2$ and max $\nu_t$ within 1 % of the periodic channel.
+- `test_verify_k_epsilon_wetting_drying_raised_bed`: a bed raised by whole layers gives the flat channel to round-off; a
+  bed that cuts a layer the same depth-mean velocity and bed stress ($2\cdot10^{-3}$).
+- `test_verify_k_epsilon_wetting_drying_moving_shoreline`: stratified dam break onto a dry slope, both modes: volume and
+  density mass to round-off, k and $\varepsilon$ positive and finite, max $\nu_t<10^{-2}$ m²/s.
+- `test_verify_k_epsilon_realizability_bound`: the time scale is $k/\varepsilon$ without strain and in equilibrium shear,
+  the bound above; on by default.
+- `test_verify_k_epsilon_realizability_switch`: without the bound the dam-break front exceeds $\nu_t=1$ m²/s within ten
+  steps, with it $\nu_t$ stays below $10^{-2}$ m²/s.
 - `test_verify_clear_vegetation_resets_k_epsilon_production`: the vegetation production $P_v$ is zero after
   `clear_vegetation!`.
 
