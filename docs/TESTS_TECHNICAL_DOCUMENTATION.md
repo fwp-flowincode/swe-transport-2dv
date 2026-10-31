@@ -1320,7 +1320,7 @@ $\tau \gg L/c$.
   and 1.40 % (wetting-drying step), against 1.36 % and 1.15 % for the free outflow. The relaxation adds a low-frequency
   tail of order $A\sigma/(c\tau)$.
 
-### 26) Sluice gate (issue #48)
+### 26) Sluice gate (issues #48, #57)
 
 `set_sluice_gate!(model, x; lower_edge, contraction=1.0)` puts a thin vertical gate on the interior u-face at $x$ (m).
 It closes the water column above its lower edge $z_g$ (m above the grid bottom). The gate works only in the
@@ -1401,10 +1401,76 @@ but not converged.
 
 The hydrostatic step on the coarsest grid gives 1.00.
 
+**Hydraulic jump behind the gate (issue #57).** Without friction, a jump behind the gate has no stable position: the
+jet keeps the depth $C_ca$, so its conjugate depth is the same everywhere. A lower tailwater pushes the jump out of the
+reach, a higher one against the gate (submerged flow). With Chezy friction ($C$, m$^{1/2}$/s) the jet deepens downstream
+and its conjugate depth falls, while the subcritical flow deepens upstream from the outlet. The jump stands where the
+two meet, and that position is stable. Theory (`src/reference_solutions.jl`, horizontal bed or mild slope $i_b$):
+- the jet, from $C_ca$ at the gate (H3 or M3 curve): the gradually-varied-flow equation written for $x(h)$,
+  $dx/dh=(1-Fr^2)/(i_b-i_f)$ with $i_f=q^2/(C^2h^3)$, which stays regular up to $h_c$ (where $dh/dx$ is singular),
+  integrated by Simpson's rule (`chezy_supercritical_distance`, inverted by `chezy_supercritical_depth`). On the
+  horizontal bed $x=C^2/q^2\,\bigl(h_c^3(h-h_0)-(h^4-h_0^4)/4\bigr)$;
+- the subcritical flow, from the outlet depth upstream (H2 or M2 curve, `chezy_backwater_depth`), and upstream of
+  the gate from the free-flow depth $h_1$ of $E_1$ (Bernoulli to the vena contracta, frictionless);
+- the jump where the conjugate depth of the jet equals the subcritical depth (`sluice_gate_jump_position`, bisection
+  on the jet depth). On the horizontal bed both curves scale with $C^2$: without friction the jump moves away
+  infinitely far.
+
+**No bed friction on an active gate face.** The control volume of the gate face straddles the vena contracta, and the
+friction there acts with the jet velocity on the face opening. That is a head loss $i_f\Delta x$, first order in
+$\Delta x$, which the frictionless gate relation does not have: with $C=50$ the upstream depth came out 2.5 % high
+($\Delta x=0.2$ m) and 1.2 % high ($\Delta x=0.1$ m). On an active gate face the Chezy and the log-law friction are
+therefore switched off (`_wd_implicit_vertical!`); the jet feels the friction from the next face on.
+
+**Results** ($C=50$ m$^{1/2}$/s, horizontal bed, 20 m channel, gate at 8 m, $q=0.15$ m²/s, $a=0.1$ m, $C_c=0.61$,
+400 s; jump position in the model: where the depth rises through the mean of the jet depth and its conjugate):
+
+| outlet depth (m) | jump, theory (m) | 1D, $\Delta x=0.2$ m | 1D, $\Delta x=0.1$ m | 2DV ($n_z=8$, $\Delta x=0.2$ m) |
+|---|---|---|---|---|
+| 0.155 | 15.01 | | | +0.09 |
+| 0.16 | 14.64 | +0.14 | +0.07 | +0.11 |
+| 0.17 | 13.82 | | | +0.16 |
+| 0.18 | 12.93 | +0.08 | +0.04 | +0.25 |
+| 0.19 | 12.02 | | | +0.36 |
+| 0.20 | 11.10 | +0.07 | +0.03 | +0.05 |
+| 0.21 | 10.21 | | | +0.43 |
+
+In 1D the jump lies within 0.7 cells downstream of the theory, and the offset halves with $\Delta x$ (first order: the
+sharp shallow-water jump is spread over a few cells, a real jump is about $6h_2$ long). The depths in 1D agree with the
+gradually varied flow within 0.15 % in the jet and behind the jump, and 0.17 % upstream (0.08 % with $\Delta x=0.1$ m).
+Since the jet depths include the friction, the implicit friction is accurate at this time step. In 2DV ($\nu=10^{-4}$
+m²/s) the subcritical depths lie up to 0.7 % above the theory: the friction acts on the depth average of a sheared
+velocity profile, whose momentum and energy coefficients exceed 1. With $\nu=3\cdot10^{-3}$ m²/s the depths agree
+better (0.3 %), but the jump lies 0.3-0.6 m downstream. The 2DV jump lies 0.05-0.43 m (up to 2.2 cells) downstream of
+the theory. The offset grows with the outlet depth, except for a dip at 0.20 m, whose cause was not investigated (all
+runs are steady; the jump forms a roller over few layers, the recirculation of issue #50). The flow is steady in 1D and
+2DV (discharge spread below $2\cdot10^{-3}$).
+
+**Non-hydrostatic jump.** With `contraction=1` the jet contracts by itself, but on practical grids not to $0.61a$
+(see above). The jump position depends strongly on the jet depth (with $C=35$ and a 0.15 m outlet it moves by about
+1.4 m between $C_c=0.7$ and 0.8). The theory therefore starts at the vena contracta of the model (its smallest depth
+within 1 m behind the gate): the comparison checks friction and momentum, not the contraction. Case: 8 m channel, gate
+at 2.4 m, $C=40$ m$^{1/2}$/s, outlet depth 0.15 m, $\Delta x=\Delta z$, $\nu=10^{-4}$ m²/s; steady after about 100 s
+(discharge spread $10^{-6}$ at 140 s):
+
+| grid ($n_x\times n_z$) | vena contracta | jump, theory | 10 / 50 / 90 % of the jump height | jet | 1.5 m behind the jump | at 7 m |
+|---|---|---|---|---|---|---|
+| 160 x 12 | 0.0877 m at 2.58 m | 3.18 m | 3.33 / 3.44 / 3.53 m | -1 % | +1.4 % | +0.9 % |
+| 320 x 24 | 0.0880 m at 2.61 m | 3.17 m | 3.29 / 3.36 / 3.41 m | -1 % | +3.9 % | +1.8 % |
+
+The jump (half its height, interpolated; the other two columns are cell centres) stands 1.1-1.4 $h_2$ ($h_2=0.18$ m) downstream of the theory, closer on the finer grid. It is short: from 10
+to 90 % of its height within 0.1-0.2 m, against about $6h_2$ for a real jump, whose turbulent roller the laminar
+non-hydrostatic model does not resolve. Behind the jump the depths lie 1-4 % above the gradually varied flow, as in 2DV
+hydrostatic but more: the velocity profile behind the jump is strongly sheared (wall jet under the roller), while the
+theory assumes a uniform velocity. The contraction is the one of the free flow at this resolution: the vena contracta
+lies at 0.88 $a$, while the upstream head gives an effective $C_c$ of 0.75 (320 x 24) and 0.78 (160 x 12), the
+difference being the energy lost at the gate.
+
 References: Henderson (1966), Open Channel Flow, ch. 6 (sluice gates: contraction, free and submerged flow); Chow (1959),
 Open-Channel Hydraulics, ch. 17; von Mises (1917), Berechnung von Ausfluss- und Ueberfallzahlen, Z. VDI 61 (the
 contraction coefficient 0.611 of a slot); Stelling & Duinmeijer (2003), Int. J. Numer. Methods Fluids 43, 1329-1354
-(energy head in contractions, momentum in expansions). Equation numbers were not checked.
+(energy head in contractions, momentum in expansions); Chow (1959), ch. 9-10 (gradually varied flow) and 15 (hydraulic
+jump). Equation numbers were not checked.
 
 ## Test-by-test documentation
 
@@ -2495,6 +2561,17 @@ stated otherwise.
   upstream head within 0.2 % of the momentum theory (measured 0.012 % and 0.001 %).
 - `test_validate_sluice_gate_nonhydro_contraction`: non-hydrostatic with `contraction=1`, 12 layers: $0.61<C_c<0.85$
   (measured 0.82); the hydrostatic step on the same grid gives $C_c>0.98$ (measured 1.00).
+- `test_verify_sluice_gate_jump_reference_solutions`: the jet profile equals the closed-form H3 curve on the horizontal
+  bed and satisfies the gradually-varied-flow equation on a mild slope (central difference, $10^{-6}$); at the jump the
+  conjugate depth of the jet equals the subcritical depth; a higher outlet moves the jump towards the gate; the jump
+  position scales with $C^2$ (frictionless limit); submerged and washed-out cases throw.
+- `test_validate_sluice_gate_hydraulic_jump`: Chezy $C=50$, outlet depths 0.16, 0.18 and 0.20 m, 1D and 2DV
+  (8 layers): jump position within one cell (1D) and three cells (2DV) of the theory, in the theoretical order; depths in the jet
+  within 0.5 %, upstream and behind the jump within 0.5 % (1D) and 1 % (2DV); steady discharge within 0.5 %; the
+  position error with $\Delta x/2$ is below 0.6 times that with $\Delta x$ (measured 0.49).
+- `test_validate_sluice_gate_nonhydro_jump`: non-hydrostatic, `contraction=1`, $C=40$, outlet 0.15 m, 160 x 12 cells,
+  120 s: steady discharge within 0.5 %; with the theory from the vena contracta of the model, the jump (half its height)
+  within 2.5 $h_2$ (measured 1.4 $h_2$), the jet depth and the depths behind the jump within 3 % (measured 1 % and 1.4 %).
 - `test_verify_sluice_gate_config_checks`: positions off a u-face or on the boundary, an edge below the bed, a
   contraction outside (0, 1], a contraction below 1 in the non-hydrostatic mode and the fixed-grid step are rejected.
 

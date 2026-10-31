@@ -6,10 +6,14 @@
 # - sluice_gate_modular.png       upstream energy head against the tailwater depth (modular limit)
 # - sluice_gate_contraction.png   non-hydrostatic: velocity section at the gate, contraction coefficient against resolution
 # - sluice_gate_nonhydro.gif      non-hydrostatic: the jet under the gate forms and contracts
+# - sluice_gate_jump.png          hydraulic jump behind the gate with Chezy friction (issue #57): profiles and position
+# - sluice_gate_jump.gif          hydrostatic 2DV: the jump leaves the gate and settles
+# - sluice_gate_nonhydro_jump.png non-hydrostatic jump: speed section and profiles against the theory from the vena contracta
+# - sluice_gate_nonhydro_jump.gif non-hydrostatic: the jet contracts and the jump forms
 #
 # Usage: julia --project=<path to the repository> experiments/sluice_gate/plot_sluice_gate.jl [product ...]
-# (products: profiles modular contraction animation; default all). Run time: about 30 min for all (the finest
-# non-hydrostatic run takes most of it).
+# (products: profiles modular contraction animation jump jump_animation nonhydro_jump nonhydro_jump_animation; default
+# all). Run time: about 50 min for all (the finest non-hydrostatic contraction run takes most of it).
 
 # WHY: batch run without a display; same GR workstation choice as src/visualization.jl.
 get!(ENV, "GKSwstype", "100")
@@ -41,6 +45,23 @@ const NH_GRIDS = ((120, 12), (240, 24), (480, 48))
 const NH_RUN_TIME = 40.0        # s
 const NH_NU = 1e-4              # m^2/s
 const ANIMATION_GRID = (240, 24)
+# Hydraulic jump with Chezy friction (issue #57)
+const JUMP_CHEZY = 50.0         # m^(1/2)/s
+const JUMP_TAILWATERS = (0.16, 0.18, 0.20)                    # m, profiles
+const JUMP_POSITION_TAILWATERS = (0.155, 0.16, 0.17, 0.18, 0.19, 0.20, 0.21)   # m, position against the outlet depth
+const JUMP_RUN_TIME = 400.0     # s, the jump settles slowly
+const JUMP_ANIMATION_TAILWATER = 0.18   # m
+const JUMP_ANIMATION_TIME = 160.0       # s, the jump has nearly settled
+const JUMP_ANIMATION_FRAME_TIME = 2.0   # s
+const JUMP_FRAME_SIZE_PX = (1000, 380)
+# Non-hydrostatic jump: 8 m channel, gate at NH_X_GATE, stronger friction (shorter jet), contraction=1
+const NH_JUMP_LENGTH = 8.0      # m
+const NH_JUMP_CHEZY = 40.0      # m^(1/2)/s
+const NH_JUMP_TAILWATER = 0.15  # m
+const NH_JUMP_GRIDS = ((160, 12), (320, 24))
+const NH_JUMP_RUN_TIME = 150.0  # s, steady after about 100 s
+const NH_JUMP_ANIMATION_TIME = 80.0         # s
+const NH_JUMP_ANIMATION_FRAME_TIME = 1.0    # s
 const ANIMATION_TIME = 20.0     # s
 const ANIMATION_FRAME_TIME = 0.5   # s
 const ANIMATION_FPS = 8
@@ -51,13 +72,13 @@ const FIGURES_DIR = joinpath(@__DIR__, "figures")
 
 # Gate model (as test/test_sluice_gate.jl): discharge inlet, gate, free outflow (tailwater `nothing`) or outlet level.
 function gate_model(; tailwater=nothing, nx=NX, nz=1, nu=NU_1D, length=LENGTH, x_gate=X_GATE, nonhydro=false,
-    contraction=nonhydro ? 1.0 : CC)
+    contraction=nonhydro ? 1.0 : CC, chezy=0.0)
     dx = length / nx
     xc = ((1:nx) .- 0.5) .* dx
     dt = COURANT * dx / (Q / (contraction * OPENING) + sqrt(G * GRID_DEPTH))
     cfg = ModelConfig(nx=nx, nz=nz, length=length, depth=GRID_DEPTH, dt=dt, theta=1.0, implicit_vertical_terms=true,
         nu=nu, rayleigh_damping=0.0, apply_froude_limiter=false, momentum_advection_scheme="tvd2", wetting_drying=true,
-        use_hydrostatic=!nonhydro, write_plots=false)
+        use_hydrostatic=!nonhydro, chezy_coefficient=chezy, write_plots=false)
     model = Model(cfg)
     fill!(model.state.rho, 1000.0)
     refresh_density_metadata!(model)
@@ -246,12 +267,163 @@ function nonhydro_animation()
     @printf("wrote %s (%.0f kB)\n", path, filesize(path) / 1024)
 end
 
+
+# Theory of the jump (Chow 1959, ch. 9-10 and 15): position, jet (H3) and subcritical (H2) depths, upstream depth
+jump_theory_position(t) = sluice_gate_jump_position(Q, OPENING, JUMP_CHEZY, t; contraction=CC, x_gate=X_GATE, x_end=LENGTH)
+function jump_theory_depth(x, t)
+    if x < X_GATE
+        h1 = bernoulli_depth(sluice_gate_free_head(Q, OPENING; contraction=CC), Q)
+        return chezy_backwater_depth(x, Q, JUMP_CHEZY, 0.0, X_GATE, h1)
+    end
+    x < jump_theory_position(t) && return chezy_supercritical_depth(x, Q, JUMP_CHEZY, 0.0, X_GATE, CC * OPENING)
+    return chezy_backwater_depth(x, Q, JUMP_CHEZY, 0.0, LENGTH, t)
+end
+
+# Model jump position (m): where the depth rises through the mean of the theoretical jet depth and its conjugate
+function jump_model_position(h, xc, t)
+    hj = chezy_supercritical_depth(jump_theory_position(t), Q, JUMP_CHEZY, 0.0, X_GATE, CC * OPENING)
+    mid = 0.5 * (hj + conjugate_depth(hj, Q))
+    i = findfirst(j -> xc[j] > X_GATE && h[j] > mid, eachindex(xc))
+    return xc[i - 1] + (mid - h[i - 1]) / (h[i] - h[i - 1]) * (xc[i] - xc[i - 1])
+end
+
+function jump_run(t; nz=1)
+    model, xc = gate_model(; tailwater=t, nz=nz, chezy=JUMP_CHEZY)
+    run_steady!(model, JUMP_RUN_TIME)
+    return water_depth(model), xc
+end
+
+function jump_figure()
+    p1 = plot(xlabel="x (m)", ylabel="z (m)", ylims=(0, 0.45), legend=:topright,
+        title=@sprintf("Hydraulic jump behind the gate, Chezy C = %.0f m^½/s", JUMP_CHEZY))
+    colors = (:crimson, :darkorange, :steelblue)
+    xs = range(0, LENGTH, length=801)
+    for (t, color) in zip(JUMP_TAILWATERS, colors)
+        plot!(p1, xs, [jump_theory_depth(x, t) for x in xs]; color=:black, lw=1, label=t == JUMP_TAILWATERS[1] ? "theory" : "")
+        h, xc = jump_run(t)
+        plot!(p1, xc, h; color=color, lw=2, ls=:dash, label=@sprintf("model 1D, outlet %.2f m", t))
+        vline!(p1, [jump_theory_position(t)]; color=color, ls=:dot, label="")
+    end
+    gate_shape!(p1; top=0.45)
+    p2 = plot(xlabel="outlet depth (m)", ylabel="jump position (m)", title="Jump position against the outlet depth",
+        legend=:topright)
+    ts = range(minimum(JUMP_POSITION_TAILWATERS), maximum(JUMP_POSITION_TAILWATERS), length=100)
+    plot!(p2, ts, jump_theory_position.(ts); color=:black, lw=2, label="theory (GVF + conjugate depths)")
+    for (nz, color, marker) in ((1, :crimson, :circle), (NZ_2DV, :steelblue, :utriangle))
+        positions = map(collect(JUMP_POSITION_TAILWATERS)) do t
+            h, xc = jump_run(t; nz=nz)
+            jump_model_position(h, xc, t)
+        end
+        scatter!(p2, collect(JUMP_POSITION_TAILWATERS), positions; color=color, marker=marker, ms=5,
+            label=nz == 1 ? "model 1D" : "model 2DV, nz = $(nz)")
+    end
+    hline!(p2, [X_GATE]; color=:gray, ls=:dash, label="gate")
+    save_figure(plot(p1, p2; layout=(1, 2), size=(1250, 440), margin=FIGURE_MARGIN_MM), "sluice_gate_jump.png")
+end
+
+function save_gif(anim, name)
+    path = joinpath(OUTPUT_DIR, name)
+    gif(anim, path; fps=ANIMATION_FPS)
+    cp(path, joinpath(FIGURES_DIR, name); force=true)
+    @printf("wrote %s (%.0f kB)\n", path, filesize(path) / 1024)
+end
+
+# Hydrostatic 2DV: the jump leaves the gate and settles at its position (speed in the shaved cells, steady theory dashed)
+function jump_animation()
+    t = JUMP_ANIMATION_TAILWATER
+    model, xc = gate_model(; tailwater=t, nz=NZ_2DV, chezy=JUMP_CHEZY)
+    xs = range(0, LENGTH, length=801)
+    theory = [jump_theory_depth(x, t) for x in xs]
+    anim = Animation()
+    stride = round(Int, JUMP_ANIMATION_FRAME_TIME / model.config.dt)
+    for n in 0:round(Int, JUMP_ANIMATION_TIME / model.config.dt)
+        n > 0 && step_forward!(model)
+        n % stride == 0 || continue
+        p = plot(xlabel="x (m)", ylabel="z (m)", size=JUMP_FRAME_SIZE_PX, xlims=(0, LENGTH), ylims=(0, 0.45),
+            legend=:topright, background_color_inside=:gray85, margin=FIGURE_MARGIN_MM,
+            title=@sprintf("Jump behind a gate, hydrostatic, nz = %d, t = %5.1f s", NZ_2DV, n * model.config.dt))
+        shaved_speed!(p, model, xc; xlims=(0, LENGTH), clims=(0, 2.5))
+        plot!(p, xs, theory; color=:black, ls=:dash, lw=1, label="steady theory")
+        gate_shape!(p; top=0.45)
+        frame(anim, p)
+    end
+    save_gif(anim, "sluice_gate_jump.gif")
+end
+
+nh_jump_model(nx, nz) = gate_model(; tailwater=NH_JUMP_TAILWATER, nx=nx, nz=nz, nu=NH_NU, length=NH_JUMP_LENGTH,
+    x_gate=NH_X_GATE, nonhydro=true, chezy=NH_JUMP_CHEZY)
+
+# Theory from the vena contracta of the model (smallest depth within 1 m behind the gate): its position (m) and depth (m),
+# the jump position (m) and the depth (m) at x of the jet (H3) and of the subcritical flow (H2)
+function nh_jump_theory(h, xc)
+    behind = findall(x -> NH_X_GATE < x < NH_X_GATE + 1.0, xc)
+    iv = behind[argmin(h[behind])]
+    xv, hv = xc[iv], h[iv]
+    xj = sluice_gate_jump_position(Q, hv, NH_JUMP_CHEZY, NH_JUMP_TAILWATER; contraction=1.0, x_gate=xv, x_end=NH_JUMP_LENGTH)
+    depth(x) = x < xj ? chezy_supercritical_depth(x, Q, NH_JUMP_CHEZY, 0.0, xv, hv) :
+        chezy_backwater_depth(x, Q, NH_JUMP_CHEZY, 0.0, NH_JUMP_LENGTH, NH_JUMP_TAILWATER)
+    return xv, hv, xj, depth
+end
+
+function nonhydro_jump_figure()
+    p2 = plot(xlabel="x (m)", ylabel="water depth (m)", title="Non-hydrostatic jump: profiles", legend=:bottomright,
+        xlims=(NH_X_GATE - 0.6, NH_JUMP_LENGTH), ylims=(0, 0.32))
+    section = nothing
+    for ((nx, nz), color) in zip(NH_JUMP_GRIDS, (:darkorange, :steelblue))
+        model, xc = nh_jump_model(nx, nz)
+        run_steady!(model, NH_JUMP_RUN_TIME)
+        h = water_depth(model)
+        xv, hv, xj, depth = nh_jump_theory(h, xc)
+        hj = depth(xj - 1e-9)
+        mid = 0.5 * (hj + conjugate_depth(hj, Q))
+        k = findfirst(j -> xc[j] > xv && h[j] > mid, eachindex(xc))
+        xm = xc[k - 1] + (mid - h[k - 1]) / (h[k] - h[k - 1]) * (xc[k] - xc[k - 1])
+        @printf("nx = %d, nz = %d: vena contracta %.4f m at %.3f m, upstream head %.4f m; jump theory %.3f m, model %.3f m\n",
+            nx, nz, hv, xv, upstream_head(model, xc, 0.4 * NH_X_GATE), xj, xm)
+        xs = range(xv, NH_JUMP_LENGTH, length=600)
+        plot!(p2, xs, depth.(xs); color=color, lw=1, ls=:dash, label=@sprintf("theory from the vena contracta, %d x %d", nx, nz))
+        plot!(p2, xc, h; color=color, lw=2, label="model $(nx) x $(nz)")
+        vline!(p2, [xj]; color=color, ls=:dot, label="")
+        if (nx, nz) == NH_JUMP_GRIDS[end]
+            xl = (NH_X_GATE - 0.6, xj + 1.6)
+            section = plot(xlabel="x (m)", ylabel="z (m)", title="Non-hydrostatic jump, nx = $(nx), nz = $(nz)", xlims=xl,
+                ylims=(0, 0.32), background_color_inside=:gray85, legend=:topright)
+            shaved_speed!(section, model, xc; xlims=xl)
+            vline!(section, [xj]; color=:red, ls=:dash, label="jump, theory")
+            gate_shape!(section; x=NH_X_GATE, top=0.32)
+        end
+    end
+    gate_shape!(p2; x=NH_X_GATE, top=0.32)
+    save_figure(plot(section, p2; layout=(1, 2), size=(1250, 440), margin=FIGURE_MARGIN_MM), "sluice_gate_nonhydro_jump.png")
+end
+
+function nonhydro_jump_animation()
+    model, xc = nh_jump_model(NH_JUMP_GRIDS[end]...)
+    anim = Animation()
+    stride = round(Int, NH_JUMP_ANIMATION_FRAME_TIME / model.config.dt)
+    for n in 0:round(Int, NH_JUMP_ANIMATION_TIME / model.config.dt)
+        n > 0 && step_forward!(model)
+        n % stride == 0 || continue
+        p = plot(xlabel="x (m)", ylabel="z (m)", size=JUMP_FRAME_SIZE_PX, xlims=(0, NH_JUMP_LENGTH), ylims=(0, 0.35),
+            legend=:topright, background_color_inside=:gray85, margin=FIGURE_MARGIN_MM,
+            title=@sprintf("Jump behind a gate, non-hydrostatic, %d x %d, t = %5.1f s", NH_JUMP_GRIDS[end]...,
+                n * model.config.dt))
+        shaved_speed!(p, model, xc; xlims=(0, NH_JUMP_LENGTH), clims=(0, 2.0))
+        gate_shape!(p; x=NH_X_GATE, top=0.35)
+        frame(anim, p)
+    end
+    save_gif(anim, "sluice_gate_nonhydro_jump.gif")
+end
+
 const PRODUCTS = Dict("profiles" => profiles_figure, "modular" => modular_figure, "contraction" => contraction_figure,
-    "animation" => nonhydro_animation)
+    "animation" => nonhydro_animation, "jump" => jump_figure,
+    "jump_animation" => jump_animation, "nonhydro_jump" => nonhydro_jump_figure,
+    "nonhydro_jump_animation" => nonhydro_jump_animation)
 
 mkpath(OUTPUT_DIR)
 mkpath(FIGURES_DIR)
-for name in (isempty(ARGS) ? ["profiles", "modular", "contraction", "animation"] : ARGS)
+for name in (isempty(ARGS) ? ["profiles", "modular", "contraction", "animation", "jump", "jump_animation", "nonhydro_jump",
+    "nonhydro_jump_animation"] : ARGS)
     haskey(PRODUCTS, name) || error("unknown product $(name); choose from $(join(sort(collect(keys(PRODUCTS))), ", "))")
     PRODUCTS[name]()
 end

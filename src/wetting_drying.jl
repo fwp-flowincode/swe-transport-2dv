@@ -582,13 +582,18 @@ function _wd_implicit_vertical!(model::Model, wd::WetDryState, f::Int)
         # WHY floatmax: an empty cell pair has no advection in the explicit scheme either (dZ/h_adv = 0)
         col[j, 10] = hbar > WD_EMPTY_CELL_THICKNESS ? hbar : floatmax(Float64)   # m, advection thickness
     end
+    # WHY: no bed friction on an active gate face (issue #57). Its control volume straddles the vena contracta, and
+    # friction there acts with the jet velocity on the face opening: a head loss i_f dx (first order in dx, 2.5 % of the
+    # upstream head at dx = 0.2 m with C = 50) that the frictionless gate relation (Bernoulli to the vena contracta)
+    # does not have. The jet friction acts from the next face on.
+    gate = wd.gate_active[f]
     gamma = 0.0   # m/s
-    if cfg.bed_roughness_length > 0.0
+    if cfg.bed_roughness_length > 0.0 && !gate
         z1 = max(0.5 * wd.hf[klo, f], WD_FRICTION_Z1_MIN_FACTOR * cfg.bed_roughness_length)
         gamma = bed_friction_coefficient(cfg.bed_roughness_length, z1) * abs(ws.u_old[klo, f])
     end
     gamma_mean = 0.0   # m/s, Chezy: g |U^n| / C^2 with the depth-averaged velocity of time n over the open layers
-    if cfg.chezy_coefficient > 0.0
+    if cfg.chezy_coefficient > 0.0 && !gate
         transport = 0.0
         depth = 0.0
         @inbounds for j in 1:m
