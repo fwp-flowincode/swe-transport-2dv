@@ -572,12 +572,15 @@ function _wd_implicit_vertical!(model::Model, wd::WetDryState, f::Int)
     end
     m = khi - klo + 1
     L, R = f - 1, min(f, cfg.nx)   # right boundary face of a water-level boundary: w and h of the last cell
+    ke = model.turbulence
     @inbounds for j in 1:m
         k = klo + j - 1
         col[j, 3] = ws.u_hat[k, f]
         col[j, 4] = wd.hf[k, f]
         col[j, 5] = 0.5 * (W[k, L] + W[k, R])   # interface below layer k
-        col[j, 6] = cfg.nu
+        # interface below layer k: molecular plus eddy viscosity (k-epsilon, issue #30), face values of the cells L, R
+        col[j, 6] = cfg.nu + (ke === nothing || j == 1 ? 0.0 : 0.5 * (_wd_face_eddy_viscosity(ke, wd, k - 1, L, R) +
+                                                                       _wd_face_eddy_viscosity(ke, wd, k, L, R)))
         hbar = 0.5 * (wd.h[k, L] + wd.h[k, R])
         # WHY floatmax: an empty cell pair has no advection in the explicit scheme either (dZ/h_adv = 0)
         col[j, 10] = hbar > WD_EMPTY_CELL_THICKNESS ? hbar : floatmax(Float64)   # m, advection thickness
@@ -1196,8 +1199,13 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
         end
     end
 
-    # 7. constituent transport
+    # 7. constituent transport; k-epsilon (issue #30): turbulent density diffusion with nu_t of time n, then k and eps on
+    # the new geometry
     _wd_transport_density!(model, wd)
+    if model.turbulence !== nothing
+        _wd_turbulent_density_diffusion!(model, wd, model.turbulence)
+        _wd_k_epsilon_step!(model, wd, model.turbulence)
+    end
     wd.time += dt
 
     # Hydrostatic and non-hydrostatic pressure components in the wet cells.
@@ -1314,6 +1322,208 @@ function _wd_transport_density!(model::Model, wd::WetDryState)
                 rho[k, i] += share * (pool > 0.0 ? rho_hi - rho[k, i] : rho[k, i] - rho_lo)
             end
         end
+    end
+    return nothing
+end
+
+
+# k-epsilon in the wetting-drying step (issue #30): the closure of src/turbulence.jl (equations, constants, Patankar sinks,
+# wall functions) on the cut cells of the new geometry h^{n+1}. Wet cells are thicker than WD_EMPTY_CELL_THICKNESS; in a
+# column they are contiguous from the lowest (cut by the bed) to the top wet cell (cut by the surface).
+# - Shear production from the velocities of time n+1: cell-centred u from the open faces of the step, du/dz between the
+#   cell centres (one-sided in the lowest and the top wet cell), dw/dx between wet neighbours, and
+#   2 (du/dx)^2 + 2 (dw/dz)^2 = 4 (du/dx)^2.
+#   WHY dw/dz = -du/dx: the interface fluxes w of the cut cells include the volume change of the cell, so
+#   (w_{k+1} - w_k) / h is no strain rate in a thin cut cell (it grows without bound as h -> 0).
+# - Advection: conservative first-order upwind with the layer discharges q and interface fluxes w of the step, in the
+#   increment form of _wd_transport_density!, so that a uniform field stays uniform while cells fill and empty.
+# - Diffusion, sources and sinks: per column backward Euler in finite volumes with the cell thicknesses h_k and the centre
+#   distances (h_k + h_{k+1}) / 2; first order in time, positive for any dt (as on the fixed grid).
+# - Bed: with a roughness length z0 > 0 the log-law wall functions in the lowest wet cell, at the height
+#   z1 = max(h / 2, WD_FRICTION_Z1_MIN_FACTOR z0) of its centre (as the bed friction of _wd_implicit_vertical!).
+#   Surface: eps = C_mu^(3/4) k^(3/2) / (kappa 0.07 H) in the top wet cell, H the water depth of the column (Rodi 1993).
+# Cells that are empty keep their k and eps (floors after drying) and have nu_t = 0.
+
+# Eddy viscosity (m^2/s) of layer k at a u-face from its cells L and R: mean over the wet ones, 0 if both are empty.
+@inline function _wd_face_eddy_viscosity(ke::KEpsilonState, wd::WetDryState, k::Int, L::Int, R::Int)
+    wl = wd.h[k, L] > WD_EMPTY_CELL_THICKNESS
+    wr = wd.h[k, R] > WD_EMPTY_CELL_THICKNESS
+    (wl && wr) && return 0.5 * (ke.nu_t[k, L] + ke.nu_t[k, R])
+    wl && return ke.nu_t[k, L]
+    wr && return ke.nu_t[k, R]
+    return 0.0
+end
+
+# Lowest and top wet cell of column i in the thicknesses h (0, 0: dry column).
+@inline function _wd_wet_range(h::AbstractMatrix{<:Real}, i::Int)
+    klo, khi = 0, 0
+    @inbounds for k in axes(h, 1)
+        if h[k, i] > WD_EMPTY_CELL_THICKNESS
+            klo == 0 && (klo = k)
+            khi = k
+        end
+    end
+    return klo, khi
+end
+
+# Cell-centred horizontal velocity (m/s) of layer k in column i: mean of the open faces of the step.
+@inline function _wd_cell_velocity(model::Model, wd::WetDryState, k::Int, i::Int)
+    u = model.state.u
+    ol, or = wd.hf[k, i] > 0.0, wd.hf[k, i + 1] > 0.0
+    (ol && or) && return 0.5 * (u[k, i] + u[k, i + 1])
+    ol && return u[k, i]
+    or && return u[k, i + 1]
+    return 0.0
+end
+
+# Implicit turbulent density diffusion K = nu_t / sigma_rho (m^2/s) per column on the wet cells of h^{n+1}, in finite
+# volumes: h_k (rho_k - rho*_k) = dt [K_{k+1/2} (rho_{k+1} - rho_k) / d_{k+1/2} - K_{k-1/2} (rho_k - rho_{k-1}) / d_{k-1/2}],
+# d = centre distance; zero flux at the bed and the surface. Conserves sum_k h_k rho_k (columns of the matrix sum to h).
+function _wd_turbulent_density_diffusion!(model::Model, wd::WetDryState, ke::KEpsilonState)
+    cfg = model.config
+    rho, h, dt = model.state.rho, wd.h_new, cfg.dt
+    lower, diag, upper, rhs, sol = ke.lower, ke.diag, ke.upper, ke.rhs, ke.sol
+    @inbounds for i in 1:cfg.nx
+        klo, khi = _wd_wet_range(h, i)
+        n = khi - klo + 1
+        (klo == 0 || n < 2) && continue
+        for j in 1:n
+            k = klo + j - 1
+            kd = j > 1 ? dt * 0.5 * (ke.nu_t[k, i] + ke.nu_t[k - 1, i]) / KE_SIGMA_RHO / (0.5 * (h[k, i] + h[k - 1, i])) : 0.0
+            ku = j < n ? dt * 0.5 * (ke.nu_t[k, i] + ke.nu_t[k + 1, i]) / KE_SIGMA_RHO / (0.5 * (h[k, i] + h[k + 1, i])) : 0.0
+            lower[j], upper[j], diag[j], rhs[j] = -kd, -ku, h[k, i] + kd + ku, h[k, i] * rho[k, i]
+        end
+        _solve_tridiagonal_column!(sol, lower, diag, upper, rhs, n)
+        for j in 1:n
+            rho[klo + j - 1, i] = sol[j]
+        end
+    end
+    return nothing
+end
+
+# Upwind advection of the cell field phi with the step fluxes (increment form of _wd_transport_density!), into `out`;
+# the inflow at the left boundary carries the value of the first cell (zero gradient).
+function _wd_advect_turbulence!(out::AbstractMatrix{<:Real}, phi::AbstractMatrix{<:Real}, model::Model, wd::WetDryState,
+    floor_value::Real)
+    cfg = model.config
+    nz, nx, dt, dx = cfg.nz, cfg.nx, cfg.dt, model.dx
+    q, W, M = wd.q, model.state.w, wd.mass
+    @inbounds for i in 1:nx, k in 1:nz
+        M[k, i] = (wd.h[k, i] - wd.h_new[k, i]) * phi[k, i]
+    end
+    @inbounds for f in 1:(nx + 1), k in 1:nz
+        qf = q[k, f]
+        qf == 0.0 && continue
+        up = qf > 0.0 ? max(f - 1, 1) : min(f, nx)
+        flux = dt / dx * qf * phi[k, up]
+        f > 1 && (M[k, f - 1] -= flux)
+        f <= nx && (M[k, f] += flux)
+    end
+    @inbounds for i in 1:nx, k in 2:nz
+        wk = W[k, i]
+        wk == 0.0 && continue
+        flux = dt * wk * phi[wk > 0.0 ? k - 1 : k, i]
+        M[k - 1, i] -= flux
+        M[k, i] += flux
+    end
+    @inbounds for i in 1:nx, k in 1:nz
+        hk = wd.h_new[k, i]
+        out[k, i] = hk > WD_EMPTY_CELL_THICKNESS ? max(phi[k, i] + M[k, i] / hk, floor_value) : phi[k, i]
+    end
+    return out
+end
+
+function _wd_k_epsilon_step!(model::Model, wd::WetDryState, ke::KEpsilonState)
+    cfg = model.config
+    st = model.state
+    nz, nx, dt, dx, dz = cfg.nz, cfg.nx, cfg.dt, model.dx, model.dz
+    h = wd.h_new
+    k, eps, nu_t = ke.k, ke.eps, ke.nu_t
+    model.vegetation === nothing && fill!(ke.veg_work, 0.0)
+    zc(kk, i) = max((kk - 1) * dz, wd.bed[i]) + 0.5 * h[kk, i]   # m, height of the wet-cell centre
+    wet(kk, i) = 1 <= i <= nx && h[kk, i] > WD_EMPTY_CELL_THICKNESS
+    wc(kk, i) = 0.5 * (st.w[kk, i] + st.w[kk + 1, i])
+    # shear production and buoyancy with nu_t of time n
+    @inbounds for i in 1:nx
+        klo, khi = _wd_wet_range(h, i)
+        klo == 0 && continue
+        for kk in klo:khi
+            kup, kdn = min(kk + 1, khi), max(kk - 1, klo)
+            dudz = kup == kdn ? 0.0 : (_wd_cell_velocity(model, wd, kup, i) - _wd_cell_velocity(model, wd, kdn, i)) / (zc(kup, i) - zc(kdn, i))
+            il, ir = wet(kk, i - 1) ? i - 1 : i, wet(kk, i + 1) ? i + 1 : i
+            dwdx = ir == il ? 0.0 : (wc(kk, ir) - wc(kk, il)) / ((ir - il) * dx)
+            dudx = (st.u[kk, i + 1] - st.u[kk, i]) / dx
+            ke.strain2[kk, i] = (dudz + dwdx)^2 + 4 * dudx^2
+            ke.production[kk, i] = nu_t[kk, i] * ke.strain2[kk, i]
+            n2 = kup == kdn ? 0.0 : -(cfg.g / cfg.rho0) * (st.rho[kup, i] - st.rho[kdn, i]) / (zc(kup, i) - zc(kdn, i))
+            ke.buoyancy[kk, i] = -(nu_t[kk, i] / KE_SIGMA_RHO) * n2
+        end
+    end
+    _wd_advect_turbulence!(ke.k_adv, k, model, wd, KE_K_MIN)
+    _wd_advect_turbulence!(ke.eps_adv, eps, model, wd, KE_EPS_MIN)
+    copyto!(k, ke.k_adv)
+    copyto!(eps, ke.eps_adv)
+    lower, diag, upper, rhs, sol = ke.lower, ke.diag, ke.upper, ke.rhs, ke.sol
+    z0 = cfg.bed_roughness_length
+    @inbounds for i in 1:nx
+        klo, khi = _wd_wet_range(h, i)
+        klo == 0 && continue
+        depth = 0.0
+        for kk in klo:khi
+            depth += h[kk, i]
+        end
+        wall = z0 > 0.0
+        z1 = max(0.5 * h[klo, i], WD_FRICTION_Z1_MIN_FACTOR * z0)
+        ustar2 = wall ? bed_friction_coefficient(z0, z1) * _wd_cell_velocity(model, wd, klo, i)^2 : 0.0   # m^2/s^2
+        first = wall ? klo + 1 : klo
+        for (field, sigma) in ((:k, KE_SIGMA_K), (:eps, KE_SIGMA_EPS))
+            phi = field === :k ? k : eps
+            floor_value = field === :k ? KE_K_MIN : KE_EPS_MIN
+            if wall
+                # lowest wet cell: wall-function value (Dirichlet), coupled through the interface above it
+                bed_value = field === :k ? ustar2 / sqrt(KE_C_MU) : sqrt(ustar2)^3 / (KE_KARMAN * z1)
+                phi[klo, i] = max(bed_value, floor_value)
+            end
+            n = khi - first + 1
+            n >= 1 || continue
+            for j in 1:n
+                kk = first + j - 1
+                hk = h[kk, i]
+                ratio = eps[kk, i] / k[kk, i]   # 1/s, eps/k after the advection
+                inv_t = 1 / _ke_time(ke, k[kk, i], eps[kk, i], ke.strain2[kk, i])   # 1/s, time-scale bound (>= eps/k)
+                kd = kk > klo ? dt * (cfg.nu + 0.5 * (nu_t[kk, i] + nu_t[kk - 1, i]) / sigma) / (0.5 * (hk + h[kk - 1, i])) : 0.0
+                ku = kk < khi ? dt * (cfg.nu + 0.5 * (nu_t[kk, i] + nu_t[kk + 1, i]) / sigma) / (0.5 * (hk + h[kk + 1, i])) : 0.0
+                p, gb, pv = ke.production[kk, i], ke.buoyancy[kk, i], ke.veg_work[kk, i]
+                if field === :k
+                    source = p + max(gb, 0.0) + ke.cfk * pv
+                    sink = ratio + max(-gb, 0.0) / k[kk, i]
+                else
+                    c3 = gb > 0 ? KE_C3_UNSTABLE : KE_C3_STABLE
+                    source = inv_t * (KE_C1 * (p + ke.cfe * pv) + c3 * max(gb, 0.0))
+                    sink = KE_C2 * inv_t
+                end
+                lower[j] = -kd
+                upper[j] = -ku
+                diag[j] = hk * (1 + dt * sink) + kd + ku
+                rhs[j] = hk * (phi[kk, i] + dt * source)
+                if wall && j == 1
+                    # the Dirichlet cell below
+                    lower[j] = 0.0
+                    rhs[j] += kd * phi[klo, i]
+                end
+            end
+            if field === :eps && ke.surface_condition === :rodi && khi >= first
+                eps_s = KE_C_MU^0.75 * k[khi, i]^1.5 / (KE_KARMAN * KE_SURFACE_LENGTH * depth)
+                lower[n], upper[n], diag[n], rhs[n] = 0.0, 0.0, 1.0, eps_s
+            end
+            _solve_tridiagonal_column!(sol, lower, diag, upper, rhs, n)
+            for j in 1:n
+                phi[first + j - 1, i] = max(sol[j], floor_value)
+            end
+        end
+    end
+    @inbounds for i in 1:nx, kk in 1:nz
+        nu_t[kk, i] = h[kk, i] > WD_EMPTY_CELL_THICKNESS ? KE_C_MU * k[kk, i] * _ke_time(ke, k[kk, i], eps[kk, i], ke.strain2[kk, i]) : 0.0
     end
     return nothing
 end
