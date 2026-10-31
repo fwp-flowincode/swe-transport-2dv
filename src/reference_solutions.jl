@@ -414,3 +414,86 @@ function sluice_gate_submerged_head(q::Real, a::Real, tailwater::Real; contracti
     ys = sqrt(tailwater^2 + 2q^2 / g * (1 / tailwater - 1 / yc))
     return ys + q^2 / (2g * yc^2)
 end
+
+# Hydraulic jump behind a sluice gate with Chezy friction (issue #57): the supercritical jet deepens from C_c a towards
+# the critical depth, the subcritical flow from the outlet depth deepens upstream; the jump stands where the conjugate
+# depth of the jet equals the subcritical depth (Chow 1959, Open-Channel Hydraulics, ch. 9-10 and 15).
+
+const GVF_SIMPSON_INTERVALS = 2000   # -, Simpson intervals of chezy_supercritical_distance (sixth-digit accuracy and better)
+
+"""
+    chezy_supercritical_distance(h, q, C, slope, depth_start; g=9.81) -> Float64
+
+Distance (m) downstream of a section with the supercritical depth `depth_start` (m) at which the supercritical flow of
+the discharge `q` (m^2/s) has deepened to `h` (m, depth_start <= h <= h_c) under the Chezy friction `C` (m^(1/2)/s) on a
+mild slope `slope` i_b (-, i_b < g / C^2: the normal depth is subcritical; the M3 or, for i_b = 0, H3 curve). The
+gradually-varied-flow equation (`chezy_backwater_depth`) written for x(h),
+
+    dx/dh = (1 - Fr^2) / (i_b - i_f),   i_f = q^2 / (C^2 h^3),   Fr^2 = q^2 / (g h^3),
+
+is regular up to h_c (dx/dh = 0 there, while dh/dx is singular) and integrated with the composite Simpson rule
+(GVF_SIMPSON_INTERVALS intervals, fourth order). For i_b = 0 it has the closed form
+x = C^2 / q^2 (h_c^3 (h - h_0) - (h^4 - h_0^4) / 4). Source: Chow (1959), Open-Channel Hydraulics, ch. 9-10.
+"""
+function chezy_supercritical_distance(h::Real, q::Real, C::Real, slope::Real, depth_start::Real; g::Real=9.81)
+    hc = critical_depth(q; g=g)
+    0 < depth_start <= h <= hc * (1 + eps()) || throw(DomainError(h, "need 0 < depth_start <= h <= h_c = $(hc) m"))
+    slope < g / C^2 || throw(ArgumentError("the slope must be mild (i_b < g / C^2): the normal depth is subcritical"))
+    dxdh(y) = (1 - q^2 / (g * y^3)) / (slope - q^2 / (C^2 * y^3))
+    n = GVF_SIMPSON_INTERVALS
+    step = (h - depth_start) / n
+    s = dxdh(depth_start) + dxdh(h)
+    for j in 1:(n - 1)
+        s += (isodd(j) ? 4 : 2) * dxdh(depth_start + j * step)
+    end
+    return s * step / 3
+end
+
+"""
+    chezy_supercritical_depth(x, q, C, slope, x_start, depth_start; g=9.81) -> Float64
+
+Supercritical depth h(x) (m) at `x` (m, >= x_start) of the flow that has the depth `depth_start` (m) at `x_start` (m):
+the inverse of `chezy_supercritical_distance` (bisection, BERNOULLI_BISECTION_STEPS steps; the distance increases with
+h). Throws beyond the point where the flow reaches the critical depth (no supercritical solution there).
+"""
+function chezy_supercritical_depth(x::Real, q::Real, C::Real, slope::Real, x_start::Real, depth_start::Real; g::Real=9.81)
+    hc = critical_depth(q; g=g)
+    dist = x - x_start
+    dist >= 0 || throw(ArgumentError("x must be >= x_start (integration downstream)"))
+    dist <= chezy_supercritical_distance(hc, q, C, slope, depth_start; g=g) ||
+        throw(DomainError(x, "the supercritical flow reaches the critical depth upstream of x"))
+    lo, hi = float(depth_start), hc
+    for _ in 1:BERNOULLI_BISECTION_STEPS
+        mid = 0.5 * (lo + hi)
+        chezy_supercritical_distance(mid, q, C, slope, depth_start; g=g) < dist ? (lo = mid) : (hi = mid)
+    end
+    return 0.5 * (lo + hi)
+end
+
+"""
+    sluice_gate_jump_position(q, a, C, tailwater; contraction=0.61, slope=0.0, x_gate=0.0, x_end, g=9.81) -> Float64
+
+Position (m) of the hydraulic jump behind a sluice gate at `x_gate` (m) with the opening `a` (m), contraction
+coefficient `contraction` (-), discharge `q` (m^2/s) and Chezy friction `C` (m^(1/2)/s) on a mild slope `slope` (-), for
+the outlet depth `tailwater` (m) at `x_end` (m). The jet starts at the depth C_c a at the gate and deepens downstream
+(`chezy_supercritical_depth`); the subcritical flow follows from the outlet depth upstream (`chezy_backwater_depth`).
+The jump stands where the conjugate depth of the jet (`conjugate_depth`, momentum balance) equals the subcritical
+depth. Bisection on the jet depth between C_c a and h_c. Throws if the jump would be pushed against the gate
+(submerged flow) or out of the reach (`x_end`).
+"""
+function sluice_gate_jump_position(q::Real, a::Real, C::Real, tailwater::Real; contraction::Real=0.61, slope::Real=0.0,
+    x_gate::Real=0.0, x_end::Real, g::Real=9.81)
+    h0, hc = contraction * a, critical_depth(q; g=g)
+    position(h) = x_gate + chezy_supercritical_distance(h, q, C, slope, h0; g=g)
+    # > 0: the jet is too strong for the subcritical flow at its position; < 0: the subcritical flow pushes upstream
+    mismatch(h) = conjugate_depth(h, q; g=g) - chezy_backwater_depth(min(position(h), x_end), q, C, slope, x_end, tailwater; g=g)
+    mismatch(h0) > 0 || throw(DomainError(tailwater, "the jump is pushed against the gate: submerged flow"))
+    lo, hi = h0, hc
+    for _ in 1:BERNOULLI_BISECTION_STEPS
+        mid = 0.5 * (lo + hi)
+        mismatch(mid) > 0 ? (lo = mid) : (hi = mid)
+    end
+    xj = position(0.5 * (lo + hi))
+    xj < x_end || throw(DomainError(tailwater, "the jump is pushed out of the reach"))
+    return xj
+end

@@ -47,7 +47,8 @@ export ritter_dam_break, CarrierGreenspanWave, carrier_greenspan_time_scale, car
 export carrier_greenspan_shoreline, carrier_greenspan_solution
 export chezy_equilibrium_velocity, chezy_spinup_velocity, chezy_viscous_profile, chezy_roughness_length, chezy_backwater_depth
 export critical_depth, bernoulli_depth, conjugate_depth, swashes_bump_bed, bump_flow_depth, hydraulic_jump_position
-export sluice_gate_free_head, sluice_gate_submerged_head, sluice_gate_modular_limit
+export sluice_gate_free_head, sluice_gate_submerged_head, sluice_gate_modular_limit, chezy_supercritical_distance,
+    chezy_supercritical_depth, sluice_gate_jump_position
 export initialize_lock_exchange!, initialize_rayleigh_taylor!
 export initialize_rising_plume!, initialize_sinking_plume!, initialize_jet_impulse!
 export initialize_internal_seiche!, initialize_surface_dam_break!, initialize_kelvin_helmholtz!

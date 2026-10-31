@@ -25,7 +25,7 @@ Structure
 - advection_stability/: stability of the momentum advection with a mean flow, issue #37 ([README](advection_stability/README.md)).
 - sloped_channel/: uniform and gradually varied flow with Chezy friction, discharge and water-level boundaries, issue #14 ([README](sloped_channel/README.md)).
 - obstacles/: flow over a bump and a broad-crested weir, sub-, trans- and supercritical, hydraulic jump, tracer, issue #47 ([README](obstacles/README.md)).
-- sluice_gate/: free and submerged flow under a sluice gate, hydrostatic with a contraction coefficient and non-hydrostatic, issue #48 ([README](sluice_gate/README.md)).
+- sluice_gate/: free and submerged flow under a sluice gate, hydrostatic with a contraction coefficient and non-hydrostatic, hydraulic jump with Chezy friction, issues #48 and #57 ([README](sluice_gate/README.md)).
 - open_boundaries/: waves at the free outflow, a prescribed level and a wall, hydrostatic and non-hydrostatic (dispersive), relaxed outflow, issues #46, #49 and #54 ([README](open_boundaries/README.md)).
 - validation/: scripts that compare selected cases to analytic/semianalytic references.
 - common/: helper utilities used by case scripts.
