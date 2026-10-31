@@ -31,6 +31,7 @@ Bed, layer geometry, fluxes and work arrays of the wetting-drying time step (siz
 - `q` (m^2/s, nz x (nx+1)): layer discharges hf*u of the step.
 - `p_anom` (Pa, nz x nx): baroclinic pressure g * integral from z to zeta of (rho - rho0), at the nominal layer centres.
 - `time` (s): model time, advanced by every step (used by a time-dependent boundary velocity).
+- `gate_edge` (m, nx+1), `gate_contraction` (-, nx+1): sluice gates at the u-faces (`set_sluice_gate!`).
 """
 mutable struct WetDryState{T<:Real}
     bed::Vector{T}
@@ -70,6 +71,9 @@ mutable struct WetDryState{T<:Real}
     newton_iterations::Int        # Newton iterations of the last free-surface solve
     newton_iterations_max::Int    # largest number of Newton iterations so far
     left_velocity::Any   # nothing, or a function t (s) -> u (m/s, scalar or length nz) at the left boundary face
+    gate_edge::Vector{T}         # m, nx+1: lower edge of a sluice gate above the grid bottom (Inf: no gate; issue #48)
+    gate_contraction::Vector{T}  # -, nx+1: contraction coefficient of the gate opening (1: none)
+    gate_active::Vector{Bool}    # nx+1: the gate cuts the flow area of the face in this step (upstream level above it)
 end
 
 function WetDryState(cfg::ModelConfig; T::Type{<:Real}=Float64)
@@ -84,7 +88,7 @@ function WetDryState(cfg::ModelConfig; T::Type{<:Real}=Float64)
         zeros(T, nz, nx), zeros(T, nz, nx), zeros(T, nx + 1), zeros(T, nx + 1), zeros(T, nx), zeros(T, nx), zeros(T, nx),
         zeros(T, nx), zeros(T, nx), zeros(T, nx), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz),
         zeros(T, nz, nx + 1), zeros(T, nz + 1, nx), zeros(T, nz, nx), zeros(T, nz, nx), zeros(T, nz + 1, nx), zeros(Int, nz, nx),
-        Int[], Int[], T[], T[], fill(T(-1), nz, nx + 1), 0.0, 0.0, 0, 0, nothing)
+        Int[], Int[], T[], T[], fill(T(-1), nz, nx + 1), 0.0, 0.0, 0, 0, nothing, fill(T(Inf), nx + 1), ones(T, nx + 1), fill(false, nx + 1))
 end
 
 """
@@ -207,9 +211,20 @@ function _wd_face_bed(model::Model, wd::WetDryState, f::Int)
     return wd.bed_face[f]
 end
 
+# Upper end (m above the grid bottom) of the flow area of face f under a sluice gate: the face bed plus the contracted
+# opening, z_b,f + C_c (z_g - z_b,f) (Inf without a gate). See `set_sluice_gate!`.
+function _wd_gate_level(wd::WetDryState, f::Int, zb_f::Real)
+    edge = wd.gate_edge[f]
+    isfinite(edge) || return edge
+    return zb_f + wd.gate_contraction[f] * (edge - zb_f)
+end
+
 # Layer thicknesses at the u-faces: face bed (_wd_face_bed) and upwind water level (sign of the depth-summed u of time n;
 # the higher level for u = 0), Stelling & Duinmeijer (2003), Sec. 2 (equation numbers not checked). Faces with an upwind
-# depth <= dry_depth_threshold are closed (hf = 0). Boundary faces use the adjacent column.
+# depth <= dry_depth_threshold are closed (hf = 0). Boundary faces use the adjacent column. A sluice gate (issue #48)
+# closes the face above its (contracted) lower edge z_g: hf_k = max(0, min(z_{k+1}, zeta_f, z_g) - max(z_k, z_b,f)), so
+# the layer cut by the edge is partly open, like a layer cut by the surface; the face is closed if z_g - z_b,f is at
+# most dry_depth_threshold.
 function _wd_face_thicknesses!(model::Model, wd::WetDryState)
     cfg = model.config
     u = model.state.u
@@ -231,12 +246,68 @@ function _wd_face_thicknesses!(model::Model, wd::WetDryState)
         end
         hf = view(wd.hf, :, f)
         zb_f = _wd_face_bed(model, wd, f)
-        if zeta_f - zb_f > cfg.dry_depth_threshold
-            layer_thicknesses!(hf, zeta_f, zb_f, model.dz)
+        zg = _wd_gate_level(wd, f, zb_f)
+        wd.gate_active[f] = zeta_f > zg
+        if zeta_f - zb_f > cfg.dry_depth_threshold && zg - zb_f > cfg.dry_depth_threshold
+            layer_thicknesses!(hf, min(zeta_f, zg), zb_f, model.dz)
         else
             fill!(hf, 0.0)
         end
     end
+    return nothing
+end
+
+const GATE_FACE_POSITION_TOL = 1e-6   # -, allowed distance of a gate position from a u-face, in cells
+
+"""
+    set_sluice_gate!(model, x; lower_edge, contraction=1.0)
+
+Sluice gate (issue #48) at the interior u-face at the position `x` (m, a multiple of dx): a thin vertical plate that closes
+the water column above its lower edge `lower_edge` (m above the grid bottom, at or above the bed of the face; `Inf`
+removes the gate). Wetting-drying step only (`ModelConfig(wetting_drying=true)`); the gate may be moved between steps.
+
+The face carries water only below z_g = z_b,f + C_c (lower_edge - z_b,f) (`_wd_face_thicknesses!`): layers above it are
+closed, the layer cut by it is partly open. While the upstream level lies below the edge the gate has no effect.
+
+`contraction` (C_c, 0 < C_c <= 1) is the contraction coefficient of the jet: a hydrostatic model has no vena contracta
+(the streamlines cannot curve), so the jet leaves the gate with the full opening a = lower_edge - z_b,f unless the
+opening is narrowed to C_c a. With it, the step reproduces the classical gate relations (docs section 26):
+- free flow: the upstream energy head is E_1 = C_c a + q^2 / (2 g (C_c a)^2) (Bernoulli up to the vena contracta; the
+  momentum-conservative advection of Stelling & Duinmeijer (2003) conserves the energy head in a contraction);
+- submerged flow: Bernoulli up to the vena contracta and the momentum balance from there to the tailwater (Henderson
+  1966, Open Channel Flow, ch. 6; the advection conserves momentum in an expansion).
+C_c = 0.61 is the classical value for a vertical gate with a small opening (Henderson 1966, sec. 6.4; von Mises 1917).
+The non-hydrostatic mode resolves the contraction itself, so it requires `contraction=1` (the gate edge is then a solid
+boundary of the pressure problem, through the face thicknesses).
+"""
+function set_sluice_gate!(model::Model, x::Real; lower_edge::Real, contraction::Real=1.0)
+    wd = model.wetdry
+    wd === nothing && throw(ArgumentError("set_sluice_gate! requires ModelConfig(wetting_drying=true)"))
+    cfg = model.config
+    cells = x / model.dx
+    f = round(Int, cells) + 1   # u-face index
+    abs(cells - (f - 1)) <= GATE_FACE_POSITION_TOL || throw(ArgumentError(@sprintf("gate position x = %.6g m is not a u-face (dx = %.6g m)", x, model.dx)))
+    2 <= f <= cfg.nx || throw(ArgumentError(@sprintf("gate position x = %.6g m must be an interior u-face (0 < x < %.6g m)", x, cfg.length)))
+    lower_edge >= wd.bed_face[f] || throw(ArgumentError(@sprintf("lower_edge = %.6g m lies below the bed of the face (%.6g m)", lower_edge, wd.bed_face[f])))
+    0.0 < contraction <= 1.0 || throw(ArgumentError("contraction must be in (0, 1]"))
+    if contraction != 1.0 && !cfg.use_hydrostatic && cfg.nz > 1
+        throw(ArgumentError("the non-hydrostatic mode resolves the contraction of the gate jet; use contraction=1"))
+    end
+    wd.gate_edge[f] = lower_edge
+    wd.gate_contraction[f] = contraction
+    return nothing
+end
+
+"""
+    clear_sluice_gates!(model)
+
+Removes all sluice gates (`set_sluice_gate!`).
+"""
+function clear_sluice_gates!(model::Model)
+    wd = model.wetdry
+    wd === nothing && return nothing
+    fill!(wd.gate_edge, Inf)
+    fill!(wd.gate_contraction, 1.0)
     return nothing
 end
 
@@ -385,8 +456,15 @@ function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, s
             aR = htR > 0.0 ? 0.5 * (wd.q[k, f] + wd.q[k, f + 1]) / htR * HtR / Hbar : 0.0
         end
 
+        # sluice gate cutting the face (issue #48): energy-head form in the contraction into the gate face, first order
+        gate = wd.gate_active[f]
+        if gate
+            aL > 0.0 && (aL = max(0.5 * (u[k, f - 1] + uf), 0.0))
+            f < nxp1 && aR < 0.0 && (aR = min(0.5 * (u[k, f + 1] + uf), 0.0))
+        end
+
         # horizontal
-        h2 = second && open_h(f - 2) && open_h(f - 1) && open_h(f + 1) && open_h(f + 2)
+        h2 = second && !gate && open_h(f - 2) && open_h(f - 1) && open_h(f + 1) && open_h(f + 2)
         kin = aL > 0.0 ? _wd_open_layer_at_or_below(wd, k, f - 1) : 0
         if kin > 0                         # inflow from cell L: upwind node f-1, behind it f-2
             c = aL / dx

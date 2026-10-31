@@ -18,4 +18,5 @@ include("test_common.jl")
     include("test_sloped_channel.jl")
     include("test_open_boundaries.jl")
     include("test_obstacles.jl")
+    include("test_sluice_gate.jl")
 end
