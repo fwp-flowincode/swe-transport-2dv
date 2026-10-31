@@ -1320,6 +1320,92 @@ $\tau \gg L/c$.
   and 1.40 % (wetting-drying step), against 1.36 % and 1.15 % for the free outflow. The relaxation adds a low-frequency
   tail of order $A\sigma/(c\tau)$.
 
+### 26) Sluice gate (issue #48)
+
+`set_sluice_gate!(model, x; lower_edge, contraction=1.0)` puts a thin vertical gate on the interior u-face at $x$ (m).
+It closes the water column above its lower edge $z_g$ (m above the grid bottom). The gate works only in the
+wetting-drying step, where face layers can be partly open, and it can be moved between steps. `clear_sluice_gates!`
+removes all gates.
+
+**Geometry.** The face layer thicknesses (`_wd_face_thicknesses!`) gain an upper bound:
+
+$$h_{f,k} = \max\bigl(0,\ \min(z_{k+1},\ \zeta_f,\ z_b + C_c(z_g-z_b)) - \max(z_k,\ z_b)\bigr),$$
+
+with $z_b$ the face bed, $\zeta_f$ the upwind level and $C_c$ the contraction coefficient (`contraction`). Layers
+above the edge are closed, and the layer cut by the edge is partly open, as a layer cut by the surface is. While the
+upstream level lies below the edge, the gate changes nothing (bit for bit). An edge at the bed closes the face. Through
+the face thicknesses the edge is also a solid boundary for the free-surface solve, the non-hydrostatic pressure problem
+and the transport.
+
+**Contraction.** The jet leaving a sharp-edged gate contracts to the depth $C_ca$ (vena contracta, $a=z_g-z_b$),
+with $C_c\approx0.61$ for a vertical gate (Henderson 1966, ch. 6). The contraction comes from curved streamlines and a
+non-hydrostatic pressure, so the hydrostatic step cannot form it: with $C_c=1$ its jet leaves with the full opening
+(measured: $C_c=1.00$ from the upstream head). In the hydrostatic step `contraction` therefore narrows the flow area of
+the face to $C_ca$. The non-hydrostatic step resolves the contraction itself and requires `contraction=1`.
+
+**Advection at the gate face.** Stelling & Duinmeijer (2003) conserve momentum where the flow expands and the energy
+head where it contracts. The momentum-conservative advection of section 18 uses the advective velocity $q/\bar h$ of
+the neighbouring cell. Under a gate the face is much shallower than both cells (0.06 m under 0.35 m in the tests), so
+this velocity is far too small. The face then gains too little kinetic energy, and the upstream head came out 28 % too
+low in 1D (6 % in 2DV, where the layer of the opening is about as thick as the face). On a face that the gate cuts in
+this step (`gate_active`), the flow accelerating into the face therefore uses the energy-head form, first-order upwind:
+
+$$\frac{\partial u_f}{\partial t} + \frac{u_f+u_{f-1}}{2}\,\frac{u_f-u_{f-1}}{\Delta x} = -g\frac{\eta_R-\eta_L}{\Delta x},$$
+
+which in steady flow is Bernoulli between the faces, $\tfrac12(u_f^2-u_{f-1}^2)=g(\eta_L-\eta_R)$ (likewise for a flow
+from the right). Behind the gate, the momentum-conservative advection of the next faces gives the momentum balance of
+the expanding jet (Borda-Carnot loss). Elsewhere nothing changes; at a smooth contraction (the bump of section 23) the
+two forms differ by $O(\Delta x)$ only.
+
+**Theory** (`src/reference_solutions.jl`, frictionless, specific discharge $q$, $y_c=C_ca$):
+- free flow: $E_1 = y_c + q^2/(2gy_c^2)$ (`sluice_gate_free_head`), i.e. $q=C_ca\sqrt{2g(E_1-C_ca)}$ with the upstream
+  energy head $E_1$ (the formula of the issue with the approach velocity included);
+- modular limit: free flow as long as the tailwater depth $y_t$ is at most the conjugate depth of $y_c$
+  (`sluice_gate_modular_limit`);
+- submerged flow (`sluice_gate_submerged_head`): the depth $y_s$ at the vena contracta (jet below dead water) from the
+  momentum balance $y_s^2/2+q^2/(gy_c)=y_t^2/2+q^2/(gy_t)$, and $E_1=y_s+q^2/(2gy_c^2)$.
+
+**Results** (`test_sluice_gate.jl`; 20 m channel, $q=0.15$ m²/s, $a=0.1$ m, $\Delta x=0.2$ m, $\theta=1$; figures in
+`experiments/sluice_gate`):
+
+| case | upstream energy head against theory |
+|---|---|
+| free flow, $C_c=0.61$, 1D and 2DV ($n_z=8$) | +0.04 % |
+| free flow, $C_c=1$, $q=0.08$ m²/s, $a=0.05$ m, 1D and 2DV | +0.03 % |
+| submerged, tailwater 0.28 and 0.34 m, 1D | -0.012 % and -0.001 % |
+| submerged, 2DV ($n_z=8$, $\nu=3\cdot10^{-3}$ m²/s) | -1.6 % and -4.8 % |
+
+The discharge is the same at all faces within 0.13 %, and the volume budget closes to round-off every step. A closed
+gate holds the water: the inflow fills the reach upstream, and the tailwater stays at rest.
+
+The hydrostatic 2DV submerged flow is a wall jet under a recirculating roller, the counterpart of the roller under the
+jump of section 23. With $\nu=10^{-4}$ m²/s it does not become steady. With $\nu=3\cdot10^{-3}$ m²/s it is steady for
+the 0.28 m tailwater, while the discharge of the 0.34 m tailwater still varies by 8-17 % along the channel. Its upstream head lies
+below the momentum theory, which assumes a uniform tailwater section. Recirculation behind obstacles is issue #50.
+
+**Non-hydrostatic contraction.** With `contraction=1`, a 6 m channel and $\Delta x=\Delta z$, the coefficient
+$C_c$ computed from the upstream head falls with resolution towards the classical value (time step as in the test, and 20 % smaller):
+
+| grid ($n_x \times n_z$, $a/\Delta z$) | $C_c$ from the upstream head | the same, 20 % smaller $\Delta t$ | smallest depth behind the gate / $a$ (smaller $\Delta t$) |
+|---|---|---|---|
+| 120 x 12 (2) | 0.82 | 0.79 | 0.86 |
+| 240 x 24 (4) | 0.76 | 0.71 | 0.75 |
+| 480 x 48 (8) | 0.64 | 0.64 | 0.65 |
+
+The coefficient from the upstream head is an effective discharge coefficient: it includes the energy lost at the gate.
+On the coarse grids the jet dips only briefly behind the gate and then runs deeper than $C_ca$ (0.09 m at 240 x 24,
+where $C_ca$ from the head would be 0.076 m), so part of the head is lost rather than turned into a thinner jet. On the
+finest grid both measures agree (0.64 and 0.65). The steps (0.06-0.08 and 0.07-0.12) do not yet show a clean order,
+and on the finest grid the discharge still varies by 4 % after 40 s; the coefficient is close to the classical 0.61,
+but not converged.
+
+The hydrostatic step on the coarsest grid gives 1.00.
+
+References: Henderson (1966), Open Channel Flow, ch. 6 (sluice gates: contraction, free and submerged flow); Chow (1959),
+Open-Channel Hydraulics, ch. 17; von Mises (1917), Berechnung von Ausfluss- und Ueberfallzahlen, Z. VDI 61 (the
+contraction coefficient 0.611 of a slot); Stelling & Duinmeijer (2003), Int. J. Numer. Methods Fluids 43, 1329-1354
+(energy head in contractions, momentum in expansions). Equation numbers were not checked.
+
 ## Test-by-test documentation
 
 ### test_verify_state_shapes
@@ -2393,6 +2479,24 @@ stated otherwise.
   tailwater energy within 3 mm.
 - `test_verify_inflow_density_config_checks`: `left_rho` is rejected without wetting and drying and when not finite,
   and it widens the transport bounds.
+
+### Sluice gate tests (`test_sluice_gate.jl`, section 26)
+
+- `test_verify_sluice_gate_reference_solutions`: the free head satisfies $q=C_ca\sqrt{2g(E_1-C_ca)}$; the modular limit
+  is the conjugate depth of $C_ca$; the submerged head is continuous there, larger above it and the free head below;
+  $C_c$ is recovered from the head.
+- `test_verify_sluice_gate_inactive_is_bitwise_identity`: a gate above the water surface, and a gate removed by
+  `clear_sluice_gates!`, give the same $u$, $\eta$ and $w$ as no gate, bit for bit (200 steps, 4 layers).
+- `test_verify_sluice_gate_closed_holds_the_water`: a gate down to the bed keeps its face closed; the volume upstream
+  grows exactly by the inflow, and the tailwater stays at rest (1D and 4 layers, $10^{-9}$).
+- `test_validate_sluice_gate_free_flow`: upstream energy head within 0.2 % of $C_ca+q^2/(2g(C_ca)^2)$ for
+  $C_c=0.61$ and $C_c=1$, 1D and 2DV (measured 0.03-0.04 %); steady discharge within 0.5 %; volume budget to round-off.
+- `test_validate_sluice_gate_submerged_flow`: tailwater 0.28 and 0.34 m (above the modular limit 0.245 m), 1D:
+  upstream head within 0.2 % of the momentum theory (measured 0.012 % and 0.001 %).
+- `test_validate_sluice_gate_nonhydro_contraction`: non-hydrostatic with `contraction=1`, 12 layers: $0.61<C_c<0.85$
+  (measured 0.82); the hydrostatic step on the same grid gives $C_c>0.98$ (measured 1.00).
+- `test_verify_sluice_gate_config_checks`: positions off a u-face or on the boundary, an edge below the bed, a
+  contraction outside (0, 1], a contraction below 1 in the non-hydrostatic mode and the fixed-grid step are rejected.
 
 ## Additional validation scripts and literature basis
 

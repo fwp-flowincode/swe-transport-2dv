@@ -48,6 +48,9 @@ Model
   - a uniform body force (`body_force_x`, channel slope) and an absorbing sponge layer (`sponge_length`, `sponge_rate`);
   - wetting and drying (`wetting_drying=true`, hydrostatic): cells cut by the bed and the free surface, dry columns, any
     bed level and a single layer (1D) allowed; see `docs/plan_issue_31_wetting_drying.md`.
+  - sluice gates in the wetting-drying step (`set_sluice_gate!`): a thin gate closes a face above its lower edge,
+    hydrostatic with a contraction coefficient or non-hydrostatic (issue #48; docs/TESTS_TECHNICAL_DOCUMENTATION.md,
+    section 26).
 - Diagnostics: water volume, constituent mass, boundary fluxes, CFL numbers, reduced gravity and
   internal wave speed. Plots and animations are written to `output_barotropic/`.
 

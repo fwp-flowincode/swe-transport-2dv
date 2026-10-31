@@ -368,3 +368,49 @@ function hydraulic_jump_position(q::Real; bed::Function, x_crest::Real, outlet_d
     end
     throw(DomainError(outlet_depth, "no hydraulic jump on the obstacle for this outlet depth"))
 end
+
+# Steady frictionless flow under a sluice gate (issue #48) with the opening a (m) and the contraction coefficient C_c (-):
+# the jet contracts to the depth C_c a (vena contracta). Upstream of it the energy head is conserved, downstream of it
+# the momentum flux (Henderson 1966, Open Channel Flow, ch. 6; Chow 1959, ch. 17; equation numbers not checked).
+
+"""
+    sluice_gate_free_head(q, a; contraction=0.61, g=9.81) -> Float64
+
+Upstream energy head E_1 = C_c a + q^2 / (2 g (C_c a)^2) (m above the bed) of the free flow under a sluice gate with the
+opening `a` (m), the specific discharge `q` (m^2/s) and the contraction coefficient `contraction` (-): Bernoulli from
+the upstream section to the vena contracta, where the depth is C_c a and the pressure hydrostatic. Equivalent to
+q = C_c a sqrt(2 g (E_1 - C_c a)).
+"""
+function sluice_gate_free_head(q::Real, a::Real; contraction::Real=0.61, g::Real=9.81)
+    yc = contraction * a
+    return yc + q^2 / (2g * yc^2)
+end
+
+"""
+    sluice_gate_modular_limit(q, a; contraction=0.61, g=9.81) -> Float64
+
+Largest tailwater depth (m) of free flow under a sluice gate: the conjugate depth of the vena contracta C_c a
+(`conjugate_depth`). A deeper tailwater pushes the hydraulic jump against the gate and submerges the jet.
+"""
+sluice_gate_modular_limit(q::Real, a::Real; contraction::Real=0.61, g::Real=9.81) = conjugate_depth(contraction * a, q; g=g)
+
+"""
+    sluice_gate_submerged_head(q, a, tailwater; contraction=0.61, g=9.81) -> Float64
+
+Upstream energy head E_1 (m above the bed) of the flow under a sluice gate with the tailwater depth `tailwater` (m),
+opening `a` (m), specific discharge `q` (m^2/s) and contraction coefficient `contraction` (-). Submerged flow
+(tailwater above `sluice_gate_modular_limit`): the depth y_s at the vena contracta (jet of depth C_c a below dead water)
+follows from the momentum balance between the vena contracta and the tailwater,
+
+    y_s^2 / 2 + q^2 / (g C_c a) = y_t^2 / 2 + q^2 / (g y_t),
+
+and E_1 = y_s + q^2 / (2 g (C_c a)^2) from Bernoulli up to the vena contracta. Below the modular limit the free head
+(`sluice_gate_free_head`). Henderson (1966), Open Channel Flow, ch. 6.
+"""
+function sluice_gate_submerged_head(q::Real, a::Real, tailwater::Real; contraction::Real=0.61, g::Real=9.81)
+    yc = contraction * a
+    tailwater <= sluice_gate_modular_limit(q, a; contraction=contraction, g=g) &&
+        return sluice_gate_free_head(q, a; contraction=contraction, g=g)
+    ys = sqrt(tailwater^2 + 2q^2 / g * (1 / tailwater - 1 / yc))
+    return ys + q^2 / (2g * yc^2)
+end

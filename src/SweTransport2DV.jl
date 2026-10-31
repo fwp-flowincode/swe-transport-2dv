@@ -42,11 +42,12 @@ export KEpsilonState, k_epsilon_step!, turbulent_viscosity_u!, implicit_vertical
 export KE_C_MU_VALUE, KE_C1_VALUE, KE_C2_VALUE
 export update_stem_posture!, vegetation_drag_rate, stem_tip_deflection, stem_deflected_height, VEGETATION_EXPLICIT_DRAG_LIMIT
 export attach_vegetation!, clear_vegetation!, vegetation_source!, copy_vegetation, vegetation_path, set_x_inflow_outflow!, clear_x_inflow_outflow!
-export WetDryState, layer_thicknesses!, water_depth, initialize_water_level!
+export WetDryState, layer_thicknesses!, water_depth, initialize_water_level!, set_sluice_gate!, clear_sluice_gates!
 export ritter_dam_break, CarrierGreenspanWave, carrier_greenspan_time_scale, carrier_greenspan_rest_time
 export carrier_greenspan_shoreline, carrier_greenspan_solution
 export chezy_equilibrium_velocity, chezy_spinup_velocity, chezy_viscous_profile, chezy_roughness_length, chezy_backwater_depth
 export critical_depth, bernoulli_depth, conjugate_depth, swashes_bump_bed, bump_flow_depth, hydraulic_jump_position
+export sluice_gate_free_head, sluice_gate_submerged_head, sluice_gate_modular_limit
 export initialize_lock_exchange!, initialize_rayleigh_taylor!
 export initialize_rising_plume!, initialize_sinking_plume!, initialize_jet_impulse!
 export initialize_internal_seiche!, initialize_surface_dam_break!, initialize_kelvin_helmholtz!
