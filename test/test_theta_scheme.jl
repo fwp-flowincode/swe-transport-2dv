@@ -228,6 +228,7 @@ end
         for (theta, dt, level) in ((0.55, 0.05, x -> 1.5 + 0.3 * cos(pi * x / 20.0)), (0.5, 0.4, x -> x < 8.0 ? 1.8 : 0.0)),
             hydro in (true, false)
             model = wd_theta_model(theta; dt=dt, use_hydrostatic=hydro)
+            model.config.advective_courant_warning = Inf   # WHY: positivity and conservation at a large step are tested, not accuracy
             xc = [(i - 0.5) * 0.5 for i in 1:40]
             rho = [i <= 20 ? 1001.0 : 1000.0 for _ in 1:8, i in 1:40]
             initialize_water_level!(model, level.(xc); rho=rho)
@@ -369,6 +370,7 @@ end
         margin = SweTransport2DV.SURFACE_FROUDE_WARNING_MARGIN
         for (Fr, theta) in ((0.5, 0.7), (0.8, 0.75), (2.0, 1.0), (2 / 3 + 0.5 * margin, 0.7), (1e-5, 0.5))
             model = froude_channel(; U=Fr * sqrt(g * H), theta=theta)
+            model.config.advective_courant_warning = Inf   # WHY: this channel runs at a high advective Courant number; only Fr is tested
             @test_logs step_forward!(model)
             @test !model.froude_warning_issued
             @test model.max_surface_froude ≈ Fr rtol = FROUDE_RECORD_RTOL

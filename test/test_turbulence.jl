@@ -130,6 +130,7 @@ end
         DT_RTOL = 1e-4
         runs = map((0.1, 2.0)) do dt
             model = turbulence_channel_model(; depth=H, nz=20, dt=dt, t_end=900.0, slope=SLOPE, z0=Z0, implicit_vertical_terms=true)
+            model.config.advective_courant_warning = Inf   # WHY: the large step is the point of the test; uniform flow has no horizontal advection
             for _ in 1:model.config.nt
                 step_forward!(model)
             end

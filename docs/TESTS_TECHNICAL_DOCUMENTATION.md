@@ -1055,7 +1055,9 @@ step to $\sum_k\Delta Z_ku_k=q$ with the face layer thicknesses of time $n$: the
 the cut face layers in the wetting-drying step. A velocity profile alone carries a transport that changes with the inlet
 level; at the backwater level of the tests that is 10 % of $q$.
 
-When `set_x_inflow_outflow!` is called again (e.g. to ramp $q$), the inlet velocity it sets is $u^n$ of the next step
+In the wetting-drying step $q$ can be a function of the model time, `left_discharge=t -> q(t)` (issue #61).
+
+When `set_x_inflow_outflow!` is called again (e.g. to ramp $q$ on the fixed grid), the inlet velocity it sets is $u^n$ of the next step
 and carries $(1-\theta)$ of that step's inflow. It is therefore scaled with the face layers that this step uses. In the
 wetting-drying case these are the cut layers at the current inlet level. Scaled with the full layers of the flat grid,
 a ramped inflow over the raised bed of the sloped channel settled 0.6 % too low ($U=0.995$ m/s).
@@ -1636,8 +1638,16 @@ Runs at S/10 with k-epsilon (Courant number from the largest $u$):
 | non-hydrostatic | discharge | impulsive | level | full | stable over 8 s, Courant 0.76 |
 | hydrostatic | discharge | impulsive | relaxed | full | stable over 90 s, Courant 0.49 |
 
-Practice: against a fixed level, prescribe the discharge (`left_discharge`), not a velocity, and start from a ramp, or
-use the relaxed outflow.
+Practice: against a fixed level, prescribe the discharge, not a velocity, and start from a ramp
+(`left_discharge=t -> q(t)`, wetting-drying step), or use the relaxed outflow.
+
+`step_forward!` warns once per model when the advective Courant number passes `ModelConfig(advective_courant_warning)`,
+default `ADVECTIVE_COURANT_WARNING` $=0.8$; `Inf` switches it off (the largest value of a smooth run above was 0.76, the
+runs break from about 0.85; the record is `advective_courant_max` of `compute_diagnostics`), and once when a velocity inlet stands against a fixed level with
+`reach_mode_gain` above `REACH_MODE_GAIN_WARNING` $=1.1$. That is the factor of the table with
+$U_2=U_1h_1/h_2$, the outlet velocity of the steady flow: the velocity at the outlet lags in a transient, and a uniform
+channel would seem to grow. The factor does not include friction or losses at obstacles, so the warning says the mode
+can grow, not that it does.
 
 **Hydrostatic recirculation.** Stable is not the same as steady. With the relaxed outflow the hydrostatic step has a
 recirculation of about the right length, but it never settles:
@@ -1658,9 +1668,7 @@ non-hydrostatic $x_R=5.29\,S$ (std 0.08) from the toe; hydrostatic: no reverse f
 therefore miss a recirculation altogether, although it keeps the one behind the vertical step.
 
 Limitations: the wall functions above, so $x_R$ depends on the position of the bed against the layers. One validated
-case, against a simulation; the measured table of 1987 is not public. No time-dependent discharge at the inlet in the public interface (the ramped discharge runs above set
-`model.x_boundary_q_left` in the loop). The model does not detect the growth of the mode; the run ends with an error of
-the free-surface solve.
+case, against a simulation; the measured table of 1987 is not public.
 
 ## Test-by-test documentation
 
@@ -2795,6 +2803,22 @@ stated otherwise.
   of the LES value 6.15 S (measured 6.18 S).
 - `test_validate_backward_step_hydrostatic_vertical_velocity`: same case: the largest $w$ of the hydrostatic run is above
   3 times the non-hydrostatic one (measured 4.1).
+
+Time-dependent discharge and the mode of the reach (`test_open_boundaries.jl`, issue #61):
+
+- `test_verify_left_discharge_function`: a ramp reaches the inlet face at every step; the volume follows its sum to
+  rounding (closed end, $\theta=1$); a constant function equals the constant discharge exactly; non-finite values and the
+  fixed grid are rejected.
+- `test_verify_advective_courant_warning`: silent below the threshold, once above it; the largest value is recorded;
+  `advective_courant_warning = Inf` switches it off, a value <= 0 is rejected. Tests that run at a large step on purpose
+  (positivity, conservation, order in time, uniform flow) switch it off with a `# WHY:` comment.
+- `test_verify_reach_mode_gain`: the value of ST1 (1.41), 1 for a uniform channel and without mean flow, below 1 with the
+  fast end at the outlet, NaN for outflow and supercritical flow.
+- `test_validate_reach_mode_grows_with_velocity_inlet`: reach of ST1, one layer, no closure and no friction: the swing of
+  the outlet discharge grows per period within 0.2 of 1.41 (measured 1.48), and the warning is given.
+- `test_validate_reach_mode_decays_with_discharge_inlet`: same reach with a ramped discharge: the swing decays by more
+  than 0.68 per period (measured 0.46; the head loss at the step adds to the estimate), no warning. No warning with the
+  relaxed outflow.
 
 ## Additional validation scripts and literature basis
 

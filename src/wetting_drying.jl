@@ -662,7 +662,7 @@ function _wd_boundary_velocities!(model::Model, wd::WetDryState, u::AbstractMatr
             transport += wd.hf[k, 1] * u[k, 1]
         end
         transport > 0.0 || throw(DomainError(transport, "left_discharge: the inflow face is dry"))
-        @views u[:, 1] .*= model.x_boundary_q_left / transport
+        @views u[:, 1] .*= _left_discharge(model, t) / transport
     end
     @inbounds for k in 1:nz
         wet_right = wd.hf[k, nxp1] > 0.0

@@ -4,7 +4,8 @@ using FFTW
 # Open boundaries for transcritical flow (issue #46): free outflow at the right boundary (right_free, radiation condition
 # for subcritical outflow, extrapolation for supercritical outflow) and supercritical inflow (left_discharge with
 # left_level), sections 22; in the non-hydrostatic mode (issue #49), section 24; free outflow relaxed to a target level
-# (right_relaxation_time, issue #54), section 25 of docs/TESTS_TECHNICAL_DOCUMENTATION.md.
+# (right_relaxation_time, issue #54), section 25 of docs/TESTS_TECHNICAL_DOCUMENTATION.md; time-dependent discharge,
+# advective Courant warning and the mode of the reach (issue #61), section 28.
 
 const OB_G = 9.81                 # m/s^2, ModelConfig default
 const OB_C = 50.0                 # m^(1/2)/s, Chezy coefficient
@@ -14,11 +15,62 @@ const OB_FIXED_GRID_RELAX_TOL = 1e-4   # m/s, the same on the fixed grid: the ne
 const OB_REFLECTION_MAX = 0.02    # -, reflected amplitude over the incoming one at the free outflow (measured 0.007)
 const OB_REFLECTION_LEVEL_MIN = 0.4   # -, the same with a prescribed level (complete reflection, damped by theta = 0.7)
 const OB_SLOPED_BED_TOL = 1e-3    # m, depth deviation from normal flow over the real slope (measured 3.4e-4)
+# Reach of step ST1 (section 28): hydrostatic, one layer, no closure and no bed friction
+const RM_STEP, RM_DEPTH, RM_Q = 0.02, 0.06, 0.00876   # m, m, m^2/s
+const RM_LENGTH, RM_X_STEP = 1.4, 0.8   # m
+const RM_DX = 0.02              # m
+const RM_DT = 0.008             # s, advective Courant number below 0.8 throughout
+const RM_THETA = 0.62           # -, little numerical damping, close to theta_for_froude of the reach (0.61)
+const RM_NU = 1e-4              # m^2/s
+const RM_RAMP_TIME = 10.0       # s
+const RM_PERIOD = 7.3           # s, 4 L / c
+const RM_RUN_TIME = 45.0        # s
+const RM_WINDOWS = (3, 5)       # swing of these periods: after the ramp, before the swing saturates
+const RM_GAIN = 1.41            # -, reach_mode_gain of the reach
+const RM_GAIN_TOL = 0.2         # -, the estimate has no losses at the step (measured 1.48)
+const RM_DECAY_MAX = 0.68       # -, the outlet factor; the head loss at the step only adds to it (measured 0.46)
 
 # Supercritical channel: H = 1 m, i_b = 0.01, U = C sqrt(H i_b) = 5 m/s, Fr = 1.6 (theta >= theta_for_froude(1.6) = 0.81).
 const SC_DEPTH, SC_SLOPE, SC_LENGTH = 1.0, 0.01, 200.0
 # Subcritical channel of issue #14: H = 4 m, i_b = 1e-4, U = 1 m/s, Fr = 0.16.
 const SUB_DEPTH, SUB_SLOPE, SUB_LENGTH = 4.0, 1e-4, 1000.0
+
+function rm_reach(; left, right=(; right_level=0.0))
+    nx = round(Int, RM_LENGTH / RM_DX)
+    xc = ((1:nx) .- 0.5) .* RM_DX
+    cfg = ModelConfig(; length=RM_LENGTH, depth=RM_DEPTH, nx=nx, nz=1, dt=RM_DT, nu=RM_NU, rayleigh_damping=0.0,
+        apply_froude_limiter=false, momentum_advection_scheme="tvd2", wetting_drying=true, implicit_vertical_terms=true,
+        theta=RM_THETA, bed_level=[x < RM_X_STEP ? RM_STEP : 0.0 for x in xc], write_plots=false)
+    model = Model(cfg)
+    fill!(model.state.rho, 1000.0)
+    refresh_density_metadata!(model)
+    initialize_water_level!(model, fill(RM_DEPTH, nx))
+    ramp(t) = sin(0.5pi * min(t / RM_RAMP_TIME, 1.0))^2
+    u_step = RM_Q / (RM_DEPTH - RM_STEP)   # m/s
+    if left === :velocity
+        set_x_inflow_outflow!(model, t -> u_step * ramp(t); right...)
+    else
+        set_x_inflow_outflow!(model, [1.0]; left_discharge=t -> RM_Q * ramp(t), right...)
+    end
+    return model
+end
+
+# Swing of the outlet discharge (-, in units of the discharge) per period of the mode
+function rm_swings(model, run_time=RM_RUN_TIME)
+    wd = model.wetdry
+    last_face = model.config.nx + 1
+    window = round(Int, RM_PERIOD / RM_DT)
+    q, swings = Float64[], Float64[]
+    for n in 1:round(Int, run_time / RM_DT)
+        step_forward!(model)
+        push!(q, model.state.u[1, last_face] * wd.hf[1, last_face] / RM_Q)
+        if n % window == 0
+            push!(swings, maximum(q) - minimum(q))
+            empty!(q)
+        end
+    end
+    return swings
+end
 
 function ob_profile(H, slope, nz)
     dz = H / nz
@@ -452,6 +504,99 @@ end
                 surface_dirichlet=surface_dirichlet)
             @test maximum(abs.(relaxed .- reference[1:n])) / NH_WAVE_AMPLITUDE < NH_REFLECTION_MAX_DISPERSIVE
         end
+    end
+
+    @testset "test_verify_left_discharge_function" begin
+        # q(t) reaches the inlet face at every step, the volume follows its sum exactly (closed right end, theta = 1), and
+        # a constant function is the constant discharge
+        nx, dt, q0, ramp_time = 20, 0.01, 0.1, 1.0   # -, s, m^2/s, s
+        new_model() = begin
+            model = Model(ModelConfig(; length=10.0, depth=1.0, nx=nx, nz=2, dt=dt, wetting_drying=true, theta=1.0,
+                implicit_vertical_terms=true, rayleigh_damping=0.0, apply_froude_limiter=false, write_plots=false))
+            fill!(model.state.rho, 1000.0)
+            refresh_density_metadata!(model)
+            initialize_water_level!(model, 1.0)
+            return model
+        end
+        q(t) = q0 * min(t / ramp_time, 1.0)
+        model = new_model()
+        set_x_inflow_outflow!(model, ones(2); left_discharge=q, open_right=false)
+        volume0 = sum(model.wetdry.h) * model.dx
+        volume_in = 0.0
+        for n in 1:200
+            step_forward!(model)
+            volume_in += q(n * dt) * dt
+            @test sum(model.state.u[k, 1] * model.wetdry.hf[k, 1] for k in 1:2) ≈ q(n * dt) rtol = 1e-3
+        end
+        @test sum(model.wetdry.h) * model.dx - volume0 ≈ volume_in rtol = TOL_IDENTITY
+
+        a, b = new_model(), new_model()
+        set_x_inflow_outflow!(a, ones(2); left_discharge=t -> q0, right_level=0.0)
+        set_x_inflow_outflow!(b, ones(2); left_discharge=q0, right_level=0.0)
+        for _ in 1:50
+            step_forward!(a)
+            step_forward!(b)
+        end
+        @test a.state.u == b.state.u && a.state.eta == b.state.eta
+
+        model = new_model()
+        @test_throws ArgumentError set_x_inflow_outflow!(model, ones(2); left_discharge=t -> NaN)
+        set_x_inflow_outflow!(model, ones(2); left_discharge=t -> t > 0.0 ? NaN : q0, right_level=0.0)
+        @test_throws DomainError step_forward!(model)
+        fixed = Model(ModelConfig(; nx=8, nz=4, write_plots=false))
+        @test_throws ArgumentError set_x_inflow_outflow!(fixed, ones(4); left_discharge=t -> q0)
+    end
+
+    @testset "test_verify_advective_courant_warning" begin
+        model = rm_reach(; left=:discharge)
+        limit = SweTransport2DV.ADVECTIVE_COURANT_WARNING
+        u_below = 0.9 * limit * model.dx / model.config.dt
+        fill!(model.state.u, u_below)
+        @test_logs SweTransport2DV._check_advective_courant!(model)
+        @test model.max_advective_courant ≈ 0.9 * limit rtol = TOL_IDENTITY
+        fill!(model.state.u, 2 * u_below)
+        @test_logs (:warn, r"advective Courant number .* Reduce dt") SweTransport2DV._check_advective_courant!(model)
+        @test_logs SweTransport2DV._check_advective_courant!(model)   # once per model
+        @test compute_diagnostics(model)["advective_courant_max"] ≈ 1.8 * limit rtol = TOL_IDENTITY
+        @test model.config.advective_courant_warning == limit   # the default
+        silent = rm_reach(; left=:discharge)
+        silent.config.advective_courant_warning = Inf
+        fill!(silent.state.u, 2 * u_below)
+        @test_logs SweTransport2DV._check_advective_courant!(silent)
+        @test_throws ArgumentError Model(ModelConfig(; nx=8, nz=4, advective_courant_warning=0.0, write_plots=false))
+    end
+
+    @testset "test_verify_reach_mode_gain" begin
+        h1, h2 = RM_DEPTH - RM_STEP, RM_DEPTH
+        @test reach_mode_gain(RM_Q / h1, h1, h2) ≈ RM_GAIN atol = 0.005
+        @test reach_mode_gain(0.1, h2, h2) ≈ 1.0 rtol = TOL_IDENTITY         # uniform channel
+        @test reach_mode_gain(1e-6, h1, h2) ≈ 1.0 atol = 1e-3                # no mean flow
+        @test reach_mode_gain(0.1, h2, h1) < 1.0                             # the fast end at the outlet
+        @test isnan(reach_mode_gain(-0.1, h1, h2)) && isnan(reach_mode_gain(1.0, h1, h2))   # outflow, supercritical
+    end
+
+    @testset "test_validate_reach_mode_grows_with_velocity_inlet" begin
+        i, j = RM_WINDOWS
+        local swings
+        @test_logs (:warn, r"velocity inlet against a fixed level") match_mode=:any (swings = rm_swings(rm_reach(; left=:velocity)))
+        @test abs((swings[j] / swings[i])^(1 / (j - i)) - RM_GAIN) < RM_GAIN_TOL
+    end
+
+    @testset "test_validate_reach_mode_decays_with_discharge_inlet" begin
+        i, j = RM_WINDOWS
+        # WHY the flags, not @test_logs: the transient touches the theta Froude bound (warned, not tested here)
+        model = rm_reach(; left=:discharge)
+        swings = Test.Logging.with_logger(Test.Logging.NullLogger()) do
+            rm_swings(model)
+        end
+        @test (swings[j] / swings[i])^(1 / (j - i)) < RM_DECAY_MAX
+        @test !model.reach_mode_warned && !model.courant_warning_issued
+        # the relaxed outflow has no prescribed level: no warning with a velocity inlet either
+        model = rm_reach(; left=:velocity, right=(; right_level=0.0, right_free=true, right_relaxation_time=20.0))
+        Test.Logging.with_logger(Test.Logging.NullLogger()) do
+            rm_swings(model, RM_RAMP_TIME)
+        end
+        @test !model.reach_mode_warned
     end
 
     @testset "test_verify_relaxed_outflow_config_checks" begin

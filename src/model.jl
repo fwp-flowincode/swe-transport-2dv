@@ -89,6 +89,9 @@ Base.@kwdef mutable struct ModelConfig
     rayleigh_damping::Float64 = 0.01
     max_froude::Float64 = 0.9
     apply_froude_limiter::Bool = true
+    # Advective Courant number |u| dt/dx (-) above which step_forward! warns once (issue #61); Inf: no warning. The
+    # default ADVECTIVE_COURANT_WARNING = 0.8 keeps a margin to the stability limit 1 of the explicit advection.
+    advective_courant_warning::Float64 = ADVECTIVE_COURANT_WARNING
     momentum_advection_scheme::String = "tvd2"
     # Density advection: "upwind1" (first-order donor cell, monotone for CFL_x + CFL_z <= 1) or "tvd2" (flux-limited
     # Lax-Wendroff with the MC limiter of the momentum tvd2 scheme, monotone for CFL_x + CFL_z <= 1/2).
@@ -238,6 +241,7 @@ function copy_config(cfg::ModelConfig)
         bed_level=cfg.bed_level === nothing ? nothing : copy(cfg.bed_level),
         wetting_drying=cfg.wetting_drying,
         dry_depth_threshold=cfg.dry_depth_threshold,
+        advective_courant_warning=cfg.advective_courant_warning,
     )
 end
 
@@ -357,7 +361,7 @@ mutable struct Model{T<:Real}
     x_boundary_u_right_open::Bool
     x_boundary_u_right_profile::Any
     x_boundary_eta_right::Any   # nothing, or the prescribed water level eta_R (m) at the right boundary face
-    x_boundary_q_left::Any      # nothing, or the discharge q (m^2/s) of the left boundary face (profile = shape)
+    x_boundary_q_left::Any      # nothing, or the discharge q (m^2/s, or a function of t (s)) of the left boundary face (profile = shape)
     x_boundary_eta_left::Any    # nothing, or the level eta_L (m) of the left boundary face (supercritical inflow, #46)
     x_boundary_rho_left::Any    # nothing, or the density (kg/m^3) of the inflow at the left boundary face (#47)
     x_boundary_right_free::Bool # free outflow at the right boundary face (issue #46)
@@ -371,6 +375,9 @@ mutable struct Model{T<:Real}
     max_surface_froude::Float64   # -, largest surface_froude_number after any step so far (issue #39)
     froude_warning_issued::Bool   # the theta Froude-bound warning has been given (once per model)
     boundary_froude_warned::Bool  # the boundary-type Froude warning has been given (once per model, issue #46)
+    max_advective_courant::Float64   # -, largest |u| dt/dx after any step so far (issue #61)
+    courant_warning_issued::Bool     # the advective Courant warning has been given (once per model)
+    reach_mode_warned::Bool          # the warning of the growing reach mode has been given (once per model)
 end
 
 function _linspace(start::Real, stop::Real, n::Int)
@@ -865,6 +872,9 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
         0.0,
         false,
         false,
+        0.0,
+        false,
+        false,
     )
 
     initialize_lock_exchange!(model; rho_left=cfg.rho_left, rho_right=cfg.rho_right)
@@ -888,7 +898,9 @@ layers; dry layers carry no flow), so that the inflow is q whatever the level at
 `left_discharge`; issue #46) also prescribes the level of the inlet face: the face layers are those of eta_L instead of
 the level of the first cell, so the inflow has the depth and velocity of the prescribed state (supercritical inflow,
 Fr > 1, needs both; for subcritical inflow prescribe the discharge only). Variable top layer or wetting and drying only
-(the fixed grid has the depth H at every face). `left_rho` (kg/m^3; issue #47, wetting and drying only): density of the
+(the fixed grid has the depth H at every face). In the wetting-drying mode `left_discharge` can be a function q(t)
+(issue #61; q in m^2/s, t in s, the model time of the end of the step), e.g. a ramp: against a fixed level an impulsive
+start excites the mode of the reach (docs section 28). `left_rho` (kg/m^3; issue #47, wetting and drying only): density of the
 inflowing water (otherwise the inflow takes the density of the first cell); it widens the bounds of the monotone
 transport, so a new extreme is not clipped.
 
@@ -913,12 +925,13 @@ x = L (`_wd_face_bed`).
   within about tau (for tau >> L/sqrt(g H)). tau = Inf is `right_free`, tau -> 0 `right_level`.
 Both require `implicit_vertical_terms=true` and no `periodic_x`; in the non-hydrostatic mode (issue #49) the open face
 has dq/dx = 0 (`_check_right_level_config`, `_wd_nonhydrostatic_correction!`). `step_forward!` warns once when the
-Froude number at a boundary does not fit its type (`_check_boundary_froude!`).
+Froude number at a boundary does not fit its type (`_check_boundary_froude!`), and once when a velocity inlet against a
+prescribed level can feed the mode of the reach (`_check_reach_mode_growth!`).
 """
 function set_x_inflow_outflow!(
     model::Model,
     left_profile::AbstractVector{<:Real};
-    left_discharge::Union{Nothing,Real}=nothing,
+    left_discharge::Union{Nothing,Real,Function}=nothing,
     left_level::Union{Nothing,Real}=nothing,
     left_rho::Union{Nothing,Real}=nothing,
     open_right::Bool=true,
@@ -928,7 +941,12 @@ function set_x_inflow_outflow!(
     right_relaxation_time::Union{Nothing,Real}=nothing,
 )
     if left_discharge !== nothing
-        isfinite(left_discharge) || throw(ArgumentError("left_discharge must be finite"))
+        if left_discharge isa Function
+            model.wetdry === nothing && throw(ArgumentError("a time-dependent left_discharge requires ModelConfig(wetting_drying=true)"))
+            isfinite(left_discharge(model.wetdry.time)) || throw(ArgumentError("left_discharge must be finite"))
+        else
+            isfinite(left_discharge) || throw(ArgumentError("left_discharge must be finite"))
+        end
         all(>=(0.0), left_profile) && any(>(0.0), left_profile) ||
             throw(ArgumentError("left_discharge needs a profile shape with values >= 0, not all zero"))
     end
@@ -939,7 +957,7 @@ function set_x_inflow_outflow!(
     end
     model.wetdry === nothing || (model.wetdry.left_velocity = nothing)
     model.x_boundary_u_left_profile = collect(left_profile)
-    model.x_boundary_q_left = left_discharge === nothing ? nothing : Float64(left_discharge)
+    model.x_boundary_q_left = left_discharge isa Real ? Float64(left_discharge) : left_discharge
     model.x_boundary_eta_left = left_level === nothing ? nothing : Float64(left_level)
     _set_inflow_density!(model, left_rho)
     _set_right_boundary!(model, open_right, right_profile, right_level, right_free, right_relaxation_time)
@@ -976,6 +994,15 @@ function set_x_inflow_outflow!(
     _set_inflow_density!(model, left_rho)
     _set_right_boundary!(model, open_right, right_profile, right_level, right_free, right_relaxation_time)
     return model
+end
+
+# Discharge q (m^2/s) of the left boundary face at time t (s).
+function _left_discharge(model::Model, t::Real)
+    q = model.x_boundary_q_left
+    q isa Function || return q
+    value = q(t)
+    isfinite(value) || throw(DomainError(value, "left_discharge(t = $t) is not finite"))
+    return value
 end
 
 # Density (kg/m^3) of the water entering through the left boundary face (left_rho, issue #47); wetting-drying step only.
@@ -1060,6 +1087,8 @@ function _check_model_config(cfg::ModelConfig)
     if !(THETA_MIN <= cfg.theta <= THETA_MAX)
         throw(ArgumentError("theta must be in [$(THETA_MIN), $(THETA_MAX)] (theta < 1/2 is unstable), got $(cfg.theta)"))
     end
+    cfg.advective_courant_warning > 0.0 ||
+        throw(ArgumentError("advective_courant_warning must be > 0 (Inf: no warning), got $(cfg.advective_courant_warning)"))
     cfg.wetting_drying && _check_wetting_drying_config(cfg)
     if cfg.periodic_x && use_variable_top_layer(cfg)
         throw(ArgumentError("periodic_x=true is not supported with the variable top layer"))
@@ -1156,7 +1185,8 @@ function _apply_x_boundary_conditions!(model::Model, u::AbstractMatrix{<:Real})
             transport = model.wetdry === nothing ? _left_face_transport(model, left_profile) :
                 _wd_left_face_transport(model, left_profile)   # m^2/s per unit of the shape
             transport > 0.0 || throw(DomainError(transport, "left_discharge: the inflow face is dry"))
-            @views u[:, 1] .*= model.x_boundary_q_left / transport
+            # WHY the wetdry time: a function q(t) exists only in the wetting-drying mode
+            @views u[:, 1] .*= _left_discharge(model, model.wetdry === nothing ? 0.0 : model.wetdry.time) / transport
         end
     end
 
@@ -1320,6 +1350,69 @@ function _check_boundary_froude!(model::Model)
     return nothing
 end
 
+# Advective Courant number (-) of the warning (issue #61). WHY 0.8: explicit advection is stable up to 1 (section 20), but
+# the jet of the runs of section 28 stays smooth only up to 0.76; from about 0.85 the peak velocity feeds itself and it
+# then breaks within about 0.5 s. The warning comes before that.
+const ADVECTIVE_COURANT_WARNING = 0.8
+
+# Records the largest |u| dt/dx of the run and warns once above cfg.advective_courant_warning.
+function _check_advective_courant!(model::Model)
+    # PERF: O(nz nx) without allocation, as the Froude check
+    courant = maximum(abs, model.state.u) * model.config.dt / model.dx
+    model.max_advective_courant = max(model.max_advective_courant, courant)
+    limit = model.config.advective_courant_warning
+    if !model.courant_warning_issued && courant > limit
+        model.courant_warning_issued = true
+        @warn @sprintf("advective Courant number %.2f exceeds %.2f: explicit advection is stable up to 1. Reduce dt. Against a fixed level check the swing of the discharge (docs section 28). Warned once per model.",
+            courant, limit)
+    end
+    return nothing
+end
+
+# Factor (-) above which the mode of the reach counts as growing (issue #61). WHY not 1: friction and the head loss at
+# obstacles are not in the estimate, and a uniform channel has exactly 1.
+const REACH_MODE_GAIN_WARNING = 1.1
+
+"""
+    reach_mode_gain(U_left, h_left, h_right; g) -> Float64
+
+Factor (-) by which the quarter-wave mode of a reach changes per period between a prescribed velocity at the left end
+and a prescribed level at the right end, for linear long waves on a mean flow (docs section 28):
+
+    G = (c1 + U1) / (c1 - U1) * (c2 - U2) / (c2 + U2),   c = sqrt(g h),   U2 = U1 h1 / h2
+
+`U_left` (m/s, > 0 is inflow) and the depths `h_left`, `h_right` (m) are of the two ends, `g` in m/s^2. U2 comes from the
+continuity of the steady flow. WHY not the velocity of the outlet: in a transient it lags the inlet, and a uniform
+channel would seem to grow. Friction and the head loss at obstacles are not included, so G > 1 means the mode can grow.
+Without a mean flow G = 1; a prescribed discharge at the inlet gives the second factor alone. NaN unless both ends are
+subcritical with inflow.
+"""
+function reach_mode_gain(U_left::Real, h_left::Real, h_right::Real; g::Real=9.81)
+    (U_left > 0 && h_left > 0 && h_right > 0) || return NaN
+    c1, c2 = sqrt(g * h_left), sqrt(g * h_right)
+    U2 = U_left * h_left / h_right
+    (U_left < c1 && U2 < c2) || return NaN
+    return (c1 + U_left) / (c1 - U_left) * (c2 - U2) / (c2 + U2)
+end
+
+# Warns once when a prescribed velocity at the inlet against a prescribed level can feed the mode of the reach.
+function _check_reach_mode_growth!(model::Model)
+    model.reach_mode_warned && return nothing
+    model.x_boundary_eta_right === nothing && return nothing
+    model.x_boundary_q_left === nothing || return nothing
+    velocity_inlet = model.wetdry === nothing ? model.x_boundary_u_left_profile !== nothing :
+        (model.wetdry.left_velocity !== nothing || model.x_boundary_u_left_profile !== nothing)
+    velocity_inlet || return nothing
+    U1, h1 = _face_velocity_depth(model, 1)
+    _, h2 = _face_velocity_depth(model, model.config.nx + 1)
+    gain = reach_mode_gain(U1, h1, h2; g=model.config.g)
+    if gain > REACH_MODE_GAIN_WARNING   # NaN compares false
+        model.reach_mode_warned = true
+        @warn @sprintf("a velocity inlet against a fixed level (right_level) can feed the mode of the reach, factor %.2f per period: its swing can grow until the run fails. Prescribe left_discharge or use the relaxed outflow (docs section 28). Warned once per model.", gain)
+    end
+    return nothing
+end
+
 # Records the largest surface Froude number of the run and warns once when it exceeds the theta bound by more than
 # SURFACE_FROUDE_WARNING_MARGIN (issue #39).
 function _check_surface_froude!(model::Model)
@@ -1332,6 +1425,8 @@ function _check_surface_froude!(model::Model)
             fr, face, theta, theta_froude_max(theta), theta_for_froude(fr))
     end
     _check_boundary_froude!(model)
+    _check_advective_courant!(model)
+    _check_reach_mode_growth!(model)
     return nothing
 end
 
@@ -1349,6 +1444,7 @@ function compute_diagnostics(model::Model)
         "froude" => froude_number(st.u, st.rho, cfg.rho0, cfg.g, cfg.depth),
         "surface_froude" => surface_froude_number(model)[1],
         "surface_froude_max" => model.max_surface_froude,
+        "advective_courant_max" => model.max_advective_courant,
         "water_volume" => model.wetdry === nothing ? water_volume(cfg.depth, st.eta, model.dx) - sum(model.geometry.bed_level) * model.dx : sum(water_depth(model)) * model.dx,
         "constituent_mass" => _constituent_mass(model),
         "boundary_flux" => model.wetdry === nothing ?

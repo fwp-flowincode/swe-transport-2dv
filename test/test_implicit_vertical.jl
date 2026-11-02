@@ -105,6 +105,7 @@ end
         cb = bed_friction_coefficient(z0, 0.5 * dz)
         dt = 20.0 * dz / (cb * u0)
         model = channel_model(; dt=dt, nz=nz, H=H, z0=z0)
+        model.config.advective_courant_warning = Inf   # WHY: uniform flow, the advection is zero at any step
         fill!(model.state.u, u0)
         expected = u0
         for _ in 1:10
@@ -187,6 +188,7 @@ end
         # in every step, water volume and constituent mass conserved, density within its bounds.
         for theta in (0.5, 0.55), hydro in (true, false)
             model = wd_friction_model(; theta=theta, dt=0.4, use_hydrostatic=hydro)
+            model.config.advective_courant_warning = Inf   # WHY: positivity and conservation at a large step are tested, not accuracy
             xc = [(i - 0.5) * 0.5 for i in 1:40]
             rho = [i <= 10 ? 1001.0 : 1000.0 for _ in 1:8, i in 1:40]
             initialize_water_level!(model, [x < 8.0 ? 1.8 : 0.0 for x in xc]; rho=rho)
