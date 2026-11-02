@@ -60,6 +60,6 @@ Limits
 - **Thin cells.** A cell of 10-50 µm that has just got wet can briefly hold a density far from its neighbours (within the
   initial bounds, mass exact), with and without a closure. Such cells carry almost no volume; they are left out of the
   drawing and of the density range.
-- **Horizontal terms.** The wetting-drying step has no horizontal eddy viscosity, and k and eps have no horizontal
-  diffusion.
+- **Horizontal terms.** The horizontal eddy diffusion of u, k and eps (issue #50) is on in these figures. The numbers
+  above do not change with it.
 - **Advection.** k and eps are advected first-order upwind, as on the fixed grid.

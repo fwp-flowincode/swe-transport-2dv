@@ -98,10 +98,11 @@ mutable struct KEpsilonState{T<:Real}
     cfe::Float64                # -, vegetation weight in the eps equation
     surface_condition::Symbol   # :zero_flux or :rodi (eps_s = C_mu^(3/4) k_s^(3/2) / (kappa 0.07 H))
     realizability::Bool         # time-scale bound of Durbin (1996) on (default); false: T = k/eps (for comparisons)
+    horizontal_diffusion::Bool  # wetting-drying step: horizontal eddy diffusion of u, k and eps on (default); false: off
 end
 
 function KEpsilonState(nz::Int, nx::Int; T::Type{<:Real}=Float64, cfk::Real=KE_VEG_CFK, cfe::Real=KE_VEG_CFE, surface_condition::Symbol=:rodi,
-    realizability::Bool=true)
+    realizability::Bool=true, horizontal_diffusion::Bool=true)
     nz >= 2 || throw(ArgumentError("k-epsilon requires nz >= 2"))
     surface_condition in (:zero_flux, :rodi) || throw(ArgumentError("surface_condition must be :zero_flux or :rodi"))
     k = fill(T(KE_K_INIT), nz, nx)
@@ -109,7 +110,7 @@ function KEpsilonState(nz::Int, nx::Int; T::Type{<:Real}=Float64, cfk::Real=KE_V
     nu_t = fill(T(KE_NU_T_INIT), nz, nx)
     z() = zeros(T, nz, nx)
     return KEpsilonState{T}(k, eps, nu_t, z(), z(), z(), z(), z(), z(), zeros(T, nx), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz),
-        Float64(cfk), Float64(cfe), surface_condition, realizability)
+        Float64(cfk), Float64(cfe), surface_condition, realizability, horizontal_diffusion)
 end
 
 """

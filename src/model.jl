@@ -55,8 +55,8 @@ Base.@kwdef mutable struct ModelConfig
     max_turbulent_viscosity::Float64 = 5e-4
     # Turbulence closure: "none", "mixing_length" (nu_t = l^2 |du/dz|, also selected by use_turbulence_model) or
     # "k_epsilon" (src/turbulence.jl: k-epsilon with buoyancy and vegetation terms and turbulent density diffusion;
-    # flat bed and fixed top layer only: the automatic default of variable_top_layer is false with it, an explicit
-    # variable_top_layer=true is rejected). Evaluate with turbulence_closure(cfg).
+    # fixed grid with a flat bed, and with wetting and drying; the automatic default of variable_top_layer is false with
+    # it, an explicit variable_top_layer=true is allowed). Evaluate with turbulence_closure(cfg).
     turbulence_closure::String = "none"
     # Bed roughness length z0 (m): > 0 applies a log-law quadratic bed friction c_b u|u| on the lowest row
     # (c_b = (kappa/ln(z1/z0))^2, z1 = dz/2) and, with k-epsilon, the wall functions; 0 keeps the free-slip bed.
@@ -152,8 +152,8 @@ end
     use_variable_top_layer(cfg) -> Bool
 
 Whether `cfg` runs with the variable-thickness top layer: the explicit `cfg.variable_top_layer` if set, otherwise
-`cfg.use_hydrostatic` and no k-epsilon closure (automatic default; the k-epsilon closure assumes layers of equal
-thickness and rejects an explicit `variable_top_layer=true`). Evaluated on every use, so changing `use_hydrostatic` or
+`cfg.use_hydrostatic` and no k-epsilon closure (automatic default; the k-epsilon closure takes the variable top layer
+only with an explicit `variable_top_layer=true`). Evaluated on every use, so changing `use_hydrostatic` or
 the closure on a config after creation (as `copy_config` workflows do) keeps the default consistent.
 """
 use_variable_top_layer(cfg::ModelConfig) =

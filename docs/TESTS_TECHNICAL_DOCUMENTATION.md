@@ -1531,9 +1531,136 @@ variable top layer.
 wet can briefly hold a density far from its neighbours (within the initial bounds, mass exact), with and without a
 closure.
 
-Limitations: no horizontal eddy viscosity in the wetting-drying step (as for the molecular viscosity); k and
-$\varepsilon$ are advected first-order upwind and have no horizontal diffusion (as on the fixed grid); first order in
-time.
+Limitations: k and $\varepsilon$ are advected first-order upwind (as on the fixed grid); first order in time. The
+horizontal eddy diffusion of the wetting-drying step is in section 28.
+
+### 28) Recirculation behind obstacles (issue #50)
+
+**Horizontal eddy diffusion.** The wetting-drying step has the term $\partial_x(\nu_t\,\partial_x u)$ in the momentum
+equation and $\partial_x(\nu_t/\sigma\,\partial_x\phi)$ for $\phi=k,\varepsilon$. It is second order in $\Delta x$ on the
+uniform grid and explicit, so the coefficients are limited: the sum of the weights of $u$ to
+`WD_HORIZONTAL_DIFFUSION_MAX` $=0.5$ per step (the limit of the explicit scheme), the flux of $\phi$ at a face to a
+quarter of the smaller neighbouring cell. A closed neighbouring face has no flux. The turbulence update is conservative.
+`KEpsilonState.horizontal_diffusion = false` switches it off. It changes neither the swings below nor the results of
+section 27.
+
+**Reattachment length.** `reattachment_length(u, h, xc, x_start)` is the position behind `x_start` where the dividing
+streamline meets the bed: the last column in which the lowest value of $\psi=\int_0^z u\,dz'$ is negative, with the zero
+of the bed velocity interpolated.
+
+**Case.** Backward-facing step ST1 of Nakagawa & Nezu (1987), as simulated by Luo, Dolcetti, Stoesser & Tait (2023, JFM
+966, A18): $S=2$ cm, depth 6 cm downstream, $q=0.00876$ m²/s, $Re=4380$, $Fr=0.19$, smooth bed. The LES gives
+$x_R=6.15\,S$ and agrees with the measurements according to the paper; the measured table of 1987 was not available to
+this work (it is not public), so 6.15 is the reference, not the measurement. The channel is 70 S long with the step at 40 S.
+
+Discharge inlet, relaxed outflow ($\tau=20$ s), means over the last 30 of 90 s; std is that of the instantaneous length:
+
+| grid ($\Delta x$, $\Delta z$) | non-hydrostatic $x_R/S$ | std | largest $w$ (m/s) |
+|---|---|---|---|
+| S/5, S/5 | 6.16 | 0.05 | 0.022 |
+| S/10, S/10 | 6.99 | 0.10 | 0.017 |
+| S/10, S/20 | 7.41 | 0.22 | 0.023 |
+| S/20, S/10 | 6.94 | 0.03 | 0.025 |
+
+The length moves with $\Delta z$ and $\Delta x$ matters less. The trend is upwards and away from the LES. The test grid
+S/5 agrees with the LES within 1 %, but that is a cancellation of errors, not convergence. What holds is $x_R$ within
+20 % of the LES on these grids, which is the tolerance of the test, and only with the bed on a layer interface (below).
+
+**Sensitivity to the bed cell.** In the table above the bed and the step top lie on layer interfaces. Shifting the bed
+against the layers by a fraction of $\Delta z$ shaves the lowest wet cell to $(1-f)\Delta z$ at the same geometry and
+the same $\Delta z$:
+
+| shift $f$ | step S/5: $x_R/S$ (std) | step S/10 | weir S/10 |
+|---|---|---|---|
+| 0 | 6.18 (0.00) | 6.99 (0.10) | 5.29 (0.08) |
+| 0.25 | 6.06 (0.08) | 7.02 (0.04) | 5.32 (0.08) |
+| 0.5 | 6.00 (0.00) | 7.11 (0.07) | 4.15 (0.05) |
+| 0.75 | 6.29 (0.11) | 7.37 (0.33) | |
+| 0.9 | 8.52 (1.15) | 12.47 (2.39) | |
+
+Moderate shaving moves the step by about 5 %, a thin cell breaks it: 40-80 % longer and no longer steady. The weir,
+whose sloped face has shaved cells at every shift, moves by 22 % at $f=0.5$. The wall functions are the suspect. The
+lowest wet cell takes $k=u_*^2/\sqrt{C_\mu}$ and $\varepsilon=u_*^3/(\kappa z_1)$ as Dirichlet values with $u_*$ from the
+local velocity and $z_1=h/2$:
+
+- $u_*\to 0$ where the bed velocity changes sign, so $k$ of the bed cell is forced to about zero at reattachment. It is
+  10 to several hundred times below the $k$ of the cell above, also without shaving.
+- $\varepsilon$ of the cell follows $z_1$: at $x=5\,S$ on S/5 it is $3\cdot10^{-6}$ m²/s³ at full thickness and
+  $2\cdot10^{-3}$ m²/s³ at $f=0.9$.
+- The bed cell is below the log layer everywhere in the recirculation, on all grids: $z_1^+=2$ to 8 on S/5 at full
+  thickness, below 1 at $f=0.9$. The drift of $x_R$ with $\Delta z$ can therefore not be assigned to one grid.
+
+The cause is not separated from the effect of the thin cell on the velocity; a treatment of the bed cell that does not
+depend on $u_*$ of the local velocity would be the test.
+
+**The start-up mode.** Fixed discharge and fixed level make a quarter-wave mode of the reach, of period $4L/c=7.3$ s. An
+impulsive start excites it; with the water level at the outlet, $x_R$ swings between 2.9 and 10 S and the swing decays
+over about 40 s. The relaxed outflow removes it (`recirculation_boundary.png`): 5.9 to 7.5 S. Both give 6.82 S over the
+10-90 s window. Means over a shorter run are not of the steady state.
+
+**Hydrostatic blow-up with a fixed level.** The hydrostatic run with a fixed level crashes although the non-hydrostatic
+one does not. k-epsilon is not the cause (the run fails without closure too, and earlier). The cause has two parts:
+
+1. *The discharge at the step swings.* Linear long waves on a mean flow $U$ ($c=\sqrt{gh}$): with $a=(c+U)\eta_+$ and
+   $b=(c-U)\eta_-$ the amplitudes of the waves going down- and upstream, $q'=a-b$ and the head perturbation is
+   $(g/c)(a+b)$, so a lossless step only scatters $a$ and $b$. The ends set the size per reflection:
+
+   | end | condition | factor |
+   |---|---|---|
+   | inlet, velocity | $u'=0$ | $a/b=(c+U)/(c-U)=2.07$ ($Fr=0.35$) |
+   | inlet, discharge | $q'=0$ | $a/b=1$ |
+   | outlet, level | $\eta'=0$ | $b/a=-(c-U)/(c+U)=-0.68$ ($Fr=0.19$) |
+
+   Per period the mode changes by a factor 0.68 with a discharge inlet and 1.41 with a velocity inlet: a prescribed
+   velocity feeds it, because a high level at the inlet then carries more water in. This reach has the faster flow on
+   the inlet side, so the gain wins. Measured with a velocity inlet: 1.3 to 1.6 per period, the same hydrostatic and
+   non-hydrostatic. Friction and the head loss at the step are left out of the estimate.
+2. *Explicit advection has a limit.* At the time step of the runs, $u=0.625$ m/s is Courant number 1 (section 20). Once
+   the swing lifts the jet there, the run breaks within about 0.5 s ($w$ from 0.4 to 4 m/s and $u$ to 1.5 m/s, then the
+   free-surface solve fails). The peak $u$ itself depends on $\Delta t$ near the limit: over the first 6 s of the
+   impulsive start it is 0.49 m/s at $\Delta t/2$, about 0.52 at 0.8 $\Delta t$ and about 0.70 at 0.9 $\Delta t$, where
+   $C_x$ stays near 1, and at the full step the run breaks. The combined number $|u|\Delta t/\Delta x+|w|\Delta t/\Delta z$
+   is not the limit (it reaches 2.8 at 0.9 $\Delta t$ without a crash; the vertical terms are implicit), and neither are
+   thin top cells (outflow Courant number 6 in the stable non-hydrostatic run).
+
+Runs at S/10 with k-epsilon (Courant number from the largest $u$):
+
+| pressure | inlet | start | outlet | $\Delta t$ | result |
+|---|---|---|---|---|---|
+| hydrostatic | discharge | impulsive | level | full | blows up at 3.6 s, u 0.63 m/s; the drawdown reflected at the outlet passes the step |
+| hydrostatic | discharge | impulsive | level | 1/2 | stable, peak u 0.49 m/s; swing of $q$ from 1.68 to 0.01 q in 60 s |
+| hydrostatic | discharge | ramp 10 s | level | full | stable, Courant 0.50; swing to 0.01 q |
+| hydrostatic | velocity | ramp 10 s | level | full | swing grows, blows up at 26.7 s |
+| hydrostatic | velocity | ramp 10 s | level | 1/2 | swing grows (0.53, 0.87, 1.10, 1.73 q), Courant 0.46 at 40 s |
+| non-hydrostatic | velocity | ramp 10 s | level | full | swing grows (0.55, 0.90, 1.14 q), blows up at 44.5 s |
+| non-hydrostatic | discharge | impulsive | level | full | stable over 8 s, Courant 0.76 |
+| hydrostatic | discharge | impulsive | relaxed | full | stable over 90 s, Courant 0.49 |
+
+Practice: against a fixed level, prescribe the discharge (`left_discharge`), not a velocity, and start from a ramp, or
+use the relaxed outflow.
+
+**Hydrostatic recirculation.** Stable is not the same as steady. With the relaxed outflow the hydrostatic step has a
+recirculation of about the right length, but it never settles:
+
+| grid | hydrostatic $x_R/S$ | std | largest $w$ (m/s) |
+|---|---|---|---|
+| S/5 | 5.64 | 1.00 | 0.091 |
+| S/10 (half $\Delta t$) | 5.67 | 1.30 | 0.205 |
+| S/20 (ramped start, 70 s) | 4.88 | 1.26 | 0.860 |
+
+$w$ follows from continuity alone and nothing limits it behind the step: the downdraft has $w\approx u$ with
+$\Delta x\approx\Delta z$. Its peak grows 2-4 times per halving of the grid, against a non-hydrostatic value that stays
+near 0.02 m/s, so these grids show no grid limit of $w$. The hydrostatic mean surface also has a dip behind the step
+that the non-hydrostatic one does not have (`recirculation_step.png`).
+
+**Obstacle with a sloped face.** A trapezoidal weir of height S (ramp 1:3, crest 4 S, downstream face 1:1, no reference):
+non-hydrostatic $x_R=5.29\,S$ (std 0.08) from the toe; hydrostatic: no reverse flow at all. The hydrostatic model can
+therefore miss a recirculation altogether, although it keeps the one behind the vertical step.
+
+Limitations: the wall functions above, so $x_R$ depends on the position of the bed against the layers. One validated
+case, against a simulation; the measured table of 1987 is not public. No time-dependent discharge at the inlet in the public interface (the ramped discharge runs above set
+`model.x_boundary_q_left` in the loop). The model does not detect the growth of the mode; the run ends with an error of
+the free-surface solve.
 
 ## Test-by-test documentation
 
@@ -2653,6 +2780,21 @@ stated otherwise.
   within 2.5 $h_2$ (measured 1.4 $h_2$), the jet depth and the depths behind the jump within 3 % (measured 1 % and 1.4 %).
 - `test_verify_sluice_gate_config_checks`: positions off a u-face or on the boundary, an edge below the bed, a
   contraction outside (0, 1], a contraction below 1 in the non-hydrostatic mode and the fixed-grid step are rejected.
+
+### Recirculation tests (`test_recirculation.jl`, section 28)
+
+- `test_verify_wd_horizontal_eddy_diffusion_second_order`: MMS $u=\sin(2\pi x/L)$, constant $\nu_t$ and $h$: the term is
+  $-\nu_t(2\pi/L)^2u$, order above 1.9 on 40, 80, 160 cells.
+- `test_verify_wd_horizontal_turbulence_diffusion_second_order_and_conservative`: without flow, $\phi=2+\cos(\pi x/L)$:
+  the update is $\Delta t\,\nu_t\partial_x^2\phi$, order above 1.9; the sum of $\phi$ is unchanged with closed walls.
+- `test_verify_wd_horizontal_diffusion_limits`: with $\nu_t=10^6$ m²/s the update of $u$ is limited to
+  `WD_HORIZONTAL_DIFFUSION_MAX`, that of $\phi$ stays bounded, non-negative and conservative; at a closed neighbouring
+  face only the open side contributes.
+- `test_verify_reattachment_length`: a bed velocity with a known zero is recovered; attached flow gives 0.
+- `test_validate_backward_step_reattachment_nonhydrostatic`: ST1 on S/5, 90 s, mean of the last 30 s: $x_R$ within 20 %
+  of the LES value 6.15 S (measured 6.18 S).
+- `test_validate_backward_step_hydrostatic_vertical_velocity`: same case: the largest $w$ of the hydrostatic run is above
+  3 times the non-hydrostatic one (measured 4.1).
 
 ## Additional validation scripts and literature basis
 
