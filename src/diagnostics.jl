@@ -15,6 +15,33 @@ function constituent_mass(rho::AbstractMatrix{<:Real}, dx::Real, dz::Real; eta::
     return mass
 end
 
+"""
+    reattachment_length(u, h, xc, x_start) -> m
+
+Length of a recirculation zone behind `x_start` (m), from a time-mean flow: the distance to the last column with
+reverse transport near the bed, i.e. where the dividing streamline psi(z) = int_0^z u dz' = 0 lies above the bed (Luo et
+al. 2023, JFM 966 A18). `u` (m/s) and `h` (m) are cell values (nz, nx), `xc` (m) the cell centres. Linear interpolation
+of the lowest psi between the columns; 0 without reverse transport.
+"""
+function reattachment_length(u::AbstractMatrix{<:Real}, h::AbstractMatrix{<:Real}, xc::AbstractVector{<:Real}, x_start::Real)
+    lowest = zeros(length(xc))   # m^2/s, lowest value of psi in each column (<= 0)
+    @inbounds for i in eachindex(xc), k in axes(u, 1)
+        psi = 0.0
+        for kk in 1:k
+            psi += u[kk, i] * h[kk, i]
+        end
+        lowest[i] = min(lowest[i], psi)
+    end
+    last = findlast(i -> xc[i] > x_start && lowest[i] < 0.0, eachindex(xc))
+    last === nothing && return 0.0
+    last == length(xc) && return xc[last] - x_start
+    # WHY the lowest psi is 0 from the reattachment point on: the interpolation between the last column with reverse
+    # transport and the next takes the bed velocity, which changes sign there
+    ub, ua = u[findfirst(>(0.0), view(h, :, last)), last], u[findfirst(>(0.0), view(h, :, last + 1)), last + 1]
+    t = ua > ub ? clamp(-ub / (ua - ub), 0.0, 1.0) : 0.0
+    return xc[last] + t * (xc[last + 1] - xc[last]) - x_start
+end
+
 function boundary_normal_flux(u::AbstractMatrix{<:Real}, w::AbstractMatrix{<:Real}, dx::Real, dz::Real)
     flux_left = -sum(@view u[:, 1]) * dz
     flux_right = sum(@view u[:, end]) * dz

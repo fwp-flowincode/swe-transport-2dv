@@ -514,6 +514,27 @@ end
 _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, second::Bool) =
     _wd_advection_tendency(model, wd, k, f, second, _wd_advection_depth_totals(wd, f))
 
+# Largest explicit horizontal diffusion number dt * (sum of the coefficients of a node or cell), -: 1/2 keeps the update a
+# convex combination of the neighbours in the arbitrarily thin cut layers
+const WD_HORIZONTAL_DIFFUSION_MAX = 0.5
+
+# Horizontal eddy diffusion of u at face f (m/s^2), explicit, with nu_t (m^2/s) of time n in the cells either side:
+#   hf_f d(u_f)/dt = [h_R nu_t,R (u_{f+1} - u_f) - h_L nu_t,L (u_f - u_{f-1})] / dx^2.
+# Second order on a uniform grid. Zero flux where the neighbouring face is closed (the face of a step: free slip).
+# Stability: dt (c_L + c_R) <= WD_HORIZONTAL_DIFFUSION_MAX, enforced by scaling the term in thin layers.
+@inline function _wd_horizontal_eddy_diffusion(model::Model, wd::WetDryState, ke::KEpsilonState, k::Int, f::Int)
+    u, dx, nxp1 = model.state.u, model.dx, model.config.nx + 1
+    hf = wd.hf[k, f]
+    @inbounds begin
+        cL = wd.hf[k, f - 1] > 0.0 ? ke.nu_t[k, f - 1] * wd.h[k, f - 1] / (hf * dx^2) : 0.0   # 1/s
+        cR = f < nxp1 && wd.hf[k, f + 1] > 0.0 ? ke.nu_t[k, f] * wd.h[k, f] / (hf * dx^2) : 0.0
+        csum = cL + cR
+        csum > 0.0 || return 0.0
+        tend = (cL > 0.0 ? cL * (u[k, f - 1] - u[k, f]) : 0.0) + (cR > 0.0 ? cR * (u[k, f + 1] - u[k, f]) : 0.0)
+    end
+    return tend * min(1.0, WD_HORIZONTAL_DIFFUSION_MAX / (model.config.dt * csum))
+end
+
 # Implicit vertical viscosity nu (m^2/s) on the wet layers of face f (Thomas algorithm), zero stress at bed and surface:
 #   hf_k (u_k - uhat_k)/dt = nu (u_{k+1} - u_k)/dz_{k+1/2} - nu (u_k - u_{k-1})/dz_{k-1/2},  dz_{k+1/2} = (hf_k + hf_{k+1})/2.
 # WHY implicit: the cut layers at the bed and the surface can be arbitrarily thin.
@@ -1129,6 +1150,8 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     open_bc && _check_right_level_config(cfg)
     model.x_boundary_eta_left === nothing || _check_left_level_config(cfg)
     fhi = open_bc ? nx + 1 : nx
+    ke = model.turbulence
+    eddy_diffusion = ke !== nothing && ke.horizontal_diffusion
     @inbounds for f in 2:fhi
         depth_totals = _wd_advection_depth_totals(wd, f)
         boundary = f == nx + 1
@@ -1138,6 +1161,7 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
         for k in 1:nz
             if wd.hf[k, f] > 0.0
                 tend = _wd_advection_tendency(model, wd, k, f, second_order_momentum, depth_totals; vertical=!implicit) - (wd.p_anom[k, fp] - wd.p_anom[k, fp - 1]) / (cfg.rho0 * dx) + cfg.body_force_x
+                eddy_diffusion && (tend += _wd_horizontal_eddy_diffusion(model, wd, ke, k, f))
                 if theta != 1.0
                     tend -= explicit_surface
                     # open right boundary face: dq/dx = 0 there (issue #49, _wd_nonhydrostatic_correction!)
@@ -1402,9 +1426,11 @@ function _wd_turbulent_density_diffusion!(model::Model, wd::WetDryState, ke::KEp
 end
 
 # Upwind advection of the cell field phi with the step fluxes (increment form of _wd_transport_density!), into `out`;
-# the inflow at the left boundary carries the value of the first cell (zero gradient).
+# the inflow at the left boundary carries the value of the first cell (zero gradient). With ke.horizontal_diffusion also
+# the explicit horizontal eddy diffusion nu_t / sigma (sigma the Prandtl number of phi, -), conservative, through the open
+# faces between wet cells; each face gets at most half of WD_HORIZONTAL_DIFFUSION_MAX of the thinner cell.
 function _wd_advect_turbulence!(out::AbstractMatrix{<:Real}, phi::AbstractMatrix{<:Real}, model::Model, wd::WetDryState,
-    floor_value::Real)
+    floor_value::Real, sigma::Real)
     cfg = model.config
     nz, nx, dt, dx = cfg.nz, cfg.nx, cfg.dt, model.dx
     q, W, M = wd.q, model.state.w, wd.mass
@@ -1425,6 +1451,17 @@ function _wd_advect_turbulence!(out::AbstractMatrix{<:Real}, phi::AbstractMatrix
         flux = dt * wk * phi[wk > 0.0 ? k - 1 : k, i]
         M[k - 1, i] -= flux
         M[k, i] += flux
+    end
+    ke = model.turbulence
+    if ke.horizontal_diffusion
+        @inbounds for f in 2:nx, k in 1:nz
+            hL, hR = wd.h_new[k, f - 1], wd.h_new[k, f]
+            (wd.hf[k, f] > 0.0 && hL > WD_EMPTY_CELL_THICKNESS && hR > WD_EMPTY_CELL_THICKNESS) || continue
+            d = dt / dx^2 * 0.5 * (ke.nu_t[k, f - 1] + ke.nu_t[k, f]) / sigma * wd.hf[k, f]   # m
+            flux = min(d, 0.5 * WD_HORIZONTAL_DIFFUSION_MAX * min(hL, hR)) * (phi[k, f] - phi[k, f - 1])
+            M[k, f - 1] += flux
+            M[k, f] -= flux
+        end
     end
     @inbounds for i in 1:nx, k in 1:nz
         hk = wd.h_new[k, i]
@@ -1459,8 +1496,8 @@ function _wd_k_epsilon_step!(model::Model, wd::WetDryState, ke::KEpsilonState)
             ke.buoyancy[kk, i] = -(nu_t[kk, i] / KE_SIGMA_RHO) * n2
         end
     end
-    _wd_advect_turbulence!(ke.k_adv, k, model, wd, KE_K_MIN)
-    _wd_advect_turbulence!(ke.eps_adv, eps, model, wd, KE_EPS_MIN)
+    _wd_advect_turbulence!(ke.k_adv, k, model, wd, KE_K_MIN, KE_SIGMA_K)
+    _wd_advect_turbulence!(ke.eps_adv, eps, model, wd, KE_EPS_MIN, KE_SIGMA_EPS)
     copyto!(k, ke.k_adv)
     copyto!(eps, ke.eps_adv)
     lower, diag, upper, rhs, sol = ke.lower, ke.diag, ke.upper, ke.rhs, ke.sol

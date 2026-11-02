@@ -74,10 +74,62 @@ supercritical stream from the crest meets the tailwater at the conjugate depths.
 A tracer front over the bump (2DV, transcritical). The transport stays within [0, 1] (monotone, `tvd2`). Its content
 changes every step exactly by the boundary fluxes (`test_verify_tracer_through_bump_monotone_and_conserved`).
 
+Recirculation behind a step and a weir (issue #50)
+--------------------------------------------------
+
+Run: `julia --project experiments/obstacles/plot_recirculation.jl [product ...]` (products: `step grids boundary weir
+animation`, default all; about 5 h one after the other, they can run in parallel). Theory, the full tables and the
+explanation of the hydrostatic blow-up: [docs/TESTS_TECHNICAL_DOCUMENTATION.md](../../docs/TESTS_TECHNICAL_DOCUMENTATION.md),
+section 28; tests in `test/test_recirculation.jl`.
+
+Backward-facing step ST1 of Nakagawa & Nezu (1987) as simulated by Luo et al. (2023): S = 2 cm, depth 6 cm, Re = 4380,
+k-epsilon, wetting-drying step with cut cells, 90 s. The reference is the LES value 6.15 S; the measured table of 1987
+is not public.
+
+![Step](figures/recirculation_step.png)
+
+At S/10 the non-hydrostatic run gives xR = 6.99 S, steady (std 0.10 S). The hydrostatic run gives 5.67 S but does not
+settle (std 1.3 S), and its surface dips behind the step.
+
+![Hydrostatic and non-hydrostatic flow behind the step](figures/recirculation_step.gif)
+
+![Grids](figures/recirculation_step_grids.png)
+
+| grid (dx, dz) | xR / S | std |
+|---|---|---|
+| S/5, S/5 | 6.16 | 0.05 |
+| S/10, S/10 | 6.99 | 0.10 |
+| S/10, S/20 | 7.41 | 0.22 |
+| S/20, S/10 | 6.94 | 0.03 |
+
+The length depends on dz more than on dx and moves away from the LES. The agreement of the coarse grid (6.16 S) is a
+cancellation of errors; xR is within 20 % of the LES.
+
+These grids have the bed on a layer interface. Shifted against the layers, so that the lowest wet cell is shaved, the
+step at S/10 gives 7.02 S (a quarter of a layer), 7.11 S (half), 7.37 S (three quarters), but 12.47 S and no steady
+state with a cell of 10 % of dz. The weir goes from 5.29 S to 4.15 S at half a layer. The suspect is the bed cell of
+k-epsilon: its k and eps come from the local velocity, so k goes to zero at reattachment, and eps follows the thickness
+of the cell (section 28).
+
+![Boundary](figures/recirculation_boundary.png)
+
+An impulsive start excites the quarter-wave mode of the reach (7.3 s). With a fixed level at the outlet xR swings from
+2.9 to 10 S and settles after about 40 s; the relaxed outflow (issue #54) removes this.
+
+Hydrostatic runs with a fixed level can blow up. The swing of the discharge lifts the jet to the Courant limit of the
+explicit advection (0.625 m/s at this time step). A prescribed velocity at the inlet even feeds the mode (about 1.4 per
+period, in the non-hydrostatic mode as well); a prescribed discharge damps it. Use `left_discharge` with a ramp, or the
+relaxed outflow.
+
+![Weir](figures/recirculation_weir.png)
+
+A trapezoidal weir of height S with a 1:1 downstream face (no reference): non-hydrostatic xR = 5.29 S from the toe
+(see above for the shifted bed); hydrostatic: no reverse flow at all.
+
 Limits
 ------
 
-- Hydrostatic only. The sharp-crested (thin-plate) weir of issue #47 needs the non-hydrostatic pressure (a curved
+- The cases of issue #47 are hydrostatic only. The sharp-crested (thin-plate) weir of issue #47 needs the non-hydrostatic pressure (a curved
   nappe); the open boundaries of the non-hydrostatic mode now exist (issue #49), the weir case is still to be set up.
 - A prescribed inflow density (`left_rho`) exists only in the wetting-drying step; the transport of the other modes has
   no flux through the outer faces.
