@@ -118,8 +118,8 @@ An impulsive start excites the quarter-wave mode of the reach (7.3 s). With a fi
 
 Hydrostatic runs with a fixed level can blow up. The swing of the discharge lifts the jet to the Courant limit of the
 explicit advection (0.625 m/s at this time step). A prescribed velocity at the inlet even feeds the mode (about 1.4 per
-period, in the non-hydrostatic mode as well); a prescribed discharge damps it. Use `left_discharge` with a ramp, or the
-relaxed outflow.
+period, in the non-hydrostatic mode as well); a prescribed discharge damps it. Use a ramped discharge
+(`left_discharge=t -> q(t)`) or the relaxed outflow. The model warns of both (issue #61).
 
 ![Weir](figures/recirculation_weir.png)
 

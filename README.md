@@ -36,8 +36,9 @@ Model
     docs/TESTS_TECHNICAL_DOCUMENTATION.md, sections 17, 27 and 28);
   - log-law bed friction with wall functions (`bed_roughness_length`), or Chezy friction on the depth-averaged velocity
     (`chezy_coefficient`; issue #14, docs/TESTS_TECHNICAL_DOCUMENTATION.md, section 21);
-  - lateral boundaries (`set_x_inflow_outflow!`): inflow velocity profile or discharge (`left_discharge`, with
-    `left_level` for supercritical inflow, `left_rho` for the density of the inflow in the wetting-drying step),
+  - lateral boundaries (`set_x_inflow_outflow!`): inflow velocity profile or discharge (`left_discharge`, a function of
+    time in the wetting-drying step, with `left_level` for supercritical inflow, `left_rho` for the density of the
+    inflow in the wetting-drying step),
     outflow with zero-gradient velocity, a prescribed velocity, a prescribed
     water level (`right_level`) or a free outflow (`right_free`, radiation condition; issue #46), optionally relaxed
     to a target level (`right_relaxation_time`, weakly reflective; issue #54); the last two with

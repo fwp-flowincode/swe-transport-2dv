@@ -254,6 +254,7 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         cfg.dt = CFL_TARGET * dx / (2 * sqrt(cfg.g * 1.0))
         x = wd_x_centres(cfg)
         cfg.bed_level = @. 0.05 * max(x - 0.5 * cfg.length, 0.0)   # a dry beach behind the dry flat bed
+        cfg.advective_courant_warning = Inf   # WHY: the large step is the point of the test (CFL_TARGET)
         model = Model(cfg)
         dz = cfg.depth / cfg.nz
         rho = [(x[i] < 10.0 ? 1003.0 : 1000.0) + ((k - 0.5) * dz < 0.4 ? 1.0 : 0.0) for k in 1:cfg.nz, i in 1:cfg.nx]

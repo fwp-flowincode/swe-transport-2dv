@@ -24,7 +24,7 @@ include("reference_solutions.jl")
 
 export State
 export copy_state, from_shape
-export water_volume, constituent_mass, boundary_normal_flux, cfl_numbers, reattachment_length
+export water_volume, constituent_mass, boundary_normal_flux, cfl_numbers, reattachment_length, reach_mode_gain
 export reduced_gravity, internal_wave_speed, froude_number
 export grad_x_c, grad_x_c!, grad_z_c, grad_z_c!, div_x_u, div_x_u!, div_z_w, div_z_w!
 export advection_term_u, advection_term_u!, advection_term_w, advection_term_w!

@@ -168,6 +168,7 @@ end
         for (implicit, dts, order) in ((false, (2.0, 1.0, 0.5), 1.0), (true, (20.0, 10.0, 5.0), 2.0))
             errors = map(dts) do dt
                 model = chezy_channel(; implicit=implicit, dt=dt)
+                model.config.advective_courant_warning = Inf   # WHY: the order in time needs large steps; uniform flow has no horizontal advection
                 for _ in 1:round(Int, CHEZY_SPINUP_TIME / dt)
                     step_forward!(model)
                 end
