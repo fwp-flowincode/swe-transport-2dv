@@ -1555,22 +1555,24 @@ of the bed velocity interpolated.
 $x_R=6.15\,S$ and agrees with the measurements according to the paper; the measured table of 1987 was not available to
 this work (it is not public), so 6.15 is the reference, not the measurement. The channel is 70 S long with the step at 40 S.
 
-Discharge inlet, relaxed outflow ($\tau=20$ s), means over the last 30 of 90 s; std is that of the instantaneous length:
+Discharge inlet, relaxed outflow ($\tau=20$ s), means over the last 30 of 90 s; std is that of the instantaneous
+length. Equilibrium wall function of section 29 (the default since issue #62; with the local wall function of section
+27 the lengths were 6.16, 6.99, 7.41 and 6.94):
 
 | grid ($\Delta x$, $\Delta z$) | non-hydrostatic $x_R/S$ | std | largest $w$ (m/s) |
 |---|---|---|---|
-| S/5, S/5 | 6.16 | 0.05 | 0.022 |
-| S/10, S/10 | 6.99 | 0.10 | 0.017 |
-| S/10, S/20 | 7.41 | 0.22 | 0.023 |
-| S/20, S/10 | 6.94 | 0.03 | 0.025 |
+| S/5, S/5 | 6.07 | 0.09 | 0.022 |
+| S/10, S/10 | 7.22 | 0.10 | 0.018 |
+| S/10, S/20 | 7.73 | 0.22 | 0.022 |
+| S/20, S/10 | 7.18 | 0.03 | 0.026 |
 
 The length moves with $\Delta z$ and $\Delta x$ matters less. The trend is upwards and away from the LES. The test grid
-S/5 agrees with the LES within 1 %, but that is a cancellation of errors, not convergence. What holds is $x_R$ within
-20 % of the LES on these grids, which is the tolerance of the test, and only with the bed on a layer interface (below).
+S/5 agrees with the LES within 2 %, but that is a cancellation of errors, not convergence. What holds is $x_R$ within
+20 % of the LES on these grids except the finest $\Delta z$ (26 %); the test uses S/5 with this tolerance.
 
-**Sensitivity to the bed cell.** In the table above the bed and the step top lie on layer interfaces. Shifting the bed
-against the layers by a fraction of $\Delta z$ shaves the lowest wet cell to $(1-f)\Delta z$ at the same geometry and
-the same $\Delta z$:
+**Sensitivity to the bed cell** (local wall function of section 27; the treatment that removes it is in section 29).
+In the table above the bed and the step top lie on layer interfaces. Shifting the bed against the layers by a fraction
+of $\Delta z$ shaves the lowest wet cell to $(1-f)\Delta z$ at the same geometry and the same $\Delta z$:
 
 | shift $f$ | step S/5: $x_R/S$ (std) | step S/10 | weir S/10 |
 |---|---|---|---|
@@ -1592,13 +1594,13 @@ local velocity and $z_1=h/2$:
 - The bed cell is below the log layer everywhere in the recirculation, on all grids: $z_1^+=2$ to 8 on S/5 at full
   thickness, below 1 at $f=0.9$. The drift of $x_R$ with $\Delta z$ can therefore not be assigned to one grid.
 
-The cause is not separated from the effect of the thin cell on the velocity; a treatment of the bed cell that does not
-depend on $u_*$ of the local velocity would be the test.
+Section 29 separates the causes: the thin cell, not $u_*$ of the local velocity, breaks the step, and the
+equilibrium wall function on a wall cell of at least $0.3\,\Delta z$ removes the sensitivity.
 
 **The start-up mode.** Fixed discharge and fixed level make a quarter-wave mode of the reach, of period $4L/c=7.3$ s. An
-impulsive start excites it; with the water level at the outlet, $x_R$ swings between 2.9 and 10 S and the swing decays
-over about 40 s. The relaxed outflow removes it (`recirculation_boundary.png`): 5.9 to 7.5 S. Both give 6.82 S over the
-10-90 s window. Means over a shorter run are not of the steady state.
+impulsive start excites it; with the water level at the outlet, $x_R$ swings between 2.9 and 10.7 S and the swing decays
+over about 40 s. The relaxed outflow removes it (`recirculation_boundary.png`): 6.05 to 7.75 S. Both give 7.0 S over
+the 10-90 s window. Means over a shorter run are not of the steady state.
 
 **Hydrostatic blow-up with a fixed level.** The hydrostatic run with a fixed level crashes although the non-hydrostatic
 one does not. k-epsilon is not the cause (the run fails without closure too, and earlier). The cause has two parts:
@@ -1655,8 +1657,11 @@ recirculation of about the right length, but it never settles:
 | grid | hydrostatic $x_R/S$ | std | largest $w$ (m/s) |
 |---|---|---|---|
 | S/5 | 5.64 | 1.00 | 0.091 |
-| S/10 (half $\Delta t$) | 5.67 | 1.30 | 0.205 |
+| S/10 (half $\Delta t$) | 5.69 | 1.20 | 0.179 |
 | S/20 (ramped start, 70 s) | 4.88 | 1.26 | 0.860 |
+
+(S/5 and S/20 with the local wall function of section 27; S/10 with the equilibrium one, 5.67 S, std 1.30 and
+0.205 m/s before.)
 
 $w$ follows from continuity alone and nothing limits it behind the step: the downdraft has $w\approx u$ with
 $\Delta x\approx\Delta z$. Its peak grows 2-4 times per halving of the grid, against a non-hydrostatic value that stays
@@ -1664,11 +1669,94 @@ near 0.02 m/s, so these grids show no grid limit of $w$. The hydrostatic mean su
 that the non-hydrostatic one does not have (`recirculation_step.png`).
 
 **Obstacle with a sloped face.** A trapezoidal weir of height S (ramp 1:3, crest 4 S, downstream face 1:1, no reference):
-non-hydrostatic $x_R=5.29\,S$ (std 0.08) from the toe; hydrostatic: no reverse flow at all. The hydrostatic model can
+non-hydrostatic $x_R=5.23\,S$ (std 0.05; 5.29 with the local wall function) from the toe; hydrostatic: no reverse flow at
+all. The hydrostatic model can
 therefore miss a recirculation altogether, although it keeps the one behind the vertical step.
 
-Limitations: the wall functions above, so $x_R$ depends on the position of the bed against the layers. One validated
-case, against a simulation; the measured table of 1987 is not public.
+Limitations: $x_R$ drifts with $\Delta z$ (above); the bed cell is treated in section 29. One validated case, against a
+simulation; the measured table of 1987 is not public.
+
+### 29) Bed cell of k-epsilon on the z-level grid (issue #62)
+
+**Problem.** On the z-level grid the bed cuts the lowest wet cell to any thickness $h_1\in(0,\Delta z]$. With the local
+wall function of section 27 the cell takes $k=u_*^2/\sqrt{C_\mu}$ and $\varepsilon=u_*^3/(\kappa z_1)$ as Dirichlet values,
+$u_*$ from its own velocity and $z_1=h_1/2$. Both depend on the cut: $u_*\to0$ where the bed velocity changes sign, so
+$k$ is forced to zero at reattachment, and $\varepsilon\propto1/h_1$ grows without bound in a thin cell. Section 28
+shows the effect: shifting the bed of the step against the layers by $0.9\,\Delta z$ makes $x_R$ 40-80 % longer and
+unsteady.
+
+**Equilibrium wall function** (`KEpsilonState.wall_function = :equilibrium`, the default; Launder & Spalding 1974;
+Versteeg & Malalasekera 2007, sec. 9.11). The velocity scale is $u_k=C_\mu^{1/4}k_w^{1/2}$ of the wall cell, not the
+local $u_*$:
+
+- $k$ of the wall cell is solved (zero flux at the bed) with the production $\tau^2/(\kappa u_kz_1)$ of the shear stress
+  $\tau=\kappa u_k|U_w|/\ln(z_1/z_0)$ and the dissipation $u_k^3/(\kappa z_1)$ as a sink;
+- $\varepsilon$ of the wall cell is the Dirichlet value $u_k^3/(\kappa z_1)$ with the new $k$;
+- in the log layer $P=\varepsilon$ gives $u_k^2=c_bU_w^2$ with $c_b=(\kappa/\ln(z_1/z_0))^2$, the local wall function;
+  $u_k$ stays finite where $U_w$ changes sign.
+
+**Wall cell.** The wall cell is the lowest wet cell at least $\theta\Delta z$ thick, $\theta=$
+`KEpsilonState.wall_cell_min_fraction`, default `KE_WALL_CELL_MIN_FRACTION` $=0.3$. The shaved cells below it take its
+$k$ and $\varepsilon$, $z_1$ is the height of its centre above the bed (shaved cells included), and the log-law bed
+friction of the implicit column (section 18) acts on its layer at that $z_1$ (`implicit_vertical_column!(...;
+friction_row)`); the shaved layers below follow through $\nu+\nu_t$. Without the move of the friction the uniform channel
+with $f=0.9$ is 0.7 % too shallow and its $\nu_t$ 9 % too low, because the friction of a thin layer at $z_1=0.05\,\Delta z$
+and the wall function one layer up disagree (`test_verify_implicit_vertical_friction_row`: the column solve with the
+friction on layer $k_f$ equals the assembled matrix). `wall_function = :local` keeps the formulation of section 27.
+
+**Shift study** (`experiments/obstacles/plot_bed_cell.jl`; ST1 and the weir of section 28, non-hydrostatic, 90 s, means
+over the last 30 s). The bed is lifted by $f\Delta z$ against the layers (one layer more, the same $\Delta z$ and
+geometry), so the lowest wet cell of the step is $(1-f)\Delta z$ thick; the sloped weir face has cut cells at every $f$.
+$x_R/S$ (std of the instantaneous length in brackets where above 0.2):
+
+| case | wall function | $f=0$ | 0.25 | 0.5 | 0.75 | 0.9 |
+|---|---|---|---|---|---|---|
+| step S/5 | local | 6.18 | 6.06 | 6.00 | 6.29 | 8.52 (1.15) |
+| | equilibrium, $\theta=0$ | 6.08 | 6.12 | 6.22 | 6.65 | 9.02 (1.06) |
+| | equilibrium, $\theta=0.3$ | 6.08 | 6.12 | 6.22 | 5.33 | 5.72 |
+| | equilibrium, $\theta=0.5$ | 6.08 | 6.12 | 6.22 | 5.33 | 5.72 |
+| step S/10 | local | 6.99 | 7.02 | 7.11 | 7.37 (0.33) | 12.47 (2.39) |
+| | equilibrium, $\theta=0$ | 7.22 | 7.31 | 7.44 | 7.18 | 12.51 (2.00) |
+| | equilibrium, $\theta=0.3$ | 7.22 | 7.31 | 7.44 | 7.18 | 7.30 |
+| | equilibrium, $\theta=0.5$ | 7.22 | 7.31 | 6.59 | 7.18 | 7.30 |
+| weir S/10 | local | 5.29 | 5.32 | 4.15 | | |
+| | equilibrium, $\theta=0$ | 5.44 | 5.64 | 4.04 | | |
+| | equilibrium, $\theta=0.3$ | 5.23 | 5.30 | 4.04 | | |
+| | equilibrium, $\theta=0.5$ | 4.51 | 5.30 | 1.80 | | |
+
+- The equilibrium formulation alone ($\theta=0$) does not help: a wall cell of $0.1\,\Delta z$ breaks the step as the
+  local one does. The thin cell, not $u_*$ of the local velocity, is the main cause.
+- With the wall cell above the thin cell ($\theta=0.3$) the step at $f=0.9$ is steady and within 6 % (S/5) and 1 % (S/10)
+  of the bed on an interface. The largest deviation is $f=0.75$ on S/5 (12 %): there the wall cell is a full layer with
+  $z_1=1.25\,\Delta z$, the coarsest wall resolution of the study.
+- $\theta=0.5$ puts the threshold on the half-shaved cells of $f=0.5$, where rounding decides column by column (S/10:
+  6.59), and the jumps of $z_1$ between neighbouring cut cells along the weir slope shorten its recirculation (4.51 at
+  $f=0$, 1.80 at $f=0.5$). $\theta=0.3$ follows the local wall function on the weir within 3 %.
+- The weir at $f=0.5$ is 22 % shorter than at $f=0$ with every wall function. Its sloped face is cut differently at
+  each shift, so this is the resolution of the geometry, not of the bed cell.
+
+At $f=0.9$ the profiles behind the step with the equilibrium wall function lie on those at $f=0$; the local one
+collapses $k$, $\varepsilon$ and $\nu_t$ over the whole recirculation (`bed_cell_profiles.png`, `bed_cell_fields.png`,
+`bed_cell_step.gif`). The local wall function at $f=0$ also has $k$ and $\varepsilon$ of the bed cell two to four
+decades below the cell above at $x=5$-7 S; the equilibrium one has no such drop.
+
+**Uniform channel** (section 27, 20 layers, $f$ against the layers, `bed_cell_channel.png`):
+
+| $f$ | wall function | depth (m) | max $\nu_t$ (m²/s) |
+|---|---|---|---|
+| 0 | local | 0.5000 | $2.941\cdot10^{-3}$ |
+| 0 | equilibrium | 0.5000 | $2.942\cdot10^{-3}$ |
+| 0.5 | local | 0.5001 | $3.011\cdot10^{-3}$ |
+| 0.5 | equilibrium | 0.5001 | $3.014\cdot10^{-3}$ |
+| 0.9 | local | 0.5001 | $3.087\cdot10^{-3}$ |
+| 0.9 | equilibrium | 0.5001 | $2.966\cdot10^{-3}$ |
+
+In uniform flow both wall functions agree on the interface (P = ε); at $f=0.9$ the equilibrium one is within 1 % in
+$\nu_t$, the local one 5 % above.
+
+Limitations: the wall cell is at least $\theta\Delta z$ thick, so the wall resolution varies between
+$z_1=0.15\,\Delta z$ and $1.3\,\Delta z$ with the position of the bed; a scalable or low-Reynolds treatment of the
+viscous sublayer is not included ($z_1^+$ of 2-8 behind the step, section 28). $\theta$ comes from one step and one weir.
 
 ## Test-by-test documentation
 
@@ -2582,6 +2670,10 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\thinspace p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). 
   steps, with it $\nu_t$ stays below $10^{-2}$ m²/s.
 - `test_verify_clear_vegetation_resets_k_epsilon_production`: the vegetation production $P_v$ is zero after
   `clear_vegetation!`.
+- `test_verify_k_epsilon_equilibrium_wall_function_channel` (section 29): the wetting-drying channel of section 27 with
+  the equilibrium wall function: on an interface the same as the local one and $k_1\sqrt{C_\mu}=gSH$ ($5\cdot10^{-3}$); with
+  the bed $0.9\,\Delta z$ above an interface the depth within $10^{-3}$ and max $\nu_t$ within 2 % of the unshifted
+  channel, the shaved cell has the $k$ and $\varepsilon$ of the wall cell; an unknown wall function is rejected.
 
 ### Wetting and drying tests (`test_wetting_drying.jl`, section 18)
 
@@ -2800,9 +2892,12 @@ stated otherwise.
   face only the open side contributes.
 - `test_verify_reattachment_length`: a bed velocity with a known zero is recovered; attached flow gives 0.
 - `test_validate_backward_step_reattachment_nonhydrostatic`: ST1 on S/5, 90 s, mean of the last 30 s: $x_R$ within 20 %
-  of the LES value 6.15 S (measured 6.18 S).
+  of the LES value 6.15 S (measured 6.08 S).
 - `test_validate_backward_step_hydrostatic_vertical_velocity`: same case: the largest $w$ of the hydrostatic run is above
-  3 times the non-hydrostatic one (measured 4.1).
+  3 times the non-hydrostatic one (measured 4.3).
+- `test_validate_backward_step_reattachment_shifted_bed` (section 29): the same case with the bed and the step
+  $0.9\,\Delta z$ above the layer interfaces (lowest wet cell $0.1\,\Delta z$): $x_R$ within 10 % of the run with the bed
+  on an interface (measured 5.9 %: 5.72 against 6.08 S; the local wall function gives 38 % and no steady state).
 
 Time-dependent discharge and the mode of the reach (`test_open_boundaries.jl`, issue #61):
 

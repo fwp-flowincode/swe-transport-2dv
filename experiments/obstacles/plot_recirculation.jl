@@ -63,6 +63,20 @@ function save_figure(fig, name)
     @printf("wrote %s (%.0f kB)\n", path, filesize(path) / 1024)
 end
 
+const U_CLIMS = (-0.1, 0.3)     # m/s, colour range of the velocity fields
+const GRADIENT_SAMPLES = 32     # -, colours per half of the diverging map
+
+# Diverging colour map with its white middle at u = 0 inside the asymmetric range `clims` (m/s).
+# WHY: the plain map puts white at the middle of clims (0.1 m/s); stretching each half keeps the reverse flow, a few
+# cm/s, in full colour while white marks the dividing line between forward and reverse flow.
+function zero_centred_gradient(clims; name=:balance, n=GRADIENT_SAMPLES)
+    z = -clims[1] / (clims[2] - clims[1])
+    g = cgrad(name)
+    t = vcat(range(0, 0.5; length=n), range(0.5, 1; length=n)[2:end])
+    pos = vcat(range(0, z; length=n), range(z, 1; length=n)[2:end])
+    return cgrad([g[s] for s in t], pos)
+end
+
 step_bed(x) = x < X_STEP ? S : 0.0
 
 function weir_bed(x)
@@ -131,11 +145,11 @@ function run_mean!(model, xc, x_start, run_time, average_time; frame=nothing)
     return (; u=ubar ./ m, h=hbar ./ m, eta=etabar ./ m, wmax, ts, xrs, etas)
 end
 
-function speed_panel(model, xc, field, x_start; title, clims=(-0.1, 0.3))
+function speed_panel(model, xc, field, x_start; title, clims=U_CLIMS)
     dz = model.dz
     zc = ((1:model.config.nz) .- 0.5) .* dz
     drawn = [model.wetdry.bed[i] < k * dz - 1e-9 ? field[k, i] : NaN for k in axes(field, 1), i in axes(field, 2)]
-    p = heatmap((xc .- x_start) ./ S, zc ./ S, drawn; color=:balance, clims=clims, xlabel="(x - x_step) / S", ylabel="z / S",
+    p = heatmap((xc .- x_start) ./ S, zc ./ S, drawn; color=zero_centred_gradient(clims), clims=clims, xlabel="(x - x_step) / S", ylabel="z / S",
         title=title, xlims=(-VIEW_UPSTREAM / S, VIEW_DOWNSTREAM / S), ylims=(0, DEPTH / S), colorbar_title="u (m/s)",
         titlefontsize=10)
     return p

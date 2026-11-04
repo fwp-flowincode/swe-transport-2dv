@@ -20,16 +20,17 @@
 
 """
     implicit_vertical_column!(u, r, uhat, dZ, W, nu, gamma, dt, m, cprime, dprime, rprime; advective=false, h_adv=dZ,
-                              gamma_mean=0, zprime=nothing)
+                              gamma_mean=0, zprime=nothing, friction_row=1)
 
 One implicit step of the vertical terms of a u-face column with `m` open layers, numbered from the bed (k = 1) to the
 top (k = m); entries beyond `m` are not touched:
 
-    dZ_k (u_k - uhat_k) = -dt V_k(u) + dt D_k(u) - dt (gamma u_1 + gamma_mean Ubar) delta_{k1},
+    dZ_k (u_k - uhat_k) = -dt V_k(u) + dt D_k(u) - dt gamma u_k delta_{k,kf} - dt gamma_mean Ubar delta_{k1},
     Ubar = sum_j dZ_j u_j / sum_j dZ_j.
 
-- `dZ` (m): layer thicknesses; `uhat` (m/s): explicit predictor; `gamma` (m/s): linearised bed friction on layer 1
-  (log law); `gamma_mean` (m/s, >= 0): linearised friction on the depth-averaged velocity (Chezy, g |Ubar^n| / C^2),
+- `dZ` (m): layer thicknesses; `uhat` (m/s): explicit predictor; `gamma` (m/s): linearised bed friction (log law) on
+  layer kf = `friction_row` (1 by default; the wall layer above shaved layers with the equilibrium wall function of
+  issue #62); `gamma_mean` (m/s, >= 0): linearised friction on the depth-averaged velocity (Chezy, g |Ubar^n| / C^2),
   solved by the Sherman-Morrison formula (file header); it needs the work vector `zprime` (length >= m).
 - Advection with the interface velocities `W` (m/s, length >= m+1; W[j] lies below layer j, W[1] and W[m+1] are not
   used: no flux through the bed and the top):
@@ -48,8 +49,9 @@ function implicit_vertical_column!(u::AbstractVector{<:Real}, r::AbstractVector{
     dZ::AbstractVector{<:Real}, W::AbstractVector{<:Real}, nu::AbstractVector{<:Real}, gamma::Real, dt::Real, m::Int,
     cprime::AbstractVector{<:Real}, dprime::AbstractVector{<:Real}, rprime::AbstractVector{<:Real};
     advective::Bool=false, h_adv::AbstractVector{<:Real}=dZ, gamma_mean::Real=0.0,
-    zprime::Union{Nothing,AbstractVector{<:Real}}=nothing)
+    zprime::Union{Nothing,AbstractVector{<:Real}}=nothing, friction_row::Int=1)
     m >= 1 || return nothing
+    1 <= friction_row <= m || throw(ArgumentError("friction_row must be in 1:m"))
     mean_friction = gamma_mean > 0.0
     mean_friction && zprime === nothing && throw(ArgumentError("gamma_mean > 0 requires the work vector zprime"))
     @inbounds for k in 1:m
@@ -82,7 +84,7 @@ function implicit_vertical_column!(u::AbstractVector{<:Real}, r::AbstractVector{
                 upper += dt * min(W[k + 1], 0.0)  # inflow from above
             end
         end
-        k == 1 && (diag += dt * gamma)
+        k == friction_row && (diag += dt * gamma)
         # forward elimination (Thomas), both right-hand sides (and e_1 for the Chezy friction)
         if k == 1
             denom = diag

@@ -612,9 +612,21 @@ function _wd_implicit_vertical!(model::Model, wd::WetDryState, f::Int)
     # does not have. The jet friction acts from the next face on.
     gate = wd.gate_active[f]
     gamma = 0.0   # m/s
+    friction_row = 1
     if cfg.bed_roughness_length > 0.0 && !gate
-        z1 = max(0.5 * wd.hf[klo, f], WD_FRICTION_Z1_MIN_FACTOR * cfg.bed_roughness_length)
-        gamma = bed_friction_coefficient(cfg.bed_roughness_length, z1) * abs(ws.u_old[klo, f])
+        kw = klo
+        below = 0.0   # m
+        if ke !== nothing && ke.wall_function === :equilibrium
+            # the wall layer of the k-epsilon wall function (_wd_k_epsilon_step!): friction there, at its height above
+            # the bed; the shaved layers below follow it through the eddy viscosity
+            while kw < khi && wd.hf[kw, f] < ke.wall_cell_min_fraction * model.dz
+                below += wd.hf[kw, f]
+                kw += 1
+            end
+            friction_row = kw - klo + 1
+        end
+        z1 = max(below + 0.5 * wd.hf[kw, f], WD_FRICTION_Z1_MIN_FACTOR * cfg.bed_roughness_length)
+        gamma = bed_friction_coefficient(cfg.bed_roughness_length, z1) * abs(ws.u_old[kw, f])
     end
     gamma_mean = 0.0   # m/s, Chezy: g |U^n| / C^2 with the depth-averaged velocity of time n over the open layers
     if cfg.chezy_coefficient > 0.0 && !gate
@@ -628,7 +640,7 @@ function _wd_implicit_vertical!(model::Model, wd::WetDryState, f::Int)
     end
     implicit_vertical_column!(view(col, :, 1), view(col, :, 2), view(col, :, 3), view(col, :, 4), view(col, :, 5),
         view(col, :, 6), gamma, cfg.dt, m, view(col, :, 7), view(col, :, 8), view(col, :, 9); advective=true,
-        h_adv=view(col, :, 10), gamma_mean=gamma_mean, zprime=view(col, :, 11))
+        h_adv=view(col, :, 10), gamma_mean=gamma_mean, zprime=view(col, :, 11), friction_row=friction_row)
     H = 0.0
     @inbounds for j in 1:m
         k = klo + j - 1
@@ -1510,16 +1522,34 @@ function _wd_k_epsilon_step!(model::Model, wd::WetDryState, ke::KEpsilonState)
             depth += h[kk, i]
         end
         wall = z0 > 0.0
-        z1 = max(0.5 * h[klo, i], WD_FRICTION_Z1_MIN_FACTOR * z0)
-        ustar2 = wall ? bed_friction_coefficient(z0, z1) * _wd_cell_velocity(model, wd, klo, i)^2 : 0.0   # m^2/s^2
-        first = wall ? klo + 1 : klo
+        equilibrium = wall && ke.wall_function === :equilibrium
+        # wall cell kw: the lowest wet cell; with the equilibrium wall function the lowest one of at least
+        # ke.wall_cell_min_fraction dz, and the shaved cells below it take its values
+        kw = klo
+        below = 0.0   # m, thickness of the shaved cells under the wall cell
+        if equilibrium
+            while kw < khi && h[kw, i] < ke.wall_cell_min_fraction * dz
+                below += h[kw, i]
+                kw += 1
+            end
+        end
+        z1 = max(below + 0.5 * h[kw, i], WD_FRICTION_Z1_MIN_FACTOR * z0)   # m, height of the wall-cell centre
+        ustar2 = (wall && !equilibrium) ? bed_friction_coefficient(z0, z1) * _wd_cell_velocity(model, wd, klo, i)^2 : 0.0   # m^2/s^2
         for (field, sigma) in ((:k, KE_SIGMA_K), (:eps, KE_SIGMA_EPS))
             phi = field === :k ? k : eps
             floor_value = field === :k ? KE_K_MIN : KE_EPS_MIN
-            if wall
-                # lowest wet cell: wall-function value (Dirichlet), coupled through the interface above it
-                bed_value = field === :k ? ustar2 / sqrt(KE_C_MU) : sqrt(ustar2)^3 / (KE_KARMAN * z1)
-                phi[klo, i] = max(bed_value, floor_value)
+            # equilibrium: k of the wall cell is solved with zero flux at the bed, eps of the cell is a Dirichlet value
+            solve_wall_cell = !wall || (equilibrium && field === :k)
+            first = solve_wall_cell ? kw : kw + 1
+            if !solve_wall_cell
+                # wall cell: wall-function value (Dirichlet), coupled through the interface above it
+                if equilibrium
+                    # eps = u_k^3 / (kappa z1), u_k = C_mu^(1/4) k^(1/2) from k solved just before (Launder & Spalding 1974)
+                    bed_value = (KE_C_MU^0.25 * sqrt(k[kw, i]))^3 / (KE_KARMAN * z1)
+                else
+                    bed_value = field === :k ? ustar2 / sqrt(KE_C_MU) : sqrt(ustar2)^3 / (KE_KARMAN * z1)
+                end
+                phi[kw, i] = max(bed_value, floor_value)
             end
             n = khi - first + 1
             n >= 1 || continue
@@ -1528,7 +1558,7 @@ function _wd_k_epsilon_step!(model::Model, wd::WetDryState, ke::KEpsilonState)
                 hk = h[kk, i]
                 ratio = eps[kk, i] / k[kk, i]   # 1/s, eps/k after the advection
                 inv_t = 1 / _ke_time(ke, k[kk, i], eps[kk, i], ke.strain2[kk, i])   # 1/s, time-scale bound (>= eps/k)
-                kd = kk > klo ? dt * (cfg.nu + 0.5 * (nu_t[kk, i] + nu_t[kk - 1, i]) / sigma) / (0.5 * (hk + h[kk - 1, i])) : 0.0
+                kd = kk > kw ? dt * (cfg.nu + 0.5 * (nu_t[kk, i] + nu_t[kk - 1, i]) / sigma) / (0.5 * (hk + h[kk - 1, i])) : 0.0
                 ku = kk < khi ? dt * (cfg.nu + 0.5 * (nu_t[kk, i] + nu_t[kk + 1, i]) / sigma) / (0.5 * (hk + h[kk + 1, i])) : 0.0
                 p, gb, pv = ke.production[kk, i], ke.buoyancy[kk, i], ke.veg_work[kk, i]
                 if field === :k
@@ -1539,14 +1569,24 @@ function _wd_k_epsilon_step!(model::Model, wd::WetDryState, ke::KEpsilonState)
                     source = inv_t * (KE_C1 * (p + ke.cfe * pv) + c3 * max(gb, 0.0))
                     sink = KE_C2 * inv_t
                 end
+                if equilibrium && field === :k && j == 1
+                    # wall cell (Launder & Spalding 1974; Versteeg & Malalasekera 2007, sec. 9.11): velocity scale
+                    # u_k = C_mu^(1/4) k^(1/2) instead of the local u*, shear stress tau = kappa u_k |U| / ln(z1/z0)
+                    # (m^2/s^2), production tau dU/dz = tau^2 / (kappa u_k z1), dissipation u_k^3 / (kappa z1) as the sink
+                    # u_k^3 / (kappa z1 k). WHY: u_k stays finite where the bed velocity changes sign (reattachment).
+                    uk = KE_C_MU^0.25 * sqrt(k[kk, i])   # m/s
+                    tau = KE_KARMAN * uk * abs(_wd_cell_velocity(model, wd, kk, i)) / log(z1 / z0)
+                    source = tau^2 / (KE_KARMAN * uk * z1) + max(gb, 0.0) + ke.cfk * pv
+                    sink = KE_C_MU^0.75 * sqrt(k[kk, i]) / (KE_KARMAN * z1) + max(-gb, 0.0) / k[kk, i]
+                end
                 lower[j] = -kd
                 upper[j] = -ku
                 diag[j] = hk * (1 + dt * sink) + kd + ku
                 rhs[j] = hk * (phi[kk, i] + dt * source)
-                if wall && j == 1
+                if !solve_wall_cell && j == 1
                     # the Dirichlet cell below
                     lower[j] = 0.0
-                    rhs[j] += kd * phi[klo, i]
+                    rhs[j] += kd * phi[kw, i]
                 end
             end
             if field === :eps && ke.surface_condition === :rodi && khi >= first
@@ -1557,6 +1597,10 @@ function _wd_k_epsilon_step!(model::Model, wd::WetDryState, ke::KEpsilonState)
             for j in 1:n
                 phi[first + j - 1, i] = max(sol[j], floor_value)
             end
+        end
+        for kk in klo:(kw - 1)
+            k[kk, i] = k[kw, i]
+            eps[kk, i] = eps[kw, i]
         end
     end
     @inbounds for i in 1:nx, kk in 1:nz
