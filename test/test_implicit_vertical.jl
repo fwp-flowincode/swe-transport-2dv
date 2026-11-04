@@ -8,6 +8,7 @@ include("test_common.jl")
 const IMPLICIT_STIFF_COURANT = 100.0   # -, W dt / dZ of the stiff kernel test (explicit upwind is stable only up to 1)
 const IMPLICIT_STEADY_MATCH = 1e-6     # -, relative difference of steady profiles computed with two time steps
 const IMPLICIT_SPINUP_TIME = 2e4       # s, about 20 friction time scales H / (c_b u) of the steady channel
+const IMPLICIT_MATRIX_MATCH = 1e-10    # -, column solve against the inverted assembled matrix (round-off of inv, m <= 6)
 const IMPLICIT_TOP_COURANT_MIN = 1e-2  # -, smallest max dt |W| / dz at the top interface of the effective-depth test
 
 # One column with m layers, random positive thicknesses dZ (m), interface velocities W (m/s), viscosities nu (m^2/s).
@@ -19,12 +20,12 @@ function random_column(rng, m)
     return dZ, W, nu, uhat
 end
 
-function solve_column(uhat, dZ, W, nu, gamma, dt; advective=false, h_adv=dZ)
+function solve_column(uhat, dZ, W, nu, gamma, dt; advective=false, h_adv=dZ, friction_row=1)
     m = length(dZ)
     u, r = zeros(m), zeros(m)
     work = zeros(m, 3)
     SweTransport2DV.implicit_vertical_column!(u, r, uhat, dZ, W, nu, gamma, dt, m, view(work, :, 1), view(work, :, 2),
-        view(work, :, 3); advective=advective, h_adv=h_adv)
+        view(work, :, 3); advective=advective, h_adv=h_adv, friction_row=friction_row)
     return u, r
 end
 
@@ -41,6 +42,25 @@ end
             @test all(>=(0.0), r)
             gamma == 0.0 && @test isapprox(sum(dZ .* r), sum(dZ); atol=TOL_IDENTITY)
         end
+    end
+
+    @testset "test_verify_implicit_vertical_friction_row" begin
+        # The friction on layer kf (issue #62: the wall layer above shaved layers): the solution equals that of the
+        # assembled matrix A + dt gamma e_kf e_kf', in both forms; momentum leaves the column through layer kf only.
+        rng = MersenneTwister(62)
+        for m in (3, 6), kf in (1, 2, 3), advective in (false, true)
+            dZ, W, nu, uhat = random_column(rng, m)
+            gamma, dt = 0.05, 2.0
+            u, r = solve_column(uhat, dZ, W, nu, gamma, dt; advective=advective, friction_row=kf)
+            # matrix without friction from its inverse: uhat = e_j gives A^{-1} e_j dZ_j
+            Ainv = hcat([solve_column(Float64.(1:m .== j), dZ, W, nu, 0.0, dt; advective=advective)[1] ./ dZ[j] for j in 1:m]...)
+            M = inv(Ainv)
+            M[kf, kf] += dt * gamma
+            @test u ≈ M \ (dZ .* uhat) rtol = IMPLICIT_MATRIX_MATCH
+            @test r ≈ M \ dZ rtol = IMPLICIT_MATRIX_MATCH
+            advective || @test isapprox(sum(dZ .* u), sum(dZ .* uhat) - dt * gamma * u[kf]; atol=TOL_IDENTITY)
+        end
+        @test_throws ArgumentError solve_column(ones(3), ones(3), zeros(4), zeros(4), 0.1, 1.0; friction_row=4)
     end
 
     @testset "test_verify_implicit_vertical_advective_form_keeps_uniform_flow" begin

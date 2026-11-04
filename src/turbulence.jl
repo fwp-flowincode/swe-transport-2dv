@@ -55,6 +55,13 @@ const KE_K_INIT = 1e-8          # m^2/s^2, initial k (quiescent)
 const KE_NU_T_INIT = 1e-6       # m^2/s, initial nu_t (sets the initial eps)
 const KE_SURFACE_LENGTH = 0.07   # -, free-surface dissipation length 0.07 H of Rodi (1993) (surface_condition = :rodi)
 const KE_REALIZABILITY_ALPHA = 0.6   # -, time-scale bound of Durbin (1996)
+# Wall cell of the equilibrium wall function in the wetting-drying step (issue #62): the lowest wet cell at least this
+# fraction of dz thick (-); the shaved cells below it take its k and eps, and the bed friction acts on it. 0: the lowest
+# wet cell.
+# WHY: 0.3 from the shift study of docs section 29. Without merging (0) a cell of 0.1 dz carries the wall function and the
+# step's reattachment length doubles; 0.5 puts the threshold at the half-shaved cells, where rounding then decides column
+# by column, and the jumps of z1 along the weir slope shorten its recirculation (4.5 S at f = 0 against 5.2 S).
+const KE_WALL_CELL_MIN_FRACTION = 0.3
 
 """
     ke_time_scale(k, eps, strain2) -> Float64
@@ -99,18 +106,24 @@ mutable struct KEpsilonState{T<:Real}
     surface_condition::Symbol   # :zero_flux or :rodi (eps_s = C_mu^(3/4) k_s^(3/2) / (kappa 0.07 H))
     realizability::Bool         # time-scale bound of Durbin (1996) on (default); false: T = k/eps (for comparisons)
     horizontal_diffusion::Bool  # wetting-drying step: horizontal eddy diffusion of u, k and eps on (default); false: off
+    wall_function::Symbol       # wetting-drying step, bed cell (issue #62): :local (u* of the local velocity) or :equilibrium
+    wall_cell_min_fraction::Float64   # -, equilibrium wall function: smallest wall-cell thickness over dz
 end
 
 function KEpsilonState(nz::Int, nx::Int; T::Type{<:Real}=Float64, cfk::Real=KE_VEG_CFK, cfe::Real=KE_VEG_CFE, surface_condition::Symbol=:rodi,
-    realizability::Bool=true, horizontal_diffusion::Bool=true)
+    realizability::Bool=true, horizontal_diffusion::Bool=true, wall_function::Symbol=:equilibrium,
+    wall_cell_min_fraction::Real=KE_WALL_CELL_MIN_FRACTION)
     nz >= 2 || throw(ArgumentError("k-epsilon requires nz >= 2"))
+    wall_function in (:local, :equilibrium) || throw(ArgumentError("wall_function must be :local or :equilibrium"))
+    0 <= wall_cell_min_fraction < 1 || throw(ArgumentError("wall_cell_min_fraction must be in [0, 1)"))
     surface_condition in (:zero_flux, :rodi) || throw(ArgumentError("surface_condition must be :zero_flux or :rodi"))
     k = fill(T(KE_K_INIT), nz, nx)
     eps = fill(T(KE_C_MU * KE_K_INIT^2 / KE_NU_T_INIT), nz, nx)
     nu_t = fill(T(KE_NU_T_INIT), nz, nx)
     z() = zeros(T, nz, nx)
     return KEpsilonState{T}(k, eps, nu_t, z(), z(), z(), z(), z(), z(), zeros(T, nx), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz),
-        Float64(cfk), Float64(cfe), surface_condition, realizability, horizontal_diffusion)
+        Float64(cfk), Float64(cfe), surface_condition, realizability, horizontal_diffusion, wall_function,
+        Float64(wall_cell_min_fraction))
 end
 
 """

@@ -22,12 +22,14 @@ end
 # Wetting-drying open channel with k-epsilon (issue #30): discharge q at the inlet, the normal depth `depth` as outlet
 # level, the slope as body force; flat bed or the bed raised by `bed` (m) in a grid of depth `grid_depth` (m).
 # Returns the model and the column index at 3/4 of the reach.
-function wd_channel_model(; q, depth, slope, z0, nz, grid_depth=depth, bed=0.0, length=80.0, nx=80, dt=0.25, t_end=900.0)
+function wd_channel_model(; q, depth, slope, z0, nz, grid_depth=depth, bed=0.0, length=80.0, nx=80, dt=0.25, t_end=900.0,
+    wall_function=:local)
     cfg = ModelConfig(; length=length, depth=grid_depth, nx=nx, nz=nz, dt=dt, use_hydrostatic=true, nu=1e-6,
         body_force_x=9.81 * slope, turbulence_closure="k_epsilon", bed_roughness_length=z0, rayleigh_damping=0.0,
         apply_froude_limiter=false, momentum_advection_scheme="tvd2", wetting_drying=true, implicit_vertical_terms=true,
         theta=1.0, bed_level=bed == 0.0 ? nothing : fill(bed, nx), write_plots=false)
     model = Model(cfg)
+    model.turbulence.wall_function = wall_function
     fill!(model.state.rho, TURB_RHO0)
     refresh_density_metadata!(model)
     initialize_water_level!(model, fill(bed + depth, nx))
@@ -160,6 +162,41 @@ end
         @test maximum(nut) ≈ maximum(nutref) rtol = PROFILE_RTOL
         @test k[1] ≈ ref.turbulence.k[1, 1] rtol = PROFILE_RTOL
         @test k[1] * sqrt(KE_C_MU_VALUE) ≈ 9.81 * SLOPE * H rtol = PROFILE_RTOL   # wall function: u*^2 = g S H
+    end
+
+    @testset "test_verify_k_epsilon_equilibrium_wall_function_channel" begin
+        # Equilibrium wall function (issue #62, docs section 29). Bed on a layer interface: in the uniform channel P = eps in
+        # the wall cell gives u_k = u*, so the profile is that of the local wall function. Bed lifted by 0.9 dz (a wall cell
+        # of 0.1 dz): the next cell is the wall cell, the shaved one takes its k and eps, and depth and nu_t stay those of
+        # the unshifted bed (local wall function: nu_t +5 %, observed).
+        H, SLOPE, Z0, NZ = 0.5, 1e-3, 1e-3, 20
+        SHIFT = 0.9                     # -, of dz
+        WALL_RTOL = 5e-3                # -, k sqrt(C_mu) against g S H (observed 0.9985)
+        DEPTH_RTOL = 1e-3               # -, observed 2e-4
+        NU_T_RTOL = 0.02                # -, peak nu_t against the unshifted bed (observed 0.008)
+        dz = H / NZ
+        ref = turbulence_channel_model(; depth=H, nz=NZ, dt=0.1, t_end=900.0, slope=SLOPE, z0=Z0, implicit_vertical_terms=true)
+        for _ in 1:ref.config.nt
+            step_forward!(ref)
+        end
+        q = mean(ref.state.u[:, 1:end-1]) * H
+        loc, i = wd_channel_model(; q=q, depth=H, slope=SLOPE, z0=Z0, nz=NZ)
+        eq, _ = wd_channel_model(; q=q, depth=H, slope=SLOPE, z0=Z0, nz=NZ, wall_function=:equilibrium)
+        _, ul, nutl, _ = wd_column(loc, i)
+        h, u, nut, k = wd_column(eq, i)
+        @test k[1] * sqrt(KE_C_MU_VALUE) ≈ 9.81 * SLOPE * H rtol = WALL_RTOL
+        @test u ≈ ul rtol = WALL_RTOL
+        @test maximum(nut) ≈ maximum(nutl) rtol = WALL_RTOL
+        shifted, _ = wd_channel_model(; q=q, depth=H, slope=SLOPE, z0=Z0, nz=NZ + 1, grid_depth=H + dz, bed=SHIFT * dz,
+            wall_function=:equilibrium)
+        hs, _, nuts, _ = wd_column(shifted, i)
+        @test hs[1] ≈ (1 - SHIFT) * dz rtol = TOL_IDENTITY
+        @test sum(hs) ≈ H rtol = DEPTH_RTOL
+        @test maximum(nuts) ≈ maximum(nut) rtol = NU_T_RTOL
+        wet = findall(>(1e-12), shifted.wetdry.h[:, i])
+        @test shifted.turbulence.k[wet[1], i] == shifted.turbulence.k[wet[2], i]
+        @test shifted.turbulence.eps[wet[1], i] == shifted.turbulence.eps[wet[2], i]
+        @test_throws ArgumentError KEpsilonState(4, 4; wall_function=:scalable)
     end
 
     @testset "test_validate_k_epsilon_variable_top_layer_open_channel" begin

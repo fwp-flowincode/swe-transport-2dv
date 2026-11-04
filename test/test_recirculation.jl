@@ -2,7 +2,7 @@ include("test_common.jl")
 
 # Recirculation behind obstacles (issue #50): the horizontal eddy diffusion of the wetting-drying step and the
 # backward-facing step of case ST1 of Nakagawa & Nezu (1987), as simulated by Luo et al. (2023, JFM 966 A18).
-# See docs/TESTS_TECHNICAL_DOCUMENTATION.md, section 28.
+# See docs/TESTS_TECHNICAL_DOCUMENTATION.md, sections 28 and 29.
 
 const RC_L = 1.0                # m, channel of the kernel tests
 const RC_H = 1.0                # m
@@ -20,8 +20,10 @@ const ST1_TIME = 90.0           # s, the start-up transient has decayed
 const ST1_AVERAGE = 30.0        # s
 const ST1_RELAXATION = 20.0     # s, reflects < 3 % of the 8 s mode of the reach
 const ST1_XR_LES = 6.15         # step heights, Luo et al. (2023), Fig. 3
-const ST1_XR_RTOL = 0.2         # -, the grid spread of section 28; this grid gives 6.18
-const ST1_W_RATIO_MIN = 3.0     # -, largest w hydrostatic against non-hydrostatic (measured 4.1, and 12 at S/10)
+const ST1_XR_RTOL = 0.2         # -, the grid spread of section 28; this grid gives 6.08
+const ST1_SHIFT = 0.9           # -, bed shifted against the layers: lowest wet cell 0.1 dz (section 29)
+const ST1_SHIFT_RTOL = 0.1      # -, xR shifted against on the interface (measured 5.9 %; the local wall function: 38 %)
+const ST1_W_RATIO_MIN = 3.0     # -, largest w hydrostatic against non-hydrostatic (measured 4.3, and 10 at S/10)
 
 function rc_model(nx; nz=4, bed=nothing)
     cfg = ModelConfig(; length=RC_L, depth=RC_H, nx=nx, nz=nz, dt=RC_DT, nu=1e-6, turbulence_closure="k_epsilon",
@@ -38,21 +40,23 @@ function rc_model(nx; nz=4, bed=nothing)
     return model
 end
 
-function st1_mean(; hydro)
+# shift: the bed and the step are lifted by shift dz against the layers (one layer more), same geometry and dz
+function st1_mean(; hydro, shift=0.0)
     dx = ST1_STEP / ST1_RESOLUTION
     dt = 0.4 * dx / 0.25
     length_m, x_step = 70 * ST1_STEP, 40 * ST1_STEP
-    nx, nz = round(Int, length_m / dx), round(Int, ST1_DEPTH / dx)
+    nx, nz = round(Int, length_m / dx), round(Int, ST1_DEPTH / dx) + (shift > 0 ? 1 : 0)
+    lift = shift * dx            # m, dz = dx
     xc = ((1:nx) .- 0.5) .* dx
-    cfg = ModelConfig(; length=length_m, depth=ST1_DEPTH, nx=nx, nz=nz, dt=dt, use_hydrostatic=hydro, nu=1e-6,
+    cfg = ModelConfig(; length=length_m, depth=nz * dx, nx=nx, nz=nz, dt=dt, use_hydrostatic=hydro, nu=1e-6,
         turbulence_closure="k_epsilon", bed_roughness_length=ST1_Z0, rayleigh_damping=0.0, apply_froude_limiter=false,
         momentum_advection_scheme="tvd2", wetting_drying=true, implicit_vertical_terms=true, theta=1.0,
-        bed_level=[x < x_step ? ST1_STEP : 0.0 for x in xc], write_plots=false)
+        bed_level=[(x < x_step ? ST1_STEP : 0.0) + lift for x in xc], write_plots=false)
     model = Model(cfg)
     fill!(model.state.rho, 1000.0)
     refresh_density_metadata!(model)
-    initialize_water_level!(model, fill(ST1_DEPTH, nx))
-    set_x_inflow_outflow!(model, ones(nz); left_discharge=ST1_Q, right_level=0.0, right_free=true,
+    initialize_water_level!(model, fill(ST1_DEPTH + lift, nx))
+    set_x_inflow_outflow!(model, ones(nz); left_discharge=ST1_Q, right_level=ST1_DEPTH + lift - nz * dx, right_free=true,
         right_relaxation_time=ST1_RELAXATION)
     steps = round(Int, ST1_TIME / dt)
     start = steps - round(Int, ST1_AVERAGE / dt)
@@ -146,5 +150,11 @@ end
         # without the non-hydrostatic pressure nothing limits w at the step
         _, w_hy = st1_mean(; hydro=true)
         @test w_hy > ST1_W_RATIO_MIN * w_nh
+    end
+
+    @testset "test_validate_backward_step_reattachment_shifted_bed" begin
+        # a lowest wet cell of 0.1 dz: the equilibrium wall function on the wall cell above it keeps xR (section 29)
+        xr_shift, _ = st1_mean(; hydro=false, shift=ST1_SHIFT)
+        @test abs(xr_shift - xr_nh) < ST1_SHIFT_RTOL * xr_nh
     end
 end

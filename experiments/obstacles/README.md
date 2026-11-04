@@ -88,8 +88,8 @@ is not public.
 
 ![Step](figures/recirculation_step.png)
 
-At S/10 the non-hydrostatic run gives xR = 6.99 S, steady (std 0.10 S). The hydrostatic run gives 5.67 S but does not
-settle (std 1.3 S), and its surface dips behind the step.
+At S/10 the non-hydrostatic run gives xR = 7.22 S, steady (std 0.10 S). The hydrostatic run gives 5.69 S but does not
+settle (std 1.2 S), and its surface dips behind the step.
 
 ![Hydrostatic and non-hydrostatic flow behind the step](figures/recirculation_step.gif)
 
@@ -97,24 +97,19 @@ settle (std 1.3 S), and its surface dips behind the step.
 
 | grid (dx, dz) | xR / S | std |
 |---|---|---|
-| S/5, S/5 | 6.16 | 0.05 |
-| S/10, S/10 | 6.99 | 0.10 |
-| S/10, S/20 | 7.41 | 0.22 |
-| S/20, S/10 | 6.94 | 0.03 |
+| S/5, S/5 | 6.07 | 0.09 |
+| S/10, S/10 | 7.22 | 0.10 |
+| S/10, S/20 | 7.73 | 0.22 |
+| S/20, S/10 | 7.18 | 0.03 |
 
-The length depends on dz more than on dx and moves away from the LES. The agreement of the coarse grid (6.16 S) is a
-cancellation of errors; xR is within 20 % of the LES.
-
-These grids have the bed on a layer interface. Shifted against the layers, so that the lowest wet cell is shaved, the
-step at S/10 gives 7.02 S (a quarter of a layer), 7.11 S (half), 7.37 S (three quarters), but 12.47 S and no steady
-state with a cell of 10 % of dz. The weir goes from 5.29 S to 4.15 S at half a layer. The suspect is the bed cell of
-k-epsilon: its k and eps come from the local velocity, so k goes to zero at reattachment, and eps follows the thickness
-of the cell (section 28).
+The length depends on dz more than on dx and moves away from the LES. The agreement of the coarse grid (6.07 S) is a
+cancellation of errors; xR is within 20 % of the LES except on the finest dz (26 %). These runs use the equilibrium wall
+function of issue #62 (below); with the former local wall function they gave 6.16, 6.99, 7.41 and 6.94 S.
 
 ![Boundary](figures/recirculation_boundary.png)
 
 An impulsive start excites the quarter-wave mode of the reach (7.3 s). With a fixed level at the outlet xR swings from
-2.9 to 10 S and settles after about 40 s; the relaxed outflow (issue #54) removes this.
+2.9 to 10.7 S and settles after about 40 s; the relaxed outflow (issue #54) removes this.
 
 Hydrostatic runs with a fixed level can blow up. The swing of the discharge lifts the jet to the Courant limit of the
 explicit advection (0.625 m/s at this time step). A prescribed velocity at the inlet even feeds the mode (about 1.4 per
@@ -123,8 +118,45 @@ period, in the non-hydrostatic mode as well); a prescribed discharge damps it. U
 
 ![Weir](figures/recirculation_weir.png)
 
-A trapezoidal weir of height S with a 1:1 downstream face (no reference): non-hydrostatic xR = 5.29 S from the toe
-(see above for the shifted bed); hydrostatic: no reverse flow at all.
+A trapezoidal weir of height S with a 1:1 downstream face (no reference): non-hydrostatic xR = 5.23 S from the toe;
+hydrostatic: no reverse flow at all.
+
+Bed cell of k-epsilon (issue #62)
+---------------------------------
+
+Run: `julia --project experiments/obstacles/plot_bed_cell.jl runs` (all cases one after the other, about 10 h; or in
+parallel with `run <case> <res> <f> <wall function>`), then `figures`, `channel` and `animation`. Theory and tables:
+[docs/TESTS_TECHNICAL_DOCUMENTATION.md](../../docs/TESTS_TECHNICAL_DOCUMENTATION.md), section 29.
+
+On the z-level grid the bed cuts the lowest wet cell to any thickness. The same step and weir are run with the bed
+lifted by a fraction f of dz against the layers, so the lowest wet cell of the step is (1 - f) dz thick. Wall functions:
+`local` (k and eps of the lowest wet cell from u* of its own velocity, the former default), `equilibrium@θ` (velocity
+scale C_mu^(1/4) k^(1/2) of the wall cell, the lowest cell at least θ dz thick; the cells below take its values and the
+bed friction acts on it). The default is `equilibrium@0.3`.
+
+![Shift](figures/bed_cell_shift.png)
+
+With a cell of 0.1 dz the local wall function makes the step 40-80 % longer and unsteady. The equilibrium formulation
+alone (θ = 0) does not help: the thin cell is the cause. With θ = 0.3 the step stays within 6 % (S/5) and 1 % (S/10) of
+the run with the bed on an interface, and the weir follows the local wall function within 3 %. θ = 0.5 puts the
+threshold on the half-shaved cells (f = 0.5), and its jumps of the wall height along the weir slope shorten the weir
+recirculation.
+
+![Profiles](figures/bed_cell_profiles.png)
+
+Profiles 1, 3, 5 and 7 S behind the step (S/10): with the default the profiles at f = 0.9 lie on those at f = 0; with the
+local wall function k, eps and nu_t collapse.
+
+![Fields](figures/bed_cell_fields.png)
+
+![Step animation](figures/bed_cell_step.gif)
+
+The step at f = 0.9, local (top) against the default (bottom).
+
+![Channel](figures/bed_cell_channel.png)
+
+Uniform open channel (section 27): both wall functions agree with the bed on an interface; at f = 0.9 the default keeps
+max nu_t within 1 %, the local wall function is 5 % above.
 
 Limits
 ------
