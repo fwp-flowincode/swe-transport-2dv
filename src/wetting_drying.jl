@@ -74,6 +74,8 @@ mutable struct WetDryState{T<:Real}
     gate_edge::Vector{T}         # m, nx+1: lower edge of a sluice gate above the grid bottom (Inf: no gate; issue #48)
     gate_contraction::Vector{T}  # -, nx+1: contraction coefficient of the gate opening (1: none)
     gate_active::Vector{Bool}    # nx+1: the gate cuts the flow area of the face in this step (upstream level above it)
+    left_k::Any     # nothing (zero gradient), or k (m^2/s^2, length nz) of the inflow at the left boundary face (#42)
+    left_eps::Any   # nothing (zero gradient), or eps (m^2/s^3, length nz) of the inflow at the left boundary face (#42)
 end
 
 function WetDryState(cfg::ModelConfig; T::Type{<:Real}=Float64)
@@ -88,7 +90,8 @@ function WetDryState(cfg::ModelConfig; T::Type{<:Real}=Float64)
         zeros(T, nz, nx), zeros(T, nz, nx), zeros(T, nx + 1), zeros(T, nx + 1), zeros(T, nx), zeros(T, nx), zeros(T, nx),
         zeros(T, nx), zeros(T, nx), zeros(T, nx), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz),
         zeros(T, nz, nx + 1), zeros(T, nz + 1, nx), zeros(T, nz, nx), zeros(T, nz, nx), zeros(T, nz + 1, nx), zeros(Int, nz, nx),
-        Int[], Int[], T[], T[], fill(T(-1), nz, nx + 1), 0.0, 0.0, 0, 0, nothing, fill(T(Inf), nx + 1), ones(T, nx + 1), fill(false, nx + 1))
+        Int[], Int[], T[], T[], fill(T(-1), nz, nx + 1), 0.0, 0.0, 0, 0, nothing, fill(T(Inf), nx + 1), ones(T, nx + 1), fill(false, nx + 1),
+        nothing, nothing)
 end
 
 """
@@ -1308,7 +1311,7 @@ function _wd_transport_density!(model::Model, wd::WetDryState)
         upup = qf > 0.0 ? f - 2 : f + 1
         has = 1 <= upup <= nx && 1 <= down <= nx && 1 < f <= nx && wet(k, upup) && wet(k, up) && wet(k, down)
         courant = has ? abs(qf) * dt / (dx * wd.h[k, up]) : 0.0
-        rho_f = (f == 1 && qf > 0.0 && rho_in !== nothing) ? rho_in :
+        rho_f = (f == 1 && qf > 0.0 && rho_in !== nothing) ? _inflow_value(rho_in, k) :
             _wd_face_density(rho[k, up], has ? rho[k, upup] : 0.0, has ? rho[k, down] : 0.0, courant, has, second)
         flux = dt / dx * qf * rho_f
         f > 1 && (M[k, f - 1] -= flux)
@@ -1447,11 +1450,12 @@ function _wd_turbulent_density_diffusion!(model::Model, wd::WetDryState, ke::KEp
 end
 
 # Upwind advection of the cell field phi with the step fluxes (increment form of _wd_transport_density!), into `out`;
-# the inflow at the left boundary carries the value of the first cell (zero gradient). With ke.horizontal_diffusion also
+# the inflow at the left boundary carries `inflow[k]` (left_k / left_eps, issue #42), or without it the value of the first
+# cell (zero gradient). With ke.horizontal_diffusion also
 # the explicit horizontal eddy diffusion nu_t / sigma (sigma the Prandtl number of phi, -), conservative, through the open
 # faces between wet cells; each face gets at most half of WD_HORIZONTAL_DIFFUSION_MAX of the thinner cell.
 function _wd_advect_turbulence!(out::AbstractMatrix{<:Real}, phi::AbstractMatrix{<:Real}, model::Model, wd::WetDryState,
-    floor_value::Real, sigma::Real)
+    floor_value::Real, sigma::Real; inflow::Union{Nothing,AbstractVector{<:Real}}=nothing)
     cfg = model.config
     nz, nx, dt, dx = cfg.nz, cfg.nx, cfg.dt, model.dx
     q, W, M = wd.q, model.state.w, wd.mass
@@ -1462,7 +1466,8 @@ function _wd_advect_turbulence!(out::AbstractMatrix{<:Real}, phi::AbstractMatrix
         qf = q[k, f]
         qf == 0.0 && continue
         up = qf > 0.0 ? max(f - 1, 1) : min(f, nx)
-        flux = dt / dx * qf * phi[k, up]
+        value = (f == 1 && qf > 0.0 && inflow !== nothing) ? inflow[k] : phi[k, up]
+        flux = dt / dx * qf * value
         f > 1 && (M[k, f - 1] -= flux)
         f <= nx && (M[k, f] += flux)
     end
@@ -1517,8 +1522,8 @@ function _wd_k_epsilon_step!(model::Model, wd::WetDryState, ke::KEpsilonState)
             ke.buoyancy[kk, i] = -(nu_t[kk, i] / KE_SIGMA_RHO) * n2
         end
     end
-    _wd_advect_turbulence!(ke.k_adv, k, model, wd, KE_K_MIN, KE_SIGMA_K)
-    _wd_advect_turbulence!(ke.eps_adv, eps, model, wd, KE_EPS_MIN, KE_SIGMA_EPS)
+    _wd_advect_turbulence!(ke.k_adv, k, model, wd, KE_K_MIN, KE_SIGMA_K; inflow=wd.left_k)
+    _wd_advect_turbulence!(ke.eps_adv, eps, model, wd, KE_EPS_MIN, KE_SIGMA_EPS; inflow=wd.left_eps)
     copyto!(k, ke.k_adv)
     copyto!(eps, ke.eps_adv)
     lower, diag, upper, rhs, sol = ke.lower, ke.diag, ke.upper, ke.rhs, ke.sol
@@ -1574,9 +1579,7 @@ function _wd_k_epsilon_step!(model::Model, wd::WetDryState, ke::KEpsilonState)
                     source = p + max(gb, 0.0) + ke.cfk * pv
                     sink = ratio + max(-gb, 0.0) / k[kk, i]
                 else
-                    c3 = gb > 0 ? KE_C3_UNSTABLE : KE_C3_STABLE
-                    source = inv_t * (KE_C1 * (p + ke.cfe * pv) + c3 * max(gb, 0.0))
-                    sink = KE_C2 * inv_t
+                    source, sink = _ke_eps_source_sink(ke, p, gb, pv, inv_t, eps[kk, i])
                 end
                 if equilibrium && field === :k && j == 1
                     # wall cell (Launder & Spalding 1974; Versteeg & Malalasekera 2007, sec. 9.11): velocity scale

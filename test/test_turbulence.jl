@@ -474,4 +474,43 @@ end
         step_forward!(model)
         @test all(iszero, model.turbulence.veg_work)
     end
+
+    # Homogeneous stratified shear (Burchard & Baumert 1995): constant shear S and buoyancy frequency N, no transport.
+    # k and eps reach structural equilibrium (k/eps constant) and then grow or decay exponentially; k is stationary at
+    # Ri = N^2/S^2 = Ri_st = sigma_rho (C2 - C1)/(C2 - C3) (issue #42). The 0D model uses the source and sink of the
+    # closure (_ke_eps_source_sink) with T = k/eps (realizability off: the bound changes the time scale, not Ri_st).
+    KE_HS_SHEAR = 1.0             # 1/s, S
+    KE_HS_TIME = 200.0            # s, 200 shear times: structural equilibrium reached
+    KE_HS_DT = 1e-3               # s, explicit Euler step of the 0D model (relative change per step < 1e-2)
+    KE_HS_RI_OFFSET = 0.1         # -, Ri = (1 -+ offset) Ri_st
+    function ke_homogeneous_growth(c3, ri)
+        ke = KEpsilonState(2, 1; realizability=false, c3_stable=c3)
+        k, eps = 1e-4, 1e-5
+        n2 = ri * KE_HS_SHEAR^2
+        lnk0 = 0.0
+        steps = round(Int, KE_HS_TIME / KE_HS_DT)
+        for n in 1:steps
+            nu_t = KE_C_MU_VALUE * k^2 / eps
+            p = nu_t * KE_HS_SHEAR^2
+            gb = -(nu_t / SweTransport2DV.KE_SIGMA_RHO) * n2   # m^2/s^3, G = -B < 0 (stable)
+            source, sink = SweTransport2DV._ke_eps_source_sink(ke, p, gb, 0.0, eps / k, eps)
+            dk = p + gb - eps
+            eps += KE_HS_DT * (source - sink * eps)
+            k += KE_HS_DT * dk
+            n == steps ÷ 2 && (lnk0 = log(k))
+        end
+        return (log(k) - lnk0) / (KE_HS_TIME / 2)   # 1/s, growth rate of k in the second half
+    end
+
+    @testset "test_verify_k_epsilon_stationary_richardson_number" begin
+        @test SweTransport2DV.ke_c3_for_richardson(SweTransport2DV.KE_SIGMA_RHO * (KE_C2_VALUE - KE_C1_VALUE) / KE_C2_VALUE) ≈ 0.0 atol = TOL_IDENTITY
+        @test SweTransport2DV.KE_C3_STABLE_RI025 ≈ SweTransport2DV.ke_c3_for_richardson(0.25)
+        for c3 in (0.0, SweTransport2DV.KE_C3_STABLE_RI025)
+            ri_st = SweTransport2DV.KE_SIGMA_RHO * (KE_C2_VALUE - KE_C1_VALUE) / (KE_C2_VALUE - c3)
+            @test ke_homogeneous_growth(c3, (1 - KE_HS_RI_OFFSET) * ri_st) > 0
+            @test ke_homogeneous_growth(c3, (1 + KE_HS_RI_OFFSET) * ri_st) < 0
+        end
+        @test_throws ArgumentError KEpsilonState(4, 4; c3_stable=KE_C2_VALUE)
+        @test KEpsilonState(4, 4).c3_stable == SweTransport2DV.KE_C3_STABLE   # default unchanged (0)
+    end
 end

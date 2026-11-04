@@ -1794,6 +1794,91 @@ Limitations: the wall cell is at least $\theta\Delta z$ thick, so the wall resol
 $z_1=0.15\,\Delta z$ and $1.3\,\Delta z$ with the position of the bed; a scalable or low-Reynolds treatment of the
 viscous sublayer is not included ($z_1^+$ of 2-8 behind the step, section 28). $\theta$ comes from one step and one weir.
 
+### 30) Stratified mixing layer behind a splitter plate (issue #42)
+
+**Case.** Two streams meet at the end of a horizontal plate of zero thickness, after the splitter plate test of the
+Delft3D-FLOW Validation Document (2008): below the plate 0.306 m of water of 43.3 ppt at 0.30 m/s, above it 0.268 m of
+22.6 ppt at 0.50 m/s (densities 1031.2 and 1015.3 kg/m³, Eckart 1958 at 20 °C); 40 m reach, flat bed with Chézy
+65 m$^{1/2}$/s ($z_0=4.3\cdot10^{-5}$ m for the wall function), level 0.574 m at the plate, relaxed outflow to 0.570 m
+($\tau=20$ s); k-epsilon with buoyancy terms, 6 min, means over the last 2 min. `experiments/splitter_plate/` (README).
+
+**Inflow per layer.** `set_x_inflow_outflow!` takes `left_rho` as one value per layer and `left_k`, `left_eps` (one value
+per layer, both or neither; wetting and drying with k-epsilon): the upwind flux through the inlet face carries the
+prescribed value of its layer instead of that of the first cell; the density bounds of the monotone transport include
+the inflow values. The plate is not in the domain (option B of the issue): the inlet gets $u$, $k$ and $\varepsilon$ at
+the end of two 4 m precursor channels (lower stream: rough bed under a free-slip plate; upper stream: free-slip bed, the
+frictionless plate of the issue, log profile from 0.3 m/s). Each precursor inlet carries the log profile with $k$ and
+$\varepsilon$ in equilibrium with it (stress $u_*^2(1-z/h)$, mixing length $\kappa z$; Rodi 1993):
+$k=u_*^2(1-z/h)/\sqrt{C_\mu}$, $\varepsilon=u_*^3(1-z/h)/(\kappa z)$.
+
+**Plate height from the measurements.** The measured profiles (extracted visually from the figures of the validation
+document; `data/*.csv`, about one pixel accuracy) put the density interface (relative density 0.5) at 0.307 and 0.305 m
+at 2 and 5 m, and the measured velocity integrates to 0.094/0.092 m²/s below it (mean 0.31/0.30 m/s) and 0.133/0.131
+m²/s above it (0.50/0.49 m/s). The issue had estimated 0.250 m below and 0.324 m above the plate; with those streams
+the model interface stayed at 0.25 m.
+
+**Grid.** 41 layers of 13.9 mm, 22 below the plate (the plate on a layer interface); the top layer is open above and holds
+the surface over the whole reach. $\Delta x$ = 5 and 10 cm, advective Courant number 0.6.
+
+**Results** (means; measured values extracted from the figures):
+
+| station | interface (rel. density 0.5), model / measured | mean $u$ below 0.2 m, model / measured | $Ri_g$ at the interface | $k$ at the interface (m²/s²) |
+|---|---|---|---|---|
+| 2 m | 0.305 / 0.307 m | 0.278 / 0.282 m/s | 0.16 | $6.5\cdot10^{-5}$ |
+| 5 m | 0.306 / 0.305 m | 0.274 / 0.277 m/s | 0.21 | $7\cdot10^{-6}$ |
+| 10 m | 0.309 / 0.305 m | 0.269 / 0.286 m/s | 0.25 | $2\cdot10^{-6}$ |
+| 40 m | 0.327 / 0.287 m | 0.253 / 0.287 m/s | 0.17 | $3.9\cdot10^{-5}$ |
+
+$\Delta x$ = 5 and 10 cm agree within $10^{-3}$ m/s and 0.011 in relative density, hydrostatic and non-hydrostatic within
+$10^{-4}$ m/s and $6\cdot10^{-4}$ (the mean flow has no vertical dynamics). Outflow and inflow agree within $10^{-4}$ over
+the last 2 min; the salt budget closes with the boundary fluxes to $10^{-11}$ of the salt inflow; the density stays
+within the two inflow densities. The density interface (relative density 0.1 to 0.9) is 11 mm thick at the inlet and
+34-38 mm from 2 m on.
+
+**Analysis.** Up to 10 m the model follows the measured velocity, density and the lower-stream $k$. Two differences:
+the measured $k$ has a maximum of $2$-$5\cdot10^{-4}$ m²/s² in the mixing layer, where the model $k$ collapses; and the
+model's lower stream slows down along the reach (0.278 to 0.253 m/s), while the measured one keeps 0.28-0.29 m/s, so
+that it thickens and the interface rises to 0.327 m at 40 m. In homogeneous stratified shear $k$ is stationary when
+$P(C_2-C_1)=B(C_2-C_3)$, i.e. at the gradient Richardson number
+
+$$Ri_{st}=\sigma_\rho\,\frac{C_2-C_1}{C_2-C_3}$$
+
+(Burchard & Baumert 1995), 0.175 for $C_3=0$ and $\sigma_\rho=0.7$. The interface has $Ri_g$ = 0.16-0.36 (layer by
+layer), mostly above, so the turbulence decays there ($\nu_t\approx2\cdot10^{-7}$ m²/s at 10 m). To keep the lower stream
+moving against its bed stress (about $2\cdot10^{-4}$ m²/s²), the interface would have to pass that stress at a shear of
+about 2 1/s, i.e. $\nu_t\approx10^{-4}$ m²/s. The measurements show this momentum exchange while the density stays
+stratified; at high $Ri$ momentum is exchanged more efficiently than mass (internal waves), which one constant turbulent
+Schmidt number cannot represent.
+
+**Sensitivity** ($\Delta x$ = 10 cm, non-hydrostatic; at 40 m):
+
+| run | interface | mean $u$ below 0.2 m | interface thickness |
+|---|---|---|---|
+| measured | 0.287 m | 0.287 m/s | |
+| as the issue (frictionless plate, $C_3=0$, `tvd2` density transport) | 0.327 m | 0.253 m/s | 38 mm |
+| rough plate ($z_0$ on both sides) | 0.309 m | 0.253 m/s | 79 mm |
+| $C_3$ = 0.58 in stable stratification ($Ri_{st}=0.25$) | 0.330 m | 0.253 m/s | 71 mm |
+| `upwind1` density transport | 0.324 m | 0.253 m/s | 49 mm |
+
+- Rough plate: the lower stream is then a duct between two rough walls; unstratified, it is symmetric about its
+  mid-height (a plane without shear), so its precursor is an open channel of half the depth, mirrored. The upper stream
+  gets the measured level of $k$ (up to $5\cdot10^{-4}$ m²/s² at 5 m), but the plate wake (zero shear at the plate, where
+  the densities meet, $Ri_g>1$) is too deep at 2 m.
+- $C_3$: `KEpsilonState(c3_stable=...)` (default 0, Rodi 1987); `ke_c3_for_richardson(Ri)` gives
+  $C_3=C_2-\sigma_\rho(C_2-C_1)/Ri$, 0.576 for 0.25. For $C_3>0$ the stable term $C_3G<0$ is an implicit (Patankar) sink
+  of $\varepsilon$. The value $C_3=-0.4$ of Burchard & Baumert (1995) and Umlauf & Burchard (2003) belongs to closures
+  with Richardson-dependent stability functions; with a constant $\sigma_\rho$ it gives $Ri_{st}=0.145$.
+- `upwind1`: the numerical mixing of the density transport thickens the interface but does not move the lower stream.
+
+None of the three changes the lower stream: the missing process is the momentum flux through the stratified interface.
+Candidates are a background (internal-wave) viscosity and diffusivity with a Prandtl number of about 10 (Large et al.
+1994) or Richardson-dependent stability functions (Schumann & Gerz 1995; Canuto et al. 2001); both change the closure for
+every stratified case and are left to a separate issue.
+
+Limitations: option B (nothing downstream acts on the streams above the end of the plate); level drop 2.2 mm against the
+4 mm of the test (bed friction alone gives about 2.6 mm), and the relaxed outflow keeps the outflow level 2.9 mm above
+its target in the steady state; the measurements are extracted from figures, not the original data.
+
 ## Test-by-test documentation
 
 ### test_verify_state_shapes
@@ -2710,6 +2795,10 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\thinspace p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). 
   the equilibrium wall function: on an interface the same as the local one and $k_1\sqrt{C_\mu}=gSH$ ($5\cdot10^{-3}$); with
   the bed $0.9\,\Delta z$ above an interface the depth within $10^{-3}$ and max $\nu_t$ within 2 % of the unshifted
   channel, the shaved cell has the $k$ and $\varepsilon$ of the wall cell; an unknown wall function is rejected.
+- `test_verify_k_epsilon_stationary_richardson_number` (section 30): homogeneous stratified shear, 0D with the source and
+  sink of the closure ($T=k/\varepsilon$): after 100 shear times $k$ grows at $Ri=0.9\,Ri_{st}$ and decays at
+  $1.1\,Ri_{st}$, for $C_3=0$ ($Ri_{st}=0.175$) and $C_3=0.576$ ($Ri_{st}=0.25$); `ke_c3_for_richardson` inverts the
+  relation; $C_3\ge C_2$ is rejected; the default stays 0.
 
 ### Wetting and drying tests (`test_wetting_drying.jl`, section 18)
 
@@ -2957,6 +3046,23 @@ Time-dependent discharge and the mode of the reach (`test_open_boundaries.jl`, i
 - `test_validate_reach_mode_decays_with_discharge_inlet`: same reach with a ramped discharge: the swing decays by more
   than 0.68 per period (measured 0.46; the head loss at the step adds to the estimate), no warning. No warning with the
   relaxed outflow.
+
+### Splitter plate tests (`test_splitter_plate.jl`, section 30)
+
+Reduced splitter plate: 4 m channel, 4 + 4 layers of 5 cm, 0.3 and 0.5 m/s, 1031 and 1016 kg/m³, k-epsilon, relaxed
+outflow.
+
+- `test_verify_inflow_density_per_layer_enters_the_first_cell`: one transport step with and without `left_rho` per layer
+  from the same state: the first cell differs by $\Delta t/\Delta x\,q_k(\rho_{in,k}-\rho_{1,k})/h$ to round-off, no other
+  cell differs. (A steady run is no test of this: the density difference drives a baroclinic flow at the interface.)
+- `test_verify_inflow_k_eps_per_layer_enter_the_first_cell`: the same for the advection of $k$ and $\varepsilon$ with
+  `left_k`, `left_eps`.
+- `test_verify_two_streams_density_bounds_and_salt_budget`: 60 s: the density stays within the two inflow densities in
+  every step, and the mass of the density excess over the upper stream changes by the boundary fluxes within
+  $10^{-9}$ of the inflow (measured to round-off).
+- `test_validate_two_streams_steady_discharge`: mean outflow over the last 20 s within 1 % of the inflow.
+- `test_verify_inflow_per_layer_argument_checks`: wrong lengths, `left_k` without `left_eps`, non-positive values and
+  `left_k` without k-epsilon are rejected; `clear_x_inflow_outflow!` clears them.
 
 ## Additional validation scripts and literature basis
 

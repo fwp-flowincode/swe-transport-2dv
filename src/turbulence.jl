@@ -44,7 +44,42 @@ const KE_C2_VALUE = KE_C2
 const KE_SIGMA_K = 1.0          # -
 const KE_SIGMA_EPS = 1.3        # -
 const KE_SIGMA_RHO = 0.7        # -, turbulent Schmidt number of density (Rodi 1993)
-const KE_C3_STABLE = 0.0        # -, Rodi (1987)
+const KE_C3_STABLE = 0.0        # -, Rodi (1987); default of KEpsilonState.c3_stable
+# Stationary gradient Richardson number of homogeneous stratified shear (k stationary, k/eps in structural equilibrium):
+# P (C2 - C1) = B (C2 - C3) with B = -G = nu_t N^2 / sigma_rho, so Rf_st = (C2 - C1)/(C2 - C3) and
+# Ri_st = sigma_rho (C2 - C1)/(C2 - C3) (Burchard & Baumert 1995, J. Geophys. Res. 100, 8523-8540; equation number not
+# checked). With the constant sigma_rho = 0.7: C3 = 0 gives Ri_st = 0.175, above which k decays; Ri_st = 0.25 (the
+# value of measurements and LES; Umlauf & Burchard 2003, J. Mar. Res. 61, 235-265) needs C3 = C2 - sigma_rho (C2 - C1)
+# / 0.25 = 0.576 (ke_c3_for_richardson). WHY not the C3 = -0.4 of those papers: it belongs to closures whose stability
+# functions let the turbulent Prandtl number grow with Ri; with a constant sigma_rho it gives Ri_st = 0.145.
+const KE_C3_STABLE_RI025 = KE_C2 - KE_SIGMA_RHO * (KE_C2 - KE_C1) / 0.25   # -, 0.576
+
+"""
+    ke_c3_for_richardson(ri_st) -> Float64
+
+C3 of the eps equation in stable stratification (-) that makes `ri_st` (-, > 0) the stationary gradient Richardson
+number of homogeneous stratified shear with the constant turbulent Schmidt number KE_SIGMA_RHO:
+C3 = C2 - sigma_rho (C2 - C1) / Ri_st (Burchard & Baumert 1995). Ri_st = 0.25 gives 0.576.
+"""
+ke_c3_for_richardson(ri_st::Real) = (ri_st > 0 || throw(ArgumentError("ri_st must be > 0"));
+    KE_C2 - KE_SIGMA_RHO * (KE_C2 - KE_C1) / ri_st)
+
+# Source (m^2/s^4) and implicit sink rate (1/s) of the eps equation, with the production p (m^2/s^3), the buoyancy term
+# gb = -B (m^2/s^3, > 0 unstable), the vegetation work pv (m^2/s^3), the inverse time scale inv_t (1/s) and eps (m^2/s^3):
+#   eps/T (C1 (p + C_fe pv) + C3 G - C2 eps),  C3 = KE_C3_UNSTABLE where G > 0, ke.c3_stable where G < 0.
+# WHY the sink form for C3 G < 0 (stable stratification with c3_stable > 0): implicit (Patankar), eps stays positive.
+@inline function _ke_eps_source_sink(ke, p, gb, pv, inv_t, eps)
+    source = inv_t * KE_C1 * (p + ke.cfe * pv)
+    sink = KE_C2 * inv_t
+    if gb > 0
+        source += inv_t * KE_C3_UNSTABLE * gb
+    elseif ke.c3_stable > 0
+        sink += inv_t * ke.c3_stable * (-gb) / eps
+    else
+        source += inv_t * ke.c3_stable * gb   # >= 0 for c3_stable <= 0
+    end
+    return source, sink
+end
 const KE_C3_UNSTABLE = 1.0      # -
 const KE_VEG_CFK = 1.0          # -, Lopez & Garcia (1997), p. 58
 const KE_VEG_CFE = 1.33         # -, Lopez & Garcia (1997), p. 58; = (C2/C1) C_fk
@@ -108,14 +143,16 @@ mutable struct KEpsilonState{T<:Real}
     horizontal_diffusion::Bool  # wetting-drying step: horizontal eddy diffusion of u, k and eps on (default); false: off
     wall_function::Symbol       # wetting-drying step, bed cell (issue #62): :local (u* of the local velocity) or :equilibrium
     wall_cell_min_fraction::Float64   # -, equilibrium wall function: smallest wall-cell thickness over dz
+    c3_stable::Float64          # -, C3 of the eps equation in stable stratification (issue #42; see KE_C3_STABLE)
 end
 
 function KEpsilonState(nz::Int, nx::Int; T::Type{<:Real}=Float64, cfk::Real=KE_VEG_CFK, cfe::Real=KE_VEG_CFE, surface_condition::Symbol=:rodi,
     realizability::Bool=true, horizontal_diffusion::Bool=true, wall_function::Symbol=:equilibrium,
-    wall_cell_min_fraction::Real=KE_WALL_CELL_MIN_FRACTION)
+    wall_cell_min_fraction::Real=KE_WALL_CELL_MIN_FRACTION, c3_stable::Real=KE_C3_STABLE)
     nz >= 2 || throw(ArgumentError("k-epsilon requires nz >= 2"))
     wall_function in (:local, :equilibrium) || throw(ArgumentError("wall_function must be :local or :equilibrium"))
     0 <= wall_cell_min_fraction < 1 || throw(ArgumentError("wall_cell_min_fraction must be in [0, 1)"))
+    (isfinite(c3_stable) && c3_stable < KE_C2) || throw(ArgumentError("c3_stable must be finite and below C2"))
     surface_condition in (:zero_flux, :rodi) || throw(ArgumentError("surface_condition must be :zero_flux or :rodi"))
     k = fill(T(KE_K_INIT), nz, nx)
     eps = fill(T(KE_C_MU * KE_K_INIT^2 / KE_NU_T_INIT), nz, nx)
@@ -123,7 +160,7 @@ function KEpsilonState(nz::Int, nx::Int; T::Type{<:Real}=Float64, cfk::Real=KE_V
     z() = zeros(T, nz, nx)
     return KEpsilonState{T}(k, eps, nu_t, z(), z(), z(), z(), z(), z(), zeros(T, nx), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz),
         Float64(cfk), Float64(cfe), surface_condition, realizability, horizontal_diffusion, wall_function,
-        Float64(wall_cell_min_fraction))
+        Float64(wall_cell_min_fraction), Float64(c3_stable))
 end
 
 """
@@ -289,9 +326,7 @@ function k_epsilon_step!(ke::KEpsilonState, u::AbstractMatrix{<:Real}, w::Abstra
                     source = p + max(gb, 0.0) + ke.cfk * pv
                     sink = ratio + max(-gb, 0.0) / k[kk, i]               # implicit: eps/k and negative buoyancy
                 else
-                    c3 = gb > 0 ? KE_C3_UNSTABLE : KE_C3_STABLE
-                    source = inv_t * (KE_C1 * (p + ke.cfe * pv) + c3 * max(gb, 0.0))
-                    sink = KE_C2 * inv_t
+                    source, sink = _ke_eps_source_sink(ke, p, gb, pv, inv_t, eps[kk, i])
                 end
                 lower[j] = -kd
                 upper[j] = -ku

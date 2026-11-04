@@ -363,7 +363,7 @@ mutable struct Model{T<:Real}
     x_boundary_eta_right::Any   # nothing, or the prescribed water level eta_R (m) at the right boundary face
     x_boundary_q_left::Any      # nothing, or the discharge q (m^2/s, or a function of t (s)) of the left boundary face (profile = shape)
     x_boundary_eta_left::Any    # nothing, or the level eta_L (m) of the left boundary face (supercritical inflow, #46)
-    x_boundary_rho_left::Any    # nothing, or the density (kg/m^3) of the inflow at the left boundary face (#47)
+    x_boundary_rho_left::Any    # nothing, or the density (kg/m^3, scalar or one per layer) of the inflow at the left boundary face (#47, #42)
     x_boundary_right_free::Bool # free outflow at the right boundary face (issue #46)
     x_boundary_eta_free::Float64  # m, radiated level of the free outflow face (_update_free_outflow_level!)
     x_boundary_free_dirichlet::Tuple{Float64,Float64}   # (m, -), effective level and weight of the free outflow this step
@@ -427,8 +427,8 @@ end
 function _include_inflow_density_in_bounds!(model::Model)
     rho_in = model.x_boundary_rho_left
     rho_in === nothing && return nothing
-    model.rho_min_init = min(model.rho_min_init, rho_in)
-    model.rho_max_init = max(model.rho_max_init, rho_in)
+    model.rho_min_init = min(model.rho_min_init, minimum(rho_in))
+    model.rho_max_init = max(model.rho_max_init, maximum(rho_in))
     return nothing
 end
 
@@ -901,8 +901,10 @@ Fr > 1, needs both; for subcritical inflow prescribe the discharge only). Variab
 (the fixed grid has the depth H at every face). In the wetting-drying mode `left_discharge` can be a function q(t)
 (issue #61; q in m^2/s, t in s, the model time of the end of the step), e.g. a ramp: against a fixed level an impulsive
 start excites the mode of the reach (docs section 28). `left_rho` (kg/m^3; issue #47, wetting and drying only): density of the
-inflowing water (otherwise the inflow takes the density of the first cell); it widens the bounds of the monotone
-transport, so a new extreme is not clipped.
+inflowing water, one value or one per layer (issue #42; otherwise the inflow takes the density of the first cell); it
+widens the bounds of the monotone transport, so a new extreme is not clipped. `left_k` (m^2/s^2) and `left_eps`
+(m^2/s^3), one value per layer, both or neither (issue #42; wetting and drying with k-epsilon only): k and eps carried by
+the inflow; without them the inflow carries the values of the first cell (zero gradient).
 
 At the right boundary face a wall, a zero-gradient velocity (`open_right=true`), a prescribed velocity `right_profile`
 (m/s, length nz), a prescribed water level `right_level` (m, surface elevation eta at the boundary face x = L) or a free
@@ -933,7 +935,9 @@ function set_x_inflow_outflow!(
     left_profile::AbstractVector{<:Real};
     left_discharge::Union{Nothing,Real,Function}=nothing,
     left_level::Union{Nothing,Real}=nothing,
-    left_rho::Union{Nothing,Real}=nothing,
+    left_rho::Union{Nothing,Real,AbstractVector{<:Real}}=nothing,
+    left_k::Union{Nothing,AbstractVector{<:Real}}=nothing,
+    left_eps::Union{Nothing,AbstractVector{<:Real}}=nothing,
     open_right::Bool=true,
     right_profile::Union{Nothing,AbstractVector{<:Real}}=nothing,
     right_level::Union{Nothing,Real}=nothing,
@@ -960,6 +964,7 @@ function set_x_inflow_outflow!(
     model.x_boundary_q_left = left_discharge isa Real ? Float64(left_discharge) : left_discharge
     model.x_boundary_eta_left = left_level === nothing ? nothing : Float64(left_level)
     _set_inflow_density!(model, left_rho)
+    _set_inflow_turbulence!(model, left_k, left_eps)
     _set_right_boundary!(model, open_right, right_profile, right_level, right_free, right_relaxation_time)
     # WHY: the discharge scaling uses the level of time n in ws.eta_old (set by every step); before the first step it
     # is the initial level
@@ -970,11 +975,12 @@ end
 
 """
     set_x_inflow_outflow!(model, left_velocity::Function; open_right=false, right_profile=nothing, right_level=nothing,
-                          right_free=false, right_relaxation_time=nothing)
+                          right_free=false, right_relaxation_time=nothing, left_rho=nothing, left_k=nothing,
+                          left_eps=nothing)
 
 Wetting-drying mode: time-dependent velocity at the left boundary face, `left_velocity(t)` (m/s; scalar or one value per
-layer) at the model time t (s) of the end of each step; dry layers of the face carry no flow. Right boundary as in the
-method with a velocity profile.
+layer) at the model time t (s) of the end of each step; dry layers of the face carry no flow. Right boundary, inflow
+density and inflow k and eps as in the method with a velocity profile.
 """
 function set_x_inflow_outflow!(
     model::Model,
@@ -984,7 +990,9 @@ function set_x_inflow_outflow!(
     right_level::Union{Nothing,Real}=nothing,
     right_free::Bool=false,
     right_relaxation_time::Union{Nothing,Real}=nothing,
-    left_rho::Union{Nothing,Real}=nothing,
+    left_rho::Union{Nothing,Real,AbstractVector{<:Real}}=nothing,
+    left_k::Union{Nothing,AbstractVector{<:Real}}=nothing,
+    left_eps::Union{Nothing,AbstractVector{<:Real}}=nothing,
 )
     model.wetdry === nothing && throw(ArgumentError("a time-dependent boundary velocity requires ModelConfig(wetting_drying=true)"))
     model.wetdry.left_velocity = left_velocity
@@ -992,6 +1000,7 @@ function set_x_inflow_outflow!(
     model.x_boundary_q_left = nothing
     model.x_boundary_eta_left = nothing
     _set_inflow_density!(model, left_rho)
+    _set_inflow_turbulence!(model, left_k, left_eps)
     _set_right_boundary!(model, open_right, right_profile, right_level, right_free, right_relaxation_time)
     return model
 end
@@ -1010,11 +1019,36 @@ end
 # cell without left_rho); the transport of the other modes has none (all outer faces closed for the constituent).
 function _set_inflow_density!(model::Model, left_rho)
     if left_rho !== nothing
-        isfinite(left_rho) || throw(ArgumentError("left_rho must be finite"))
+        all(isfinite, left_rho) || throw(ArgumentError("left_rho must be finite"))
+        left_rho isa AbstractVector && length(left_rho) != model.config.nz &&
+            throw(ArgumentError("left_rho needs one value per layer (length nz)"))
         model.wetdry === nothing && throw(ArgumentError("left_rho needs wetting_drying=true (the other transport schemes have no flux through the outer faces)"))
     end
-    model.x_boundary_rho_left = left_rho === nothing ? nothing : Float64(left_rho)
+    model.x_boundary_rho_left = left_rho === nothing ? nothing : left_rho isa Real ? Float64(left_rho) : Float64.(collect(left_rho))
     _include_inflow_density_in_bounds!(model)
+    return nothing
+end
+
+# Value of layer k of an inflow quantity given as one value or one value per layer.
+_inflow_value(value::Real, k::Int) = value
+_inflow_value(value::AbstractVector, k::Int) = value[k]
+
+# k (m^2/s^2) and eps (m^2/s^3) of the water entering through the left boundary face (issue #42), one value per layer.
+# WHY both or neither: a prescribed k with the eps of the first cell gives an arbitrary length scale k^(3/2)/eps.
+function _set_inflow_turbulence!(model::Model, left_k, left_eps)
+    (left_k === nothing) == (left_eps === nothing) || throw(ArgumentError("left_k and left_eps go together"))
+    if left_k !== nothing
+        (model.wetdry !== nothing && model.turbulence isa KEpsilonState) ||
+            throw(ArgumentError("left_k and left_eps need wetting_drying=true and turbulence_closure=\"k_epsilon\""))
+        nz = model.config.nz
+        (length(left_k) == nz && length(left_eps) == nz) || throw(ArgumentError("left_k and left_eps need one value per layer (length nz)"))
+        (all(v -> isfinite(v) && v > 0, left_k) && all(v -> isfinite(v) && v > 0, left_eps)) ||
+            throw(ArgumentError("left_k and left_eps must be finite and > 0"))
+    end
+    if model.wetdry !== nothing
+        model.wetdry.left_k = left_k === nothing ? nothing : Float64.(collect(left_k))
+        model.wetdry.left_eps = left_eps === nothing ? nothing : Float64.(collect(left_eps))
+    end
     return nothing
 end
 
@@ -1075,6 +1109,10 @@ function clear_x_inflow_outflow!(model::Model)
     model.x_boundary_q_left = nothing
     model.x_boundary_eta_left = nothing
     model.x_boundary_rho_left = nothing
+    if model.wetdry !== nothing
+        model.wetdry.left_k = nothing
+        model.wetdry.left_eps = nothing
+    end
     model.x_boundary_u_right_open = false
     model.x_boundary_u_right_profile = nothing
     model.x_boundary_eta_right = nothing
