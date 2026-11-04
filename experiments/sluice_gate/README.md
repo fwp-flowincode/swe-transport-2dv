@@ -74,13 +74,15 @@ The jump forms behind the gate and settles on the steady theory (dashed; hydrost
 ![Non-hydrostatic jump](figures/sluice_gate_nonhydro_jump.png)
 
 Non-hydrostatic jump (`contraction=1`, 8 m channel, C = 40 m^½/s, outlet 0.15 m). The jet contracts only to 0.88 a at
-these resolutions, and the jump position depends strongly on the jet depth; the theory (dashed) therefore starts at the
-vena contracta of the model. Left: speed at 320 × 24 cells, the cells cut at the free surface. Right: profiles on two
-grids.
-- The jump stands 1.1-1.4 h₂ downstream of the theory (closer on the finer grid) and is short: it rises within
-  0.1-0.2 m, against about 6 h₂ for a real jump with its turbulent roller.
-- Behind the jump the depth lies 1-4 % above the theory, which assumes a uniform velocity: the profile is strongly
+320 × 24, and the jump position depends strongly on the jet depth; the theory (dashed) therefore starts at the vena
+contracta of the model. Left: speed at 320 × 24 cells, the cells cut at the free surface. Right: profiles on two grids.
+- At 320 × 24 the jump stands 0.8 h₂ downstream of the theory and is short: it rises within 0.1-0.2 m, against about
+  6 h₂ for a real jump with its turbulent roller.
+- Behind the jump the depth lies 3.4 % above the theory, which assumes a uniform velocity: the profile is strongly
   sheared (a wall jet under the roller).
+- At 160 × 12 the opening spans two layers and the jet does not contract (1.00 a): its conjugate depth lies below the
+  subcritical depth at the gate, and the jump stands at the gate. (It contracted to 0.88 a here as well before the time
+  correction of the tvd2 momentum advection, an effect of its anti-diffusive time error; see the docs, section 18.)
 
 ![Non-hydrostatic jump forming](figures/sluice_gate_nonhydro_jump.gif)
 

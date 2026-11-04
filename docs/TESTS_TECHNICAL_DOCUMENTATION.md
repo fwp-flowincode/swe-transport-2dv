@@ -745,10 +745,38 @@ discharges $q_{k,f}=h_{k,f}u_{k,f}$ and the interface fluxes $W$ of time $n$:
 ```
 
 with $u^{\ast}$ the value upwinded by the sign of each flux: the upwind velocity (`upwind1`; on an outflow side $u^{\ast}=u$, so
-the form is a sum over the inflow sides with non-negative coefficients) or its limited MUSCL extrapolation with the MC
-slope (`tvd2`, forward Euler like the momentum `tvd2` of section 3; the outflow sides then contribute $s_f/2$). The
-update is capped: with $C=\Delta t\sum$(inflow coefficients) the tendency is scaled by $1/C$ where $C>1$, so for `upwind1`
-the update stays a convex combination (thin layers at the front are stable).
+the form is a sum over the inflow sides with non-negative coefficients) or the flux-limited Lax-Wendroff value
+$u^{\ast}=u_{up}+\tfrac12(1-c)\thinspace s_{up}$ with the MC slope $s$ and the Courant number $c$ of the flux
+($|a|\Delta t/\Delta x$, $|\bar W|\Delta t/\bar h_k$) (`tvd2`, the same scheme as the momentum `tvd2` of section 3; the outflow
+sides then contribute $(1-c)s_f/2$). The update is capped: with $C=\Delta t\sum$(inflow coefficients) the tendency is scaled
+by $1/C$ where $C>1$, so for `upwind1` the update stays a convex combination (thin layers at the front are stable).
+
+*Time correction (issue #66, found with the stratified mixing layer of issue #42).* Until issue #66 the `tvd2` value of this step was the plain MUSCL
+extrapolation $u_{up}+s_{up}/2$ with forward Euler. Where the solution is smooth the MC slope is Fromm's,
+$s_i=(u_{i+1}-u_{i-1})/2$, and the update of linear advection $u_t+au_x=0$ with $C=a\Delta t/\Delta x$ has the amplification
+factor
+
+```math
+G(\theta)=1-C\left[(1-e^{-i\theta})+\frac{1-c}{4}\left(e^{i\theta}-1-e^{-i\theta}+e^{-2i\theta}\right)\right],
+```
+
+with $c=0$ for the plain extrapolation and $c=C$ with the time correction (Fromm's scheme). Without it $|G|>1$ for every
+$C>0$: the semi-discrete operator is only weakly (third-order) dissipative, and forward Euler adds $\tfrac12(C\theta)^2$.
+With it $|G|\le1$ for $C\le1$:
+
+| $C$ | $\max_\theta\lvert G\rvert$, $c=0$ | at wavelength | e-folding | $\max_\theta\lvert G\rvert$, $c=C$ |
+|---|---|---|---|---|
+| 0.2 | 1.0048 | 8.9 $\Delta x$ | 207 steps | 1 |
+| 0.4 | 1.044 | 5.8 $\Delta x$ | 23 steps | 1 |
+| 0.6 | 1.153 | 4.6 $\Delta x$ | 7 steps | 1 |
+| 0.8 | 1.342 | 4.0 $\Delta x$ | 3 steps | 1 |
+
+The limiter stops the growth only at extrema, so in pure advection the plain extrapolation stays bounded. In the splitter
+plate (two streams of 1016 and 1031 kg/m³, 0.3 and 0.5 m/s, $C=0.6$) a 4 $\Delta x$ wave in the weakly stratified upper
+layer grew until the run failed after 75 s, hydrostatic and non-hydrostatic alike; at $C=0.4$, 0.3 and 0.2 it still grew,
+more slowly. `upwind1` and the time correction remove it. The fixed-grid and variable-top-layer momentum `tvd2` had the
+correction since issue #3 (section 3). Effect on the validation cases of this section: Ritter unchanged within 2 % (L1
+0.51 % against 0.50 %), Carrier-Greenspan shoreline 14.05 against 13.88 mm (`upwind1` 14.04 mm).
 
 **Depth-uniform velocity: analysis and the advective velocities $a_L,a_R$.** Hydrostatic theory keeps a depth-uniform
 velocity depth-uniform: in every layer $u_t=-uu_x-g\zeta_x$. A first version used the layer-wise weights
@@ -1469,18 +1497,21 @@ within 1 m behind the gate): the comparison checks friction and momentum, not th
 at 2.4 m, $C=40$ m$^{1/2}$/s, outlet depth 0.15 m, $\Delta x=\Delta z$, $\nu=10^{-4}$ m²/s; steady after about 100 s
 (discharge spread $10^{-6}$ at 140 s):
 
-| grid ($n_x\times n_z$) | vena contracta | jump, theory | 10 / 50 / 90 % of the jump height | jet | 1.5 m behind the jump | at 7 m |
+| grid ($n_x\times n_z$) | vena contracta | jump, theory | jump (50 % of its height) | jet | 1.5 m behind the jump | midway to the outlet |
 |---|---|---|---|---|---|---|
-| 160 x 12 | 0.0877 m at 2.58 m | 3.18 m | 3.33 / 3.44 / 3.53 m | -1 % | +1.4 % | +0.9 % |
-| 320 x 24 | 0.0880 m at 2.61 m | 3.17 m | 3.29 / 3.36 / 3.41 m | -1 % | +3.9 % | +1.8 % |
+| 160 x 12 | 0.0996 m at 2.43 m (not contracted) | none: no supercritical reach | at the gate (2.7 m) | | | |
+| 320 x 24 | 0.0884 m at 2.61 m | 3.12 m | 3.26 m | -0.9 % | +3.4 % | +3.4 % |
 
-The jump (half its height, interpolated; the other two columns are cell centres) stands 1.1-1.4 $h_2$ ($h_2=0.18$ m) downstream of the theory, closer on the finer grid. It is short: from 10
-to 90 % of its height within 0.1-0.2 m, against about $6h_2$ for a real jump, whose turbulent roller the laminar
-non-hydrostatic model does not resolve. Behind the jump the depths lie 1-4 % above the gradually varied flow, as in 2DV
-hydrostatic but more: the velocity profile behind the jump is strongly sheared (wall jet under the roller), while the
-theory assumes a uniform velocity. The contraction is the one of the free flow at this resolution: the vena contracta
-lies at 0.88 $a$, while the upstream head gives an effective $C_c$ of 0.75 (320 x 24) and 0.78 (160 x 12), the
-difference being the energy lost at the gate.
+On 320 x 24 the jump (half its height, interpolated) stands 0.8 $h_2$ ($h_2=0.18$ m) downstream of the theory. It is
+short, rising within 0.1-0.2 m, against about $6h_2$ for a real jump, whose turbulent roller the laminar non-hydrostatic
+model does not resolve. Behind the jump the depths lie 3.4 % above the gradually varied flow, as in 2DV hydrostatic but
+more: the velocity profile behind the jump is strongly sheared (wall jet under the roller), while the theory assumes a
+uniform velocity. The contraction is the one of the free flow at this resolution: the vena contracta lies at 0.88 $a$,
+while the upstream head gives an effective $C_c$ of 0.75, the difference being the energy lost at the gate. On 160 x 12
+the opening spans two layers and the jet does not contract (1.00 $a$; effective $C_c$ 0.79 from the head); its conjugate
+depth is then below the subcritical depth at the gate and the jump stands at the gate. (Before the time correction of the
+`tvd2` momentum advection, section 18, the jet contracted to 0.88 $a$ on this grid as well, and the jump stood 1.4 $h_2$
+behind the theory: an effect of the anti-diffusive time error.)
 
 References: Henderson (1966), Open Channel Flow, ch. 6 (sluice gates: contraction, free and submerged flow); Chow (1959),
 Open-Channel Hydraulics, ch. 17; von Mises (1917), Berechnung von Ausfluss- und Ueberfallzahlen, Z. VDI 61 (the
@@ -1557,18 +1588,19 @@ this work (it is not public), so 6.15 is the reference, not the measurement. The
 
 Discharge inlet, relaxed outflow ($\tau=20$ s), means over the last 30 of 90 s; std is that of the instantaneous
 length. Equilibrium wall function of section 29 (the default since issue #62; with the local wall function of section
-27 the lengths were 6.16, 6.99, 7.41 and 6.94):
+27 the lengths were 6.16, 6.99, 7.41 and 6.94). With the time correction of the `tvd2` momentum advection (issue #66,
+section 18); before it the lengths were 6.07, 7.22, 7.73 and 7.18:
 
 | grid ($\Delta x$, $\Delta z$) | non-hydrostatic $x_R/S$ | std | largest $w$ (m/s) |
 |---|---|---|---|
-| S/5, S/5 | 6.07 | 0.09 | 0.022 |
-| S/10, S/10 | 7.22 | 0.10 | 0.018 |
-| S/10, S/20 | 7.73 | 0.22 | 0.022 |
-| S/20, S/10 | 7.18 | 0.03 | 0.026 |
+| S/5, S/5 | 6.06 | 0.07 | 0.022 |
+| S/10, S/10 | 7.21 | 0.05 | 0.017 |
+| S/10, S/20 | 7.70 | 0.07 | 0.014 |
+| S/20, S/10 | 7.17 | 0.03 | 0.028 |
 
 The length moves with $\Delta z$ and $\Delta x$ matters less. The trend is upwards and away from the LES. The test grid
 S/5 agrees with the LES within 2 %, but that is a cancellation of errors, not convergence. What holds is $x_R$ within
-20 % of the LES on these grids except the finest $\Delta z$ (26 %); the test uses S/5 with this tolerance.
+20 % of the LES on these grids except the finest $\Delta z$ (25 %); the test uses S/5 with this tolerance.
 
 **Sensitivity to the bed cell** (local wall function of section 27; the treatment that removes it is in section 29).
 In the table above the bed and the step top lie on layer interfaces. Shifting the bed against the layers by a fraction
@@ -1598,8 +1630,8 @@ Section 29 separates the causes: the thin cell, not $u_*$ of the local velocity,
 equilibrium wall function on a wall cell of at least $0.3\,\Delta z$ removes the sensitivity.
 
 **The start-up mode.** Fixed discharge and fixed level make a quarter-wave mode of the reach, of period $4L/c=7.3$ s. An
-impulsive start excites it; with the water level at the outlet, $x_R$ swings between 2.9 and 10.7 S and the swing decays
-over about 40 s. The relaxed outflow removes it (`recirculation_boundary.png`): 6.05 to 7.75 S. Both give 7.0 S over
+impulsive start excites it; with the water level at the outlet, $x_R$ swings between 3.0 and 10.4 S and the swing decays
+over about 40 s. The relaxed outflow removes it (`recirculation_boundary.png`): 6.05 to 7.25 S. Both give 7.0 S over
 the 10-90 s window. Means over a shorter run are not of the steady state.
 
 **Hydrostatic blow-up with a fixed level.** The hydrostatic run with a fixed level crashes although the non-hydrostatic
@@ -1657,11 +1689,12 @@ recirculation of about the right length, but it never settles:
 | grid | hydrostatic $x_R/S$ | std | largest $w$ (m/s) |
 |---|---|---|---|
 | S/5 | 5.64 | 1.00 | 0.091 |
-| S/10 (half $\Delta t$) | 5.69 | 1.20 | 0.179 |
+| S/10 (half $\Delta t$) | 5.65 | 1.12 | 0.165 |
 | S/20 (ramped start, 70 s) | 4.88 | 1.26 | 0.860 |
 
-(S/5 and S/20 with the local wall function of section 27; S/10 with the equilibrium one, 5.67 S, std 1.30 and
-0.205 m/s before.)
+(S/5 and S/20 with the local wall function of section 27 and before issue #66; S/10 with the equilibrium one and the
+time correction of issue #66: 5.69 S, std 1.20 and 0.179 m/s before the correction, 5.67 S, std 1.30 and 0.205 m/s with
+the local wall function.)
 
 $w$ follows from continuity alone and nothing limits it behind the step: the downdraft has $w\approx u$ with
 $\Delta x\approx\Delta z$. Its peak grows 2-4 times per halving of the grid, against a non-hydrostatic value that stays
@@ -1669,7 +1702,7 @@ near 0.02 m/s, so these grids show no grid limit of $w$. The hydrostatic mean su
 that the non-hydrostatic one does not have (`recirculation_step.png`).
 
 **Obstacle with a sloped face.** A trapezoidal weir of height S (ramp 1:3, crest 4 S, downstream face 1:1, no reference):
-non-hydrostatic $x_R=5.23\,S$ (std 0.05; 5.29 with the local wall function) from the toe; hydrostatic: no reverse flow at
+non-hydrostatic $x_R=5.25\,S$ (std 0.05; 5.23 before issue #66, 5.29 with the local wall function) from the toe; hydrostatic: no reverse flow at
 all. The hydrostatic model can
 therefore miss a recirculation altogether, although it keeps the one behind the vertical step.
 
@@ -1707,7 +1740,10 @@ friction on layer $k_f$ equals the assembled matrix). `wall_function = :local` k
 **Shift study** (`experiments/obstacles/plot_bed_cell.jl`; ST1 and the weir of section 28, non-hydrostatic, 90 s, means
 over the last 30 s). The bed is lifted by $f\Delta z$ against the layers (one layer more, the same $\Delta z$ and
 geometry), so the lowest wet cell of the step is $(1-f)\Delta z$ thick; the sloped weir face has cut cells at every $f$.
-$x_R/S$ (std of the instantaneous length in brackets where above 0.2):
+$x_R/S$ (std of the instantaneous length in brackets where above 0.2). The runs predate the time correction of the `tvd2`
+momentum advection (issue #66, section 18); rerun with it, the step S/5 with the local wall function gives 6.17, 6.04,
+5.98, 6.27 and 8.46 (1.08), at most 0.06 S (0.7 %) from the row below, as the step of section 28 (6.07 to 6.06 S at
+S/5, 7.22 to 7.21 S at S/10):
 
 | case | wall function | $f=0$ | 0.25 | 0.5 | 0.75 | 0.9 |
 |---|---|---|---|---|---|---|
@@ -2694,6 +2730,11 @@ Exactness, conservation and positivity tests run for the four variants hydrostat
 - `test_verify_wd_depth_positivity_large_time_step_{1d,2dv}_*`: dam break onto a dry bed and beach at advective Courant
   number 6, where columns fall dry within the free-surface solve (more than one Newton iteration): depth $\ge0$ in every
   step, clamped round-off volume below $10^{-14}$ of the total, volume and mass conserved (`docs/depth_positivity.md`).
+- `test_verify_wd_tvd2_momentum_von_neumann`: the `tvd2` momentum value (`_wd_upwind_value`) applied to linear advection
+  of a small sine on a linear ramp (so that the MC limiter stays in its smooth branch), $C=0.2,0.6,0.9$, wavelengths 4 to
+  20 $\Delta x$: the measured growth per step equals the analytical $|G|$ of section 18 within $2\cdot10^{-3}$, with the time
+  correction (at most 1) and without it (the unstable forward-Euler factor, e.g. 1.15 at $C=0.6$ and 4.6 $\Delta x$); and
+  $\max|G|\le1$ with the correction for $C\le1$.
 - `test_verify_wd_advection_depth_uniform_mms_{upwind1,tvd2}`: operator-level manufactured solution of section 18
   (depth-uniform $u$ under a surface crossing six interfaces): the maximum error over all layers converges with an
   observed order of at least 0.8 per grid halving and stays within twice the 1D `upwind1` error (observed: 2DV 1.2e-2 ...
@@ -2734,9 +2775,10 @@ Exactness, conservation and positivity tests run for the four variants hydrostat
   velocity at the offshore boundary: shoreline elevation within 10 % of the runup amplitude $A/4\thinspace sL=0.1$ m at
   $\Delta x=0.05$ m (observed 9.2 %), converging (14.6 % at 0.1 m), surface elevation of the wet cells within 5 % (1.8 %).
 - `test_validate_wd_carrier_greenspan_runup_2dv`: 15 layers, same bounds (shoreline 9.2 %, surface 2.1 %).
-- `test_validate_wd_carrier_greenspan_runup_tvd2`: `tvd2` gives a smaller shoreline error than `upwind1` (14.3 against
-  14.6 mm at $\Delta x=0.1$ m) and a surface error within 5 %; both are dominated by the wet/dry front, where `tvd2` falls back
-  to first order.
+- `test_validate_wd_carrier_greenspan_runup_tvd2`: the `tvd2` shoreline error at most 1 % above the `upwind1` one (14.05
+  against 14.04 mm at $\Delta x=0.1$ m) and a surface error within 5 % (3.51 mm; `upwind1` 3.54 mm); both are dominated by
+  the wet/dry front, where `tvd2` falls back to first order. Without the time correction of section 18 the shoreline was
+  1 % better (13.88 mm), an effect of the anti-diffusive time error.
 - `test_validate_wd_carrier_greenspan_runup_2dv_nonhydro`: long wave ($kH\ll1$): the non-hydrostatic mode within the
   hydrostatic bounds.
 - `test_validate_wd_nonhydro_standing_wave_full_dispersion_{upwind1,tvd2}`: closed basin, $kH=\pi/2$ (the shallow-water
@@ -2875,9 +2917,10 @@ stated otherwise.
   (8 layers): jump position within one cell (1D) and three cells (2DV) of the theory, in the theoretical order; depths in the jet
   within 0.5 %, upstream and behind the jump within 0.5 % (1D) and 1 % (2DV); steady discharge within 0.5 %; the
   position error with $\Delta x/2$ is below 0.6 times that with $\Delta x$ (measured 0.49).
-- `test_validate_sluice_gate_nonhydro_jump`: non-hydrostatic, `contraction=1`, $C=40$, outlet 0.15 m, 160 x 12 cells,
-  120 s: steady discharge within 0.5 %; with the theory from the vena contracta of the model, the jump (half its height)
-  within 2.5 $h_2$ (measured 1.4 $h_2$), the jet depth and the depths behind the jump within 3 % (measured 1 % and 1.4 %).
+- `test_validate_sluice_gate_nonhydro_jump`: non-hydrostatic, `contraction=1`, $C=40$, outlet 0.15 m, 320 x 24 cells
+  (four layers in the opening; with two the jet does not contract, see above), 120 s: steady discharge within 0.5 %; with
+  the theory from the vena contracta of the model, the jump (half its height) within 2.5 $h_2$ (measured 0.8 $h_2$), the
+  jet depth within 3 % (measured 0.9 %) and the depths behind the jump within 4 % (measured 3.4 %).
 - `test_verify_sluice_gate_config_checks`: positions off a u-face or on the boundary, an edge below the bed, a
   contraction outside (0, 1], a contraction below 1 in the non-hydrostatic mode and the fixed-grid step are rejected.
 
@@ -2892,12 +2935,12 @@ stated otherwise.
   face only the open side contributes.
 - `test_verify_reattachment_length`: a bed velocity with a known zero is recovered; attached flow gives 0.
 - `test_validate_backward_step_reattachment_nonhydrostatic`: ST1 on S/5, 90 s, mean of the last 30 s: $x_R$ within 20 %
-  of the LES value 6.15 S (measured 6.08 S).
+  of the LES value 6.15 S (measured 6.07 S).
 - `test_validate_backward_step_hydrostatic_vertical_velocity`: same case: the largest $w$ of the hydrostatic run is above
-  3 times the non-hydrostatic one (measured 4.3).
+  3 times the non-hydrostatic one (measured 3.6; 4.3 before the time correction of issue #66).
 - `test_validate_backward_step_reattachment_shifted_bed` (section 29): the same case with the bed and the step
   $0.9\,\Delta z$ above the layer interfaces (lowest wet cell $0.1\,\Delta z$): $x_R$ within 10 % of the run with the bed
-  on an interface (measured 5.9 %: 5.72 against 6.08 S; the local wall function gives 38 % and no steady state).
+  on an interface (measured 6.0 %: 5.70 against 6.07 S; the local wall function gives 38 % and no steady state).
 
 Time-dependent discharge and the mode of the reach (`test_open_boundaries.jl`, issue #61):
 

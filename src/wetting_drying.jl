@@ -362,13 +362,14 @@ function _wd_baroclinic_pressure!(model::Model, wd::WetDryState)
     return nothing
 end
 
-# Upwind value at a cell centre or interface for the momentum advection: first order u_up, or (second) the MUSCL value
-# u_up + s/2 with the MC slope s = MC(u_up - u_upup, u_down - u_up) of the upwind node (van Leer 1977), first order where
-# the node behind it is not available (`has_upup` false: boundary or dry face). The MC slope satisfies |s/2| <=
-# |u_down - u_up| with the same sign, so the value lies between u_up and u_down.
-@inline function _wd_upwind_value(u_up::Real, u_upup::Real, u_down::Real, has_upup::Bool, second::Bool)
+# Upwind value at a cell centre or interface for the momentum advection: first order u_up, or (second) the flux-limited
+# Lax-Wendroff value u_up + (1 - c) s/2 with the MC slope s = MC(u_up - u_upup, u_down - u_up) of the upwind node (van
+# Leer 1977) and the Courant number c (-) of the flux, first order where the node behind it is not available (`has_upup`
+# false: boundary or dry face). The MC slope satisfies |s/2| <= |u_down - u_up| with the same sign, so the value lies
+# between u_up and u_down.
+@inline function _wd_upwind_value(u_up::Real, u_upup::Real, u_down::Real, has_upup::Bool, second::Bool, courant::Real)
     (second && has_upup) || return u_up
-    return u_up + 0.5 * _monotonized_central_scalar(u_up - u_upup, u_down - u_up)
+    return u_up + 0.5 * (1.0 - min(courant, 1.0)) * _monotonized_central_scalar(u_up - u_upup, u_down - u_up)
 end
 
 # Nearest layer at or below k that is open at face f (0 if none).
@@ -402,10 +403,18 @@ end
 # Sec. 3; equation numbers not checked), horizontally with the cell discharges and vertically with the interface fluxes
 # W of time n:
 #   du/dt = [ a_L (u*_L - u) - a_R (u*_R - u) ] / dx + [ W_bot (u*_bot - u) - W_top (u*_top - u) ] / hbar,
-# with u* the value upwinded by the sign of each flux: the upwind velocity (upwind1) or its limited MUSCL extrapolation
-# (tvd2, `_wd_upwind_value`; second order in space, forward Euler in time like the momentum tvd2 of the other modes).
-# On an outflow side the upwind node is face f itself, so u* - u = 0 for upwind1 (a sum over the inflow sides,
-# sum_j c_j (u_j - u), c_j >= 0) and u* - u = s_f/2 for tvd2.
+# with u* the value upwinded by the sign of each flux: the upwind velocity (upwind1) or its limited extrapolation with the
+# Lax-Wendroff time correction (tvd2, `_wd_upwind_value`): u* = u_up + (1 - c)/2 s_up with the Courant number c of the
+# flux (|a| dt/dx, |W| dt/hbar), as the momentum tvd2 of the other modes (`_advective_flux_divergence!`) and the density
+# transport. On an outflow side the upwind node is face f itself, so u* - u = 0 for upwind1 (a sum over the inflow sides,
+# sum_j c_j (u_j - u), c_j >= 0) and u* - u = (1 - c) s_f/2 for tvd2.
+# WHY the time correction: with forward Euler the plain MUSCL extrapolation (c = 0) is linearly unstable at every Courant
+# number; in smooth regions (Fromm's slope) the amplification factor of a 4.6 dx wave is 1.15 per step at c = 0.6 and
+# 1.005 at c = 0.2 (von Neumann analysis, test_verify_wd_tvd2_momentum_von_neumann). The limiter only stops the growth at
+# extrema: in pure advection it stays bounded, but in a weakly stratified layer the internal-wave coupling let a 4 dx
+# wave grow until the run failed (splitter plate, issue #42; fixed in #66). With the correction the scheme is the flux-limited
+# Lax-Wendroff scheme, |G| <= 1 for c <= 1. Sweby (1984), SIAM J. Numer. Anal. 21, 995-1011; LeVeque (2002), Finite
+# Volume Methods for Hyperbolic Problems, ch. 6 (equation numbers not checked).
 #
 # Advective velocities a_L, a_R of the cells left and right of the face (docs/TESTS_TECHNICAL_DOCUMENTATION.md,
 # section "Wetting and drying: depth-uniform velocity"):
@@ -443,6 +452,7 @@ function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, s
     uf = u[k, f]
     open_h(ff) = 1 <= ff <= nxp1 && wd.hf[k, ff] > 0.0
     open_v(kk) = 1 <= kk <= nz && wd.hf[kk, f] > 0.0
+    dt = model.config.dt
     csum = 0.0   # 1/s, sum of the inflow coefficients
     tend = 0.0   # m/s^2
     @inbounds begin
@@ -469,19 +479,19 @@ function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, s
         if kin > 0                         # inflow from cell L: upwind node f-1, behind it f-2
             c = aL / dx
             csum += c
-            uin = kin == k ? _wd_upwind_value(u[k, f - 1], h2 ? u[k, f - 2] : 0.0, uf, h2, true) : u[kin, f - 1]
+            uin = kin == k ? _wd_upwind_value(u[k, f - 1], h2 ? u[k, f - 2] : 0.0, uf, h2, true, c * dt) : u[kin, f - 1]
             tend += c * (uin - uf)
         elseif aL < 0.0 && h2              # outflow into cell L: upwind node f, behind it f+1
-            tend += aL / dx * (_wd_upwind_value(uf, u[k, f + 1], u[k, f - 1], true, true) - uf)
+            tend += aL / dx * (_wd_upwind_value(uf, u[k, f + 1], u[k, f - 1], true, true, -aL * dt / dx) - uf)
         end
         kin = aR < 0.0 ? _wd_open_layer_at_or_below(wd, k, f + 1) : 0
         if kin > 0                         # inflow from cell R: upwind node f+1, behind it f+2
             c = -aR / dx
             csum += c
-            uin = kin == k ? _wd_upwind_value(u[k, f + 1], h2 ? u[k, f + 2] : 0.0, uf, h2, true) : u[kin, f + 1]
+            uin = kin == k ? _wd_upwind_value(u[k, f + 1], h2 ? u[k, f + 2] : 0.0, uf, h2, true, c * dt) : u[kin, f + 1]
             tend += c * (uin - uf)
         elseif aR > 0.0 && h2              # outflow into cell R: upwind node f, behind it f-1
-            tend -= aR / dx * (_wd_upwind_value(uf, u[k, f - 1], u[k, f + 1], true, true) - uf)
+            tend -= aR / dx * (_wd_upwind_value(uf, u[k, f - 1], u[k, f + 1], true, true, aR * dt / dx) - uf)
         end
 
         # vertical: interface k (below layer k) and k+1 (above); implicit instead with implicit_vertical_terms
@@ -491,9 +501,9 @@ function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, s
             if w_bot > 0.0                 # inflow from below: upwind node k-1, behind it k-2
                 c = w_bot / hbar
                 csum += c
-                tend += c * (_wd_upwind_value(u[k - 1, f], v2 ? u[k - 2, f] : 0.0, uf, v2, true) - uf)
+                tend += c * (_wd_upwind_value(u[k - 1, f], v2 ? u[k - 2, f] : 0.0, uf, v2, true, c * dt) - uf)
             elseif w_bot < 0.0 && v2       # outflow downwards: upwind node k, behind it k+1
-                tend += w_bot / hbar * (_wd_upwind_value(uf, u[k + 1, f], u[k - 1, f], true, true) - uf)
+                tend += w_bot / hbar * (_wd_upwind_value(uf, u[k + 1, f], u[k - 1, f], true, true, -w_bot * dt / hbar) - uf)
             end
         end
         if vertical && open_v(k + 1)
@@ -501,13 +511,12 @@ function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, s
             if w_top < 0.0                 # inflow from above: upwind node k+1, behind it k+2
                 c = -w_top / hbar
                 csum += c
-                tend += c * (_wd_upwind_value(u[k + 1, f], v2 ? u[k + 2, f] : 0.0, uf, v2, true) - uf)
+                tend += c * (_wd_upwind_value(u[k + 1, f], v2 ? u[k + 2, f] : 0.0, uf, v2, true, c * dt) - uf)
             elseif w_top > 0.0 && v2       # outflow upwards: upwind node k, behind it k-1
-                tend -= w_top / hbar * (_wd_upwind_value(uf, u[k - 1, f], u[k + 1, f], true, true) - uf)
+                tend -= w_top / hbar * (_wd_upwind_value(uf, u[k - 1, f], u[k + 1, f], true, true, w_top * dt / hbar) - uf)
             end
         end
     end
-    dt = model.config.dt
     return dt * csum > 1.0 ? tend / (dt * csum) : tend
 end
 

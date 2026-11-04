@@ -38,8 +38,8 @@ Method in brief
   Every depth stays >= 0 for any time step, without correcting the solution afterwards (proof:
   [docs/depth_positivity.md](../../docs/depth_positivity.md)); a lake at rest has a zero residual and does not change.
   In these cases the solve takes one Newton iteration per step (no column is drained within a step).
-- Momentum-conservative upwind advection (Stelling & Duinmeijer 2003), first order (`upwind1`) or with limited MUSCL
-  values (`tvd2`), capped so that thin layers at the front stay stable.
+- Momentum-conservative upwind advection (Stelling & Duinmeijer 2003), first order (`upwind1`) or with flux-limited
+  Lax-Wendroff values (`tvd2`, MC limiter with the time correction), capped so that thin layers at the front stay stable.
 - eta follows from the flux divergence, so the water volume is conserved to round-off.
 - The constituent (density) is transported with the same fluxes and cell volumes, conservatively, without the global
   mass correction of the other modes.
@@ -133,11 +133,13 @@ back to first order, and these faces set the maximum.
 upwind1 against tvd2
 --------------------
 
-`plot_wetting_drying.jl schemes`. `tvd2` uses limited MUSCL values (MC limiter) in the momentum advection and the
-flux-limited Lax-Wendroff scheme for the density, falling back to first order next to dry faces.
+`plot_wetting_drying.jl schemes`. `tvd2` uses the flux-limited Lax-Wendroff scheme (MC limiter) in the momentum
+advection and for the density, falling back to first order next to dry faces. (Until issue #66, found with the stratified splitter plate of
+issue #42, the momentum used the limited MUSCL values without the time correction; that is unstable with forward Euler,
+docs/TESTS_TECHNICAL_DOCUMENTATION.md section 18. The figures are from the corrected scheme.)
 
-Ritter dam break at t = 5 s, dx = 0.25 m: tvd2 halves the depth error (L1 0.51 % against 0.91 % in 1D, 0.54 % against
-0.91 % in 2DV) and the front lag (5.6 % against 11.3 % in 1D, 6.6 % against 11.3 % in 2DV), and converges faster at the
+Ritter dam break at t = 5 s, dx = 0.25 m: tvd2 halves the depth error (L1 0.51 % against 0.90 % in 1D, 0.54 % against
+0.90 % in 2DV) and the front lag (5.6 % against 10.3 % in 1D, 6.6 % against 11.3 % in 2DV), and converges faster at the
 front (1.8 % at dx = 1/16 m in 1D).
 
 ![Ritter front](figures/schemes_ritter_front.png)
@@ -149,7 +151,7 @@ The layer velocities of both schemes (2DV): all twelve layers lie on one curve.
 ![Ritter layers](figures/schemes_ritter_layers.png)
 
 Carrier-Greenspan runup at dx = 0.05 m: the shoreline error is set by the wet/dry front, where both schemes are first
-order; tvd2 reduces it slightly (8.6 against 9.2 mm). The fast oscillation is the numerical shoreline jumping from cell to
+order; tvd2 reduces it slightly (8.5 against 8.8 mm). The fast oscillation is the numerical shoreline jumping from cell to
 cell (the last cell deeper than 1 mm).
 
 ![Runup shoreline](figures/schemes_runup_shoreline.png)
@@ -184,8 +186,9 @@ to wetting and drying).
 solitary wave of height H/d = 0.019 over a depth d = 1 m runs up a 1:19.85 beach; the maximum runup of the nonlinear
 shallow-water theory is R/d = 2.831 sqrt(cot beta) (H/d)^(5/4), i.e. 0.0890 m, which his laboratory data confirm for
 non-breaking waves. The wave starts as eta = H sech²(gamma (x - x1)) with u = c eta/(d + eta) (12 layers of 0.1 m in
-2DV). The runup converges at first order to the law (0.80, 0.89, 0.94, 0.98, 1.00 for dx = 0.2 ... 0.0125 m, 1D); 2DV
-hydrostatic equals 1D, the non-hydrostatic runup is 1.5-2 % lower on the same grid (dispersion reduces the steepening).
+2DV). The runup converges at first order to the law (0.83, 0.90, 0.95, 0.98, 1.00 for dx = 0.2 ... 0.0125 m, 1D
+upwind1); 2DV hydrostatic equals 1D, the non-hydrostatic runup is 1.4-2 % lower on the same grid (dispersion reduces the
+steepening).
 upwind1 and tvd2 give the same runup: it is set by the wet/dry front, where both are first order.
 
 ![Runup convergence](figures/solitary_runup_convergence.png)

@@ -657,7 +657,7 @@ Schemes for the face value `rho_f`:
   error is O(dt * |u*w| * d2rho/dxdz): first order in time, second order in space. Measured L1 orders (Gaussian, CFL 0.4):
   about 2.2 for grid-aligned flow, 1.0 for diagonal flow (error still ~4x below upwind1); 1.8 for diagonal flow at CFL 0.02.
 
-WHY the (1 - c) factor, which the momentum `tvd2` scheme does not have: density is advanced with a single forward-Euler
+WHY the (1 - c) factor (the momentum `tvd2` scheme has it as well): density is advanced with a single forward-Euler
 step. Without the time correction the MUSCL/forward-Euler update is first order in time and TVD only for `c <= 1/2` in
 1D; with it the update is the flux-limited Lax-Wendroff scheme, second order in time and TVD up to `c = 1`.
 Sources: van Leer (1977), J. Comput. Phys. 23, 276-299 (MC limiter); Sweby (1984), SIAM J. Numer. Anal. 21, 995-1011
