@@ -373,7 +373,23 @@ function nonhydro_jump_figure()
         model, xc = nh_jump_model(nx, nz)
         run_steady!(model, NH_JUMP_RUN_TIME)
         h = water_depth(model)
-        xv, hv, xj, depth = nh_jump_theory(h, xc)
+        # WHY: with 12 layers the opening spans two layers and the jet does not contract (vena at about a); its conjugate
+        # depth is then below the subcritical depth at the gate, the theory has no supercritical reach (DomainError) and
+        # the jump stands at the gate
+        theory = try
+            nh_jump_theory(h, xc)
+        catch err
+            err isa DomainError || rethrow()
+            nothing
+        end
+        if theory === nothing
+            behind = findall(x -> NH_X_GATE < x < NH_X_GATE + 1.0, xc)
+            @printf("nx = %d, nz = %d: jet depth %.4f m, jump at the gate, upstream head %.4f m\n", nx, nz,
+                minimum(h[behind]), upstream_head(model, xc, 0.4 * NH_X_GATE))
+            plot!(p2, xc, h; color=color, lw=2, label="model $(nx) x $(nz): jet not contracted, jump at the gate")
+            continue
+        end
+        xv, hv, xj, depth = theory
         hj = depth(xj - 1e-9)
         mid = 0.5 * (hj + conjugate_depth(hj, Q))
         k = findfirst(j -> xc[j] > xv && h[j] > mid, eachindex(xc))

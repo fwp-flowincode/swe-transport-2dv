@@ -88,8 +88,8 @@ is not public.
 
 ![Step](figures/recirculation_step.png)
 
-At S/10 the non-hydrostatic run gives xR = 7.22 S, steady (std 0.10 S). The hydrostatic run gives 5.69 S but does not
-settle (std 1.2 S), and its surface dips behind the step.
+At S/10 the non-hydrostatic run gives xR = 7.21 S, steady (std 0.05 S). The hydrostatic run gives 5.65 S but does not
+settle (std 1.1 S), and its surface dips behind the step.
 
 ![Hydrostatic and non-hydrostatic flow behind the step](figures/recirculation_step.gif)
 
@@ -97,19 +97,20 @@ settle (std 1.2 S), and its surface dips behind the step.
 
 | grid (dx, dz) | xR / S | std |
 |---|---|---|
-| S/5, S/5 | 6.07 | 0.09 |
-| S/10, S/10 | 7.22 | 0.10 |
-| S/10, S/20 | 7.73 | 0.22 |
-| S/20, S/10 | 7.18 | 0.03 |
+| S/5, S/5 | 6.06 | 0.07 |
+| S/10, S/10 | 7.21 | 0.05 |
+| S/10, S/20 | 7.70 | 0.07 |
+| S/20, S/10 | 7.17 | 0.03 |
 
-The length depends on dz more than on dx and moves away from the LES. The agreement of the coarse grid (6.07 S) is a
-cancellation of errors; xR is within 20 % of the LES except on the finest dz (26 %). These runs use the equilibrium wall
-function of issue #62 (below); with the former local wall function they gave 6.16, 6.99, 7.41 and 6.94 S.
+The length depends on dz more than on dx and moves away from the LES. The agreement of the coarse grid (6.06 S) is a
+cancellation of errors; xR is within 20 % of the LES except on the finest dz (25 %). These runs use the equilibrium wall
+function of issue #62 (below) and the time-corrected tvd2 momentum advection of issue #66; with the former local wall
+function they gave 6.16, 6.99, 7.41 and 6.94 S, before issue #66 6.07, 7.22, 7.73 and 7.18 S.
 
 ![Boundary](figures/recirculation_boundary.png)
 
 An impulsive start excites the quarter-wave mode of the reach (7.3 s). With a fixed level at the outlet xR swings from
-2.9 to 10.7 S and settles after about 40 s; the relaxed outflow (issue #54) removes this.
+3.0 to 10.4 S and settles after about 40 s; the relaxed outflow (issue #54) removes this.
 
 Hydrostatic runs with a fixed level can blow up. The swing of the discharge lifts the jet to the Courant limit of the
 explicit advection (0.625 m/s at this time step). A prescribed velocity at the inlet even feeds the mode (about 1.4 per
@@ -118,7 +119,7 @@ period, in the non-hydrostatic mode as well); a prescribed discharge damps it. U
 
 ![Weir](figures/recirculation_weir.png)
 
-A trapezoidal weir of height S with a 1:1 downstream face (no reference): non-hydrostatic xR = 5.23 S from the toe;
+A trapezoidal weir of height S with a 1:1 downstream face (no reference): non-hydrostatic xR = 5.25 S from the toe;
 hydrostatic: no reverse flow at all.
 
 Bed cell of k-epsilon (issue #62)

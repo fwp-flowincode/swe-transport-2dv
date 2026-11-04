@@ -22,8 +22,8 @@ const ST1_RELAXATION = 20.0     # s, reflects < 3 % of the 8 s mode of the reach
 const ST1_XR_LES = 6.15         # step heights, Luo et al. (2023), Fig. 3
 const ST1_XR_RTOL = 0.2         # -, the grid spread of section 28; this grid gives 6.08
 const ST1_SHIFT = 0.9           # -, bed shifted against the layers: lowest wet cell 0.1 dz (section 29)
-const ST1_SHIFT_RTOL = 0.1      # -, xR shifted against on the interface (measured 5.9 %; the local wall function: 38 %)
-const ST1_W_RATIO_MIN = 3.0     # -, largest w hydrostatic against non-hydrostatic (measured 4.3, and 10 at S/10)
+const ST1_SHIFT_RTOL = 0.1      # -, xR shifted against on the interface (measured 6.0 %; the local wall function: 38 %)
+const ST1_W_RATIO_MIN = 3.0     # -, largest w hydrostatic against non-hydrostatic (measured 3.6, and 10 at S/10)
 
 function rc_model(nx; nz=4, bed=nothing)
     cfg = ModelConfig(; length=RC_L, depth=RC_H, nx=nx, nz=nz, dt=RC_DT, nu=1e-6, turbulence_closure="k_epsilon",

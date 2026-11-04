@@ -331,6 +331,56 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         end
     end
 
+    # Von Neumann analysis of the tvd2 momentum advection (`_wd_upwind_value`) for linear advection u_t + a u_x = 0,
+    # a > 0, Courant number C: u_i <- u_i - C (u*_i - u*_{i-1}). Where the solution is smooth the MC slope is Fromm's,
+    # (u_{i+1} - u_{i-1})/2, and the update is linear with the amplification factor
+    #   G(theta) = 1 - C [(1 - e^{-i theta}) + (1 - c)/4 (e^{i theta} - 1 - e^{-i theta} + e^{-2 i theta})],
+    # c = C with the Lax-Wendroff time correction (Fromm's scheme, |G| <= 1 for C <= 1) and c = 0 without it (MUSCL with
+    # forward Euler: |G| > 1 for every C > 0). Measured on a sine of small amplitude on a linear ramp, so that the limiter
+    # stays in its smooth branch; the ramp itself is advected exactly by both. Sweby (1984), SIAM J. Numer. Anal. 21,
+    # 995-1011; LeVeque (2002), Finite Volume Methods for Hyperbolic Problems, sec. 8.3 (equation numbers not checked).
+    VN_N = 400                   # -, points
+    VN_STEPS = 20                # -, steps (the boundaries affect at most 2 points per step)
+    VN_RAMP = 1.0                # m/s per point, background slope
+    VN_AMPLITUDE = 1e-8          # m/s, perturbation: amplitude * wavenumber << ramp keeps the slope ratio near 1, also
+                                 # after the growth of the uncorrected scheme (1.46^20 = 2e3 at C = 0.9)
+    VN_GROWTH_ATOL = 2e-3        # -, measured against analytical |G| per step
+    VN_STABLE_MAX = 1 + 1e-12    # -, largest |G| per step with the time correction
+    vn_g(C, c, th) = abs(1 - C * ((1 - exp(-im * th)) + (1 - c) / 4 * (exp(im * th) - 1 - exp(-im * th) + exp(-2im * th))))
+    function vn_measured(C, wavelength, corrected)
+        th = 2pi / wavelength
+        u = [VN_RAMP * i + VN_AMPLITUDE * cos(th * i) for i in 1:VN_N]
+        background = [VN_RAMP * i for i in 1:VN_N]
+        star = similar(u)
+        for _ in 1:VN_STEPS
+            for v in (u, background)
+                for i in 2:(VN_N - 1)
+                    star[i] = SweTransport2DV._wd_upwind_value(v[i], v[i - 1], v[i + 1], true, true, corrected ? C : 0.0)
+                end
+                for i in VN_N-1:-1:3
+                    v[i] -= C * (star[i] - star[i - 1])
+                end
+            end
+        end
+        window = (3 * VN_STEPS):(VN_N - 2 * VN_STEPS)
+        p = u[window] .- background[window]
+        amplitude = sqrt(2 * sum(abs2, p) / length(p))
+        return (amplitude / VN_AMPLITUDE)^(1 / VN_STEPS)
+    end
+
+    @testset "test_verify_wd_tvd2_momentum_von_neumann" begin
+        for C in (0.2, 0.6, 0.9), wavelength in (4.0, 4.6, 8.0, 20.0)
+            th = 2pi / wavelength
+            g_corrected = vn_measured(C, wavelength, true)
+            @test isapprox(g_corrected, vn_g(C, C, th); atol=VN_GROWTH_ATOL)
+            @test g_corrected <= VN_STABLE_MAX + VN_GROWTH_ATOL
+            # without the correction the measured growth follows the unstable forward-Euler factor
+            @test isapprox(vn_measured(C, wavelength, false), vn_g(C, 0.0, th); atol=VN_GROWTH_ATOL)
+        end
+        @test vn_g(0.6, 0.0, 2pi / 4.6) > 1.15           # the growth seen in the splitter plate (issues #42, #66)
+        @test maximum(vn_g(C, C, th) for C in 0.05:0.05:1.0, th in range(0.01, pi; length=200)) <= VN_STABLE_MAX
+    end
+
     @testset "test_verify_wd_negative_depth_is_rejected" begin
         cfg = wd_config(length=10.0, depth=1.0, nx=20, nz=4, dt=0.01)
         cfg.bed_level = fill(0.3, cfg.nx)
@@ -517,7 +567,7 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
 
     variant(tag) = only(v for v in WD_VARIANTS if v.tag == tag)
 
-    # Measured at dx = 0.25 m: 1D L1 0.51 % (upwind1 0.91 %), front 5.6 % (11.3 %); 2DV L1 0.54 % (0.91 %), front 6.6 %
+    # Measured at dx = 0.25 m: 1D L1 0.51 % (upwind1 0.90 %), front 5.6 % (10.3 %); 2DV L1 0.54 % (0.90 %), front 6.6 %
     # (11.3 %), layer spread 0.003 m/s (0.001 m/s).
     @testset "test_validate_wd_ritter_tvd2_improves_on_upwind1" begin
         for nz in (1, 12)
@@ -550,12 +600,15 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         @test eta <= CG_ETA_REL_MAX * amplitude
     end
 
-    # The shoreline improves slightly with tvd2 (14.3 mm vs 14.6 mm at dx = 0.1 m); the surface error away from the shore
-    # does not (3.5 mm vs 3.3 mm): both are dominated by the wet/dry front, where tvd2 falls back to first order.
+    # The shoreline error is the same with tvd2 and upwind1 (14.05 mm vs 14.04 mm at nx = 240), the surface error slightly
+    # smaller (3.51 mm vs 3.54 mm): both are dominated by the wet/dry front, where tvd2 falls back to first order. (Without
+    # the time correction of the tvd2 momentum advection the shoreline was 1 % better, 13.88 mm: an effect of its
+    # anti-diffusive time error.)
+    CG_TVD2_SHORE_RTOL = 0.01   # -, tvd2 shoreline error at most this much above the upwind1 one
     @testset "test_validate_wd_carrier_greenspan_runup_tvd2" begin
         shore_up, _, _ = run_carrier_greenspan(240, 1, 0.02; v=variant("hydro_upwind1"))
         shore_tvd, eta_tvd, amplitude = run_carrier_greenspan(240, 1, 0.02; v=variant("hydro_tvd2"))
-        @test shore_tvd < shore_up
+        @test shore_tvd <= (1 + CG_TVD2_SHORE_RTOL) * shore_up
         @test eta_tvd <= CG_ETA_REL_MAX * amplitude
     end
 
