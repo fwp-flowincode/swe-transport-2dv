@@ -1879,6 +1879,68 @@ Limitations: option B (nothing downstream acts on the streams above the end of t
 4 mm of the test (bed friction alone gives about 2.6 mm), and the relaxed outflow keeps the outflow level 2.9 mm above
 its target in the steady state; the measurements are extracted from figures, not the original data.
 
+### 31) Suspended cohesive sediment and a jet pulse eroding the bed (issue #64)
+
+**Equations** (`src/sediment.jl`, wetting-drying step). One fraction of suspended mud, concentration $c$ (kg/m³):
+
+$$\partial_t(hc)+\partial_x(qc)+\Delta_z(Wc)=\partial_z\left(K\,\partial_zc\right)+\partial_z(w_sc),\qquad K=\nu_t/\sigma_c,\ \sigma_c=0.7,$$
+
+with the bed exchange in the lowest wet cell: erosion $E=M(\tau_b/\tau_{ce}-1)$ for $\tau_b>\tau_{ce}$ (Partheniades 1965)
+and deposition $D=w_sc_b$ (continuous deposition; Winterwerp & van Kesteren 2004, sec. 7.4), $M$ the erosion parameter
+(kg/m²/s), $\tau_{ce}$ the critical stress (Pa), $w_s$ the settling velocity. The erodible bed mass per column limits $E$
+(default unlimited). The bed shear stress is that of the momentum bed friction, $\tau_b=\rho_0c_fU_w^2$ with
+$c_f=(\kappa/\ln(z_1/z_0))^2$ in the wall cell (the equilibrium wall cell of section 29 with k-epsilon).
+
+**Numerics.**
+- Advection: the conservative transport of the density (section 18) as a scalar kernel (`_wd_transport_scalar!`, the
+  density path unchanged): increment form, `upwind1` or flux-limited Lax-Wendroff `tvd2`, bounds $[0,\max c]$; the inflow
+  at the left face carries `inflow_concentration`, water entering through the right face `outside_concentration`
+  (default 0: clean water from outside; zero gradient there would carry the plume back in at a flow reversal).
+- Settling, turbulent diffusion and the bed exchange: per column backward Euler in finite volumes on the wet cells of
+  $h^{n+1}$, the settling flux upwinded from above (out through the lower face of each cell, out of the lowest one into
+  the bed), $E$ as a source in the lowest cell. The matrix is an M-matrix (positive diagonal, non-positive off-diagonal),
+  so $c\ge0$ for any $\Delta t$ without clipping, and the column sums give
+  $\sum_kh_kc_k^{n+1}=\sum_kh_kc_k^*+\Delta t\,(E-w_sc_b^{n+1})$: the suspended mass changes exactly by the bed exchange.
+- Density coupling (default): the mixture density $\rho+c(1-\rho/\rho_s)$ replaces $\rho$ in the baroclinic pressure and
+  in the buoyancy term of k-epsilon; the transported $\rho$ is the water density.
+
+**Verification** (`test_sediment.jl`):
+
+| test | measured |
+|---|---|
+| settling column, uniform $c_0$, no erosion: suspended mass against $c_0(H-w_st)$ until the clear-water front is near the bed ($t=0.2H/w_s$) | $1.4\cdot10^{-6}$ (implicit upwind smearing of the front) |
+| suspended + deposited mass | constant to $10^{-15}$ |
+| erosion flux against $M(\tau_b/\tau_{ce}-1)$ with the $\tau_b$ of the step; limited by a small bed mass | to round-off |
+| channel with erosion, clean inflow, outflow: suspended mass against inflow - outflow + erosion - deposition | $2\cdot10^{-14}$ |
+| reversed flow at the open boundary: the entering water carries `outside_concentration` | to round-off |
+| lock exchange driven by sediment against the equivalent salt density $\rho+c(1-\rho/\rho_s)$ | same flow to $10^{-9}$ |
+| equilibrium profile in a uniform k-epsilon channel against the Rouse profile $[(H-z)/z\cdot z_r/(H-z_r)]^P$, $P=w_s\sigma_c/(\kappa u_*)=0.52$ | $-5.4$ to $+4.8$ % in $0.15$-$0.75\,H$ |
+
+(Rouse 1937: the profile of the parabolic $\nu_t=\kappa u_*z(1-z/H)$; the k-epsilon $\nu_t$ is not exactly parabolic.)
+
+**Jet pulse** (`experiments/jet_sediment/`, README). 200 m basin, 28 m deep, mud bed ($z_0=2\cdot10^{-4}$ m; $w_s=0.5$
+mm/s, $\tau_{ce}=0.2$ Pa, $M=10^{-4}$ kg/m²/s, assumed). A pipe of 3 m diameter in the left wall, lower edge 5 m above the
+bed: in 2DV a slot from 5 to 8 m at 3 m/s (9 m²/s per metre: the 120 m³/s of the issue over a basin width of 13 m),
+3 min with 5 s ramps; relaxed outflow at the right end; k-epsilon, non-hydrostatic, $\Delta x$ = 1 m,
+$\Delta z$ = 0.5 m; 15 min.
+
+The offset jet attaches to the bed within about 20 m (Coanda effect) and runs along it as a wall jet to 70-80 m, where it
+lifts the mud (up to 259 mg/l); the bed shear stress exceeds 10 Pa over the first 68 m (peak 29.7 Pa at $x$ = 26 m). Of
+the 82 kg/m eroded in 15 min, 44 kg/m is eroded during the pulse and 37 kg/m after it, under the near-bed branch of the
+two recirculation cells the jet leaves in the first 100 m; 63 kg/m of the net loss comes from the first 50 m, 16 kg/m from
+50-150 m, 0.3 kg/m beyond. At 900 s 79 kg/m is in suspension (about 30 mg/l over the whole depth in the first 110 m),
+90 % of it within 100 m of the pipe; settling returns 1.9 kg/m, the outflow takes 0.3 kg/m. The budget closes to
+$3\cdot10^{-12}$ kg/m.
+
+Non-hydrostatic only: the attachment of the offset jet is due to the low pressure between jet and bed, which the
+hydrostatic model does not have. In a run with a 6 m pipe at 2 m/s for 3 min the hydrostatic jet did not attach and
+eroded a tenth of the non-hydrostatic one; there $\Delta x$ = 1 and 0.5 m agreed within 10 %.
+
+Limitations: 2DV (the jet does not spread sideways, so the wall jet and the recirculation cells reach further than in the
+real basin; during the pulse the discharge has to leave through the basin, a 0.32 m/s through-flow that holds the bed
+above $\tau_{ce}$ away from the jet and raises the level by about $q/\sqrt{gH}=0.54$ m); one fraction without flocculation
+and consolidation; unlimited erodible bed; assumed mud parameters.
+
 ## Test-by-test documentation
 
 ### test_verify_state_shapes
@@ -3063,6 +3125,27 @@ outflow.
 - `test_validate_two_streams_steady_discharge`: mean outflow over the last 20 s within 1 % of the inflow.
 - `test_verify_inflow_per_layer_argument_checks`: wrong lengths, `left_k` without `left_eps`, non-positive values and
   `left_k` without k-epsilon are rejected; `clear_x_inflow_outflow!` clears them.
+
+### Sediment tests (`test_sediment.jl`, section 31)
+
+- `test_verify_sediment_settling_column`: 2 m column at rest, no turbulence, $c_0=0.5$ kg/m³, $w_s=1$ mm/s: at
+  $t=0.2H/w_s$ the suspended mass equals $c_0(H-w_st)$ within $10^{-4}$ (measured $1.4\cdot10^{-6}$), suspended plus
+  deposited mass is conserved to round-off, $c\ge0$, the deposit is uniform.
+- `test_verify_sediment_erosion_partheniades`: one step of the channel: $E=M(\tau_b/\tau_{ce}-1)$ to round-off; a bed
+  mass of $0.1\,M\Delta t$ limits $E$ to $0.1\,M$ and keeps the bed non-negative.
+- `test_verify_sediment_mass_budget`: channel with erosion and clean inflow, 200 steps: suspended mass against inflow -
+  outflow + erosion - deposition within $10^{-9}$ (measured $2\cdot10^{-14}$); the bed change matches deposition minus
+  erosion.
+- `test_verify_sediment_clean_water_enters_at_the_open_boundary`: reversed flow at the right face: the last cell differs
+  from the zero-gradient case by $\Delta t/\Delta x\,q(c_{out}-c_{nx})/h$, no other cell differs, no sediment enters.
+- `test_verify_sediment_density_coupling_equals_salt`: non-hydrostatic lock exchange driven by 2 kg/m³ of sediment
+  ($w_s=0$) against the same driven by the salt density $\rho+c(1-\rho/\rho_s)$: the velocities and densities agree
+  within $10^{-9}$.
+- `test_validate_sediment_rouse_profile`: uniform channel (1 m, 1 m/s, $z_0=1$ mm, $w_s=2$ cm/s, $P=0.52$), 300 s:
+  $c(z)/c(H/2)$ within 10 % of the Rouse profile at $z/H$ = 0.15, 0.3, 0.6, 0.75 (measured $-5.4$ to $+4.8$ %); erosion
+  and deposition balance within 5 %.
+- `test_verify_sediment_argument_checks`: negative settling velocity, zero critical stress, negative concentration, wrong
+  inflow length, particles lighter than the water, no wetting and drying, no bed roughness are rejected.
 
 ## Additional validation scripts and literature basis
 
