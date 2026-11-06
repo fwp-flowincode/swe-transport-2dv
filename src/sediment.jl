@@ -72,8 +72,9 @@ end
 
 Adds one fraction of suspended cohesive sediment to a wetting-drying model (issue #64; see src/sediment.jl for the
 equations). `concentration` (kg/m³): initial value, scalar or nz x nx. `bed_mass` (kg/m²): erodible mass per column,
-scalar or one per column. Needs `wetting_drying=true` and a bed roughness length (the bed shear stress is that of the
-log-law bed friction).
+scalar or one per column. Needs `wetting_drying=true` and, with erosion, a bed roughness length (the bed shear stress is
+that of the log-law bed friction). With `settling_velocity=0`, `erosion_parameter=0` and `density_coupling=false` the
+fraction is a passive tracer.
 """
 function attach_sediment!(model::Model; settling_velocity::Real, critical_erosion_stress::Real, erosion_parameter::Real,
     sediment_density::Real=SED_DENSITY, density_coupling::Bool=true, concentration=0.0, inflow_concentration=0.0,
@@ -81,7 +82,10 @@ function attach_sediment!(model::Model; settling_velocity::Real, critical_erosio
     wd = model.wetdry
     wd === nothing && throw(ArgumentError("attach_sediment! needs wetting_drying=true"))
     cfg = model.config
-    cfg.bed_roughness_length > 0 || throw(ArgumentError("attach_sediment! needs bed_roughness_length > 0 (log-law bed shear stress)"))
+    # WHY not without erosion: the bed shear stress only drives the erosion; with erosion_parameter = 0 a frictionless bed
+    # (z0 = 0: tau_b = 0) is allowed, e.g. a passive tracer (settling_velocity = 0, density_coupling = false; issue #11)
+    (cfg.bed_roughness_length > 0 || erosion_parameter == 0) ||
+        throw(ArgumentError("attach_sediment! with erosion needs bed_roughness_length > 0 (log-law bed shear stress)"))
     (isfinite(settling_velocity) && settling_velocity >= 0) || throw(ArgumentError("settling_velocity must be >= 0"))
     (isfinite(critical_erosion_stress) && critical_erosion_stress > 0) || throw(ArgumentError("critical_erosion_stress must be > 0"))
     (isfinite(erosion_parameter) && erosion_parameter >= 0) || throw(ArgumentError("erosion_parameter must be >= 0"))

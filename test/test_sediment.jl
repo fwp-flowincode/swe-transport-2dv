@@ -196,5 +196,7 @@ end
         smooth = ModelConfig(; length=1.0, depth=1.0, nx=2, nz=4, dt=0.1, wetting_drying=true, implicit_vertical_terms=true,
             write_plots=false)
         @test_throws ArgumentError attach_sediment!(Model(smooth); kw...)
+        # without erosion the smooth bed is allowed (passive tracer, issue #11)
+        @test attach_sediment!(Model(smooth); kw..., erosion_parameter=0.0) isa SedimentState
     end
 end

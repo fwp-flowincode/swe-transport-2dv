@@ -17,6 +17,7 @@ every file includes, so each file also runs on its own (`julia --project=. test/
 | `test_variable_top_layer.jl` | variable-thickness top layer (section 13) |
 | `test_bed_geometry.jl` | variable bed (staircase, issue #3) |
 | `test_wetting_drying.jl` | wetting and drying, reference solutions (section 18) |
+| `test_dam_break.jl` | Stoker (wet bed) and Ritter (dry bed) dam breaks in layers, passive constituent (section 33) |
 
 ## Governing model
 
@@ -2017,6 +2018,54 @@ advective Courant number ($U\Delta t/\Delta x$ = 0.5 in the jet), not by the sol
 - GPU (KernelAbstractions) for the fixed grid: the explicit stencils and the spectral solver (cuFFT) map directly; the
   wetting-drying step (Newton solve, sparse factorization) much less so.
 
+### 33) Dam breaks: Stoker on a wet bed and Ritter on a dry bed, in layers (issues #11, #12)
+
+**Reference** (`stoker_dam_break`, `stoker_middle_state`, `src/reference_solutions.jl`). Stoker (1957, ch. 10; SWASHES
+Sec. 4.1.1): depth $h_0$ behind the dam at $x_0$, $h_1$ in front of it, flat frictionless bed. With $c_0=\sqrt{gh_0}$
+the middle state $c_m=\sqrt{gh_m}$ solves
+
+$$-8gh_1c_m^2(c_0-c_m)^2+(c_m^2-gh_1)^2(c_m^2+gh_1)=0,\qquad \sqrt{gh_1}<c_m<c_0,$$
+
+(bisection to machine precision), $u_m=2(c_0-c_m)$ (Riemann invariant), and the bore runs at
+$s=2c_m^2(c_0-c_m)/(c_m^2-gh_1)$. The solution is still water for $\xi=(x-x_0)/t\le-c_0$, the rarefaction
+$h=(2c_0-\xi)^2/(9g)$, $u=\tfrac23(\xi+c_0)$ for $-c_0<\xi\le u_m-c_m$, the middle state up to $\xi=s$ and still water
+$h_1$ beyond; $h_1=0$ gives Ritter.
+
+**Set-up** (`test/test_dam_break.jl`, `experiments/wetting_drying/`, mode `stoker`). The Ritter channel of section 18
+(100 m, dam at 40 m, $h_0$ = 1 m, grid depth 1.2 m, $\Delta t$ = 0.01 s/m $\cdot\,\Delta x$, comparison at 5 s), Stoker
+with $h_1$ = 0.2 m ($h_m$ = 0.508 m, $u_m$ = 1.80 m/s, $s$ = 2.97 m/s, bore Froude number 2.1), upwind1. The bore position
+is where the depth crosses $(h_m+h_1)/2$, interpolated linearly between the cells. The constituent of issues #11 and #12
+is a passive tracer: `attach_sediment!` with $w_s=0$, no erosion and no density coupling (now allowed on a frictionless
+bed, since the bed shear stress only drives the erosion), 1 kg/m³ behind the dam.
+
+**Results** at $\Delta x$ = 0.25 m (relative L1 depth error; bore or front position error relative to the distance
+travelled):
+
+| case | layers | hydrostatic L1 | bore / front | non-hydrostatic L1 | bore / front |
+|---|---|---|---|---|---|
+| Stoker | 1 | 0.42 % | -0.34 % | | |
+| Stoker | 2 | 0.42 % | -0.39 % | 0.54 % | -0.51 % |
+| Stoker | 3 | 0.43 % | -0.83 % | 0.84 % | -2.2 % |
+| Stoker | 5 | 0.51 % | -1.5 % | 0.95 % | -3.4 % |
+| Stoker | 10 | 0.52 % | -1.7 % | 1.03 % | -3.6 % |
+| Ritter | 1-10 | 0.90 % | 10.3-11.3 % | 1.00-1.06 % | 10.3-11.3 % |
+
+- Stoker 1D converges at first order (L1 1.2 %, 0.74 %, 0.42 %, 0.25 %, 0.15 % from $\Delta x$ = 1 to 1/16 m; bore
+  0.40 % to 0.12 %); tvd2: L1 0.28 %, bore -0.10 %.
+- Hydrostatic layers: the depth stays within 0.23 % of the 1D depth, but the bore lags once it lifts the surface through
+  a layer interface (from 3 layers), by 1.5-2 % of the distance travelled, converging slowly (10 layers: 2.0 % at
+  $\Delta x$ = 1 m, 1.5 % at 0.125 m). Behind the bore the layer velocities differ by up to 0.08 m/s (4 % of $u_m$):
+  across a shock the split of the momentum between the layers depends on the scheme (the layers below $h_1$ start at
+  rest, those above are filled through the bore), and without viscosity nothing evens it out. Initialising a newly opened
+  face layer with the velocity of the same layer upstream instead of the layer below moved the bore by 0.1 % and raised
+  the spread to 0.44 m/s; the source of the lag is open.
+- Non-hydrostatic: the bore front has the width of the depth and lags the shallow-water bore by about 0.5 m at
+  $\Delta x$ = 0.25 m and 0.125 m alike (3.6 %, 3.7 % with 10 layers); the middle state is 1.6 % deeper. The shallow-water
+  solution is not the limit of the non-hydrostatic equations at a bore; the tests bound the difference.
+- Ritter is unchanged with 2, 3, 5 or 10 layers in both modes (the falling surface opens no layers).
+- Water volume and constituent mass are conserved to $10^{-15}$ (relative) in all runs; the tracer stays within its
+  initial bounds and does not change the flow (bit for bit).
+
 ## Test-by-test documentation
 
 ### test_verify_state_shapes
@@ -3242,6 +3291,24 @@ outflow.
   the final-state plot, the animation (3 frames) and the pressure-buoyancy diagnostics are written for a small
   non-hydrostatic fixed grid, a bed step with solid cells and a wetting-drying slope with a stem; every file exists and
   is not empty. The other tests switch the plots off; these keep the plotting code covered.
+
+### Dam-break tests (`test_dam_break.jl`, section 33)
+
+- `test_verify_stoker_reference_solution`: jump conditions of mass and momentum at the bore and the Riemann invariant
+  through the rarefaction to round-off; still water ahead of the rarefaction and beyond the bore, the rarefaction joins
+  the middle state continuously; the released volume fills the channel (quadrature, $10^{-5}$); $h_1=0$ gives Ritter;
+  $h_1\ge h_0$, $h_1=0$ in `stoker_middle_state` and $t\le0$ are rejected.
+- `test_validate_stoker_wet_dam_break_1d`: at $\Delta x$ = 0.25 m L1 below 1 % and at most 0.8 times the error at
+  0.5 m, bore within 1 %; tvd2 better than upwind1, bore within 1 %.
+- `test_validate_stoker_wet_dam_break_2dv_hydrostatic_nz{2,3,5,10}`: L1 below 1 %, bore within 2.5 %, depth within 1 %
+  of the 1D depth, layer velocities within 0.1 m/s.
+- `test_validate_stoker_wet_dam_break_2dv_nonhydrostatic_nz{2,3,5,10}`: L1 below 1.5 %, bore within 5 %, depth within
+  1.5 % of the 1D (hydrostatic) depth.
+- `test_validate_ritter_dry_dam_break_2dv_{hydrostatic,nonhydrostatic}_nz{2,3,5,10}`: L1 below 3 %, front within 12 %
+  (the bounds of test_wetting_drying.jl), hydrostatic layer velocities within 0.01 m/s.
+- `test_verify_dam_break_constituent_mass_{stoker,ritter}_{hydrostatic,nonhydrostatic}`: 5 layers, passive tracer:
+  mass conserved to $10^{-12}$, depth and velocity identical to the run without tracer, $0\le c\le1$ kg/m³.
+- Every run checks the water volume ($10^{-12}$) and finite velocities.
 
 ## Additional validation scripts and literature basis
 

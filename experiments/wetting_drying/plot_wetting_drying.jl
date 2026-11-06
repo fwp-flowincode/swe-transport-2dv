@@ -2,8 +2,9 @@
 #
 # Usage (any working directory):
 #   julia --project=<repository> experiments/wetting_drying/plot_wetting_drying.jl [mode ...]
-# Modes: lake, ritter, runup, sloshing, mms (manufactured solution of the momentum advection), schemes (upwind1 against
-# tvd2), dispersion (non-hydrostatic standing waves), solitary (solitary wave runup, Synolakis 1987); default: all.
+# Modes: lake, ritter, stoker (wet-bed dam break, and both dam breaks against the number of layers), runup, sloshing, mms
+# (manufactured solution of the momentum advection), schemes (upwind1 against tvd2), dispersion (non-hydrostatic
+# standing waves), solitary (solitary wave runup, Synolakis 1987); default: all.
 # Each takes a few minutes or less.
 # Output: output_barotropic/wetting_drying_figures/; the PNG and GIF files are copied to figures/.
 
@@ -17,7 +18,7 @@ using Printf
 
 include(joinpath(@__DIR__, "cases.jl"))
 
-const MODES = isempty(ARGS) ? ["lake", "ritter", "runup", "sloshing", "mms", "schemes", "dispersion", "solitary"] : ARGS
+const MODES = isempty(ARGS) ? ["lake", "ritter", "stoker", "runup", "sloshing", "mms", "schemes", "dispersion", "solitary"] : ARGS
 const OUTPUT_DIR = joinpath(@__DIR__, "..", "..", "output_barotropic", "wetting_drying_figures")
 const FIGURE_DIR = joinpath(@__DIR__, "figures")
 
@@ -39,6 +40,12 @@ const RITTER_NZ_2DV = 12                                 # -, layers of 0.1 m
 const RITTER_T_END = 5.0                                 # s, comparison time
 const RITTER_ANIMATION_END = 8.0                         # s, before the front reaches the right wall
 const RITTER_FRAME_INTERVAL = 0.2                        # s
+# Stoker (issue #11) and the dam breaks against the number of layers (issues #11, #12)
+const STOKER_NZ_2DV = 10                                 # -, layers of 0.12 m
+const STOKER_NX_1D = (100, 200, 400, 800, 1600)          # -, convergence study
+const STOKER_NX_2DV = (100, 200, 400, 800)               # -
+const DAM_BREAK_LAYERS = (1, 2, 3, 5, 10)                # -, layer study at RITTER_PROFILE_NX
+const STOKER_XLIMS = (10.0, 70.0)                        # m
 # Carrier-Greenspan
 const CG_RUNS = ((label="1D, dx = 0.1 m", nx=240, nz=1, dt=0.02), (label="1D, dx = 0.05 m", nx=480, nz=1, dt=0.01),
     (label="2DV, dx = 0.05 m, nz = 15", nx=480, nz=15, dt=0.01))
@@ -200,6 +207,99 @@ function plot_ritter()
     frame_at(0.0)
     run_to!(m, RITTER_ANIMATION_END; on_step=(mm, t) -> (round(Int, t / mm.config.dt) % stride == 0 && frame_at(t)))
     save_gif(anim, "ritter_2dv.gif")
+end
+
+# ---- Stoker dam break -------------------------------------------------------------------------------------------------
+# Depth-mean velocity (m/s) per column, NaN where the depth is below RITTER_FRONT_DEPTH.
+function depth_mean_velocity(m::Model)
+    hd = water_depth(m)
+    q = [sum(m.wetdry.h[:, i] .* 0.5 .* (m.state.u[:, i] .+ m.state.u[:, i + 1])) for i in 1:m.config.nx]
+    return [hd[i] > RITTER_FRONT_DEPTH ? q[i] / hd[i] : NaN for i in eachindex(hd)]
+end
+
+function plot_stoker()
+    println("\n=== Stoker dam break on a wet bed ===")
+    fig_h = plot(xlabel="x (m)", ylabel="depth h (m)", legend=:topright, size=LINE_SIZE_PX, xlims=STOKER_XLIMS,
+        left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM,
+        title=@sprintf("Stoker dam break, h1/h0 = %.1f, dx = %.2f m", STOKER_H1 / RITTER_H0, RITTER_LENGTH / RITTER_PROFILE_NX))
+    fig_u = plot(xlabel="x (m)", ylabel="depth-mean velocity (m/s)", legend=:topleft, size=LINE_SIZE_PX, xlims=STOKER_XLIMS,
+        left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM)
+    models = ((stoker_model(RITTER_PROFILE_NX, 1), :solid, 2, "1D"),
+        (stoker_model(RITTER_PROFILE_NX, STOKER_NZ_2DV), :dot, 1, "2DV hydrostatic"),
+        (stoker_model(RITTER_PROFILE_NX, STOKER_NZ_2DV; use_hydrostatic=false), :dash, 1, "2DV non-hydrostatic"))
+    x = wd_x_centres(first(models)[1].config)
+    xs = range(0.0, RITTER_LENGTH, length=4001)
+    t_prev = 0.0
+    for (j, t) in enumerate(RITTER_PROFILE_TIMES)
+        exact = [stoker_dam_break(xi, t; h0=RITTER_H0, h1=STOKER_H1, x0=RITTER_X0) for xi in xs]
+        plot!(fig_h, xs, first.(exact); color=:black, linestyle=:dash, linewidth=1, label=j == 1 ? "Stoker (1957)" : "")
+        plot!(fig_u, xs, last.(exact); color=:black, linestyle=:dash, linewidth=1, label=j == 1 ? "Stoker (1957)" : "")
+        for (m, style, width, label) in models
+            run_to!(m, t - t_prev)
+            plot!(fig_h, x, water_depth(m); color=j + 1, linestyle=style, linewidth=width, label=@sprintf("%s, t = %.2f s", label, t))
+            plot!(fig_u, x, depth_mean_velocity(m); color=j + 1, linestyle=style, linewidth=width, label="")
+        end
+        t_prev = t
+    end
+    save_figure(plot(fig_h, fig_u; layout=(2, 1), size=(820, 760)), "stoker_profiles.png")
+
+    # convergence
+    fig_c = plot(xscale=:log10, yscale=:log10, xlabel="dx (m)", ylabel="relative error (-)", legend=:bottomright,
+        size=LINE_SIZE_PX, left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM,
+        title=@sprintf("Stoker dam break at t = %.0f s: convergence", RITTER_T_END))
+    for (label, nz, nxs, style) in (("1D", 1, STOKER_NX_1D, :solid), ("2DV", STOKER_NZ_2DV, STOKER_NX_2DV, :dash))
+        dxs, l1s, bores = Float64[], Float64[], Float64[]
+        for nx in nxs
+            m = run_to!(stoker_model(nx, nz), RITTER_T_END)
+            t = round(Int, RITTER_T_END / m.config.dt) * m.config.dt
+            h, ha = water_depth(m), stoker_depth(m, t)
+            push!(dxs, RITTER_LENGTH / nx)
+            push!(l1s, sum(abs, h .- ha) / sum(ha))
+            push!(bores, abs(stoker_bore(wd_x_centres(m.config), h) - stoker_bore_exact(t)) / (stoker_bore_exact(t) - RITTER_X0))
+            @printf("%-4s dx = %.4f m | L1 depth error %.4f | bore error %.4f\n", label, dxs[end], l1s[end], bores[end])
+        end
+        plot!(fig_c, dxs, l1s; marker=:circle, linestyle=style, color=1, label="$(label): L1 depth error")
+        plot!(fig_c, dxs, bores; marker=:square, linestyle=style, color=2, label="$(label): bore position")
+    end
+    dx_ref = [RITTER_LENGTH / STOKER_NX_1D[1], RITTER_LENGTH / STOKER_NX_1D[end]]
+    plot!(fig_c, dx_ref, 0.01 .* dx_ref ./ dx_ref[1]; color=:gray, linestyle=:dot, label="first order")
+    save_figure(fig_c, "stoker_convergence.png")
+
+    # both dam breaks against the number of layers, hydrostatic and non-hydrostatic (issues #11, #12)
+    fig_l = plot(xlabel="layers nz", ylabel="relative error (-)", legend=:outerright, size=(900, 420), yscale=:log10,
+        xticks=collect(DAM_BREAK_LAYERS), left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM,
+        title=@sprintf("Dam breaks at t = %.0f s, dx = %.2f m", RITTER_T_END, RITTER_LENGTH / RITTER_PROFILE_NX))
+    for (dam, build, color) in (("Stoker", stoker_model, 1), ("Ritter", ritter_model, 2)), hydrostatic in (true, false)
+        l1s, fronts = Float64[], Float64[]
+        for nz in DAM_BREAK_LAYERS
+            m = run_to!(build(RITTER_PROFILE_NX, nz; use_hydrostatic=hydrostatic), RITTER_T_END)
+            t = round(Int, RITTER_T_END / m.config.dt) * m.config.dt
+            x, h = wd_x_centres(m.config), water_depth(m)
+            ha = dam == "Stoker" ? stoker_depth(m, t) : ritter_depth(m, t)
+            push!(l1s, sum(abs, h .- ha) / sum(ha))
+            push!(fronts, dam == "Stoker" ? abs(stoker_bore(x, h) - stoker_bore_exact(t)) / (stoker_bore_exact(t) - RITTER_X0) :
+                abs(ritter_front(x, h) - ritter_front_exact(t)) / (ritter_front_exact(t) - RITTER_X0))
+            @printf("%-6s %-15s nz = %2d | L1 depth error %.4f | front error %.4f\n", dam,
+                hydrostatic ? "hydrostatic" : "non-hydrostatic", nz, l1s[end], fronts[end])
+        end
+        mode = hydrostatic ? "hydrostatic" : "non-hydrostatic"
+        style = hydrostatic ? :solid : :dash
+        plot!(fig_l, collect(DAM_BREAK_LAYERS), l1s; color=color, linestyle=style, marker=:circle, label="$(dam), $(mode): L1 depth")
+        plot!(fig_l, collect(DAM_BREAK_LAYERS), fronts; color=color, linestyle=style, marker=:square,
+            label="$(dam), $(mode): $(dam == "Stoker" ? "bore" : "front")")
+    end
+    save_figure(fig_l, "dam_break_layers.png")
+
+    # 2DV animation of the velocity, non-hydrostatic
+    m = stoker_model(RITTER_PROFILE_NX, STOKER_NZ_2DV; use_hydrostatic=false)
+    stride = round(Int, RITTER_FRAME_INTERVAL / m.config.dt)
+    anim = Animation()
+    frame_at(t) = frame(anim, section(m, cell_velocity(m); clims=(0.0, 2.5), color=:thermal, colorbar_title="u (m/s)",
+        title=@sprintf("Stoker dam break, 2DV non-hydrostatic (%d x %d), t = %.1f s", m.config.nx, m.config.nz, t),
+        size=SECTION_SIZE_PX, left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM))
+    frame_at(0.0)
+    run_to!(m, RITTER_ANIMATION_END; on_step=(mm, t) -> (round(Int, t / mm.config.dt) % stride == 0 && frame_at(t)))
+    save_gif(anim, "stoker_2dv.gif")
 end
 
 # ---- Carrier-Greenspan runup -----------------------------------------------------------------------------------------
@@ -625,6 +725,7 @@ mkpath(FIGURE_DIR)
 for mode in MODES
     mode == "lake" ? plot_lake() :
     mode == "ritter" ? plot_ritter() :
+    mode == "stoker" ? plot_stoker() :
     mode == "runup" ? plot_runup() :
     mode == "sloshing" ? plot_sloshing() :
     mode == "mms" ? plot_mms() :

@@ -34,6 +34,9 @@ Structure
   k-epsilon, compared with measurements extracted from the Delft3D-FLOW Validation Document (2008), issue #42
   ([README](splitter_plate/README.md)).
 - sluice_gate/: free and submerged flow under a sluice gate, hydrostatic with a contraction coefficient and non-hydrostatic, hydraulic jump with Chezy friction, issues #48 and #57 ([README](sluice_gate/README.md)).
+- wetting_drying/: wetting and drying on cut cells: lake at rest, Ritter (dry bed) and Stoker (wet bed) dam breaks in
+  1-10 layers, standing wave and solitary wave on a beach, sloshing, non-hydrostatic dispersion, issues #31, #11, #12
+  ([README](wetting_drying/README.md)).
 - k_epsilon_wetting_drying/: k-epsilon on the cut cells: stratified dam break onto a dry slope, realizability bound, open channels, issue #30 ([README](k_epsilon_wetting_drying/README.md)).
 - open_boundaries/: waves at the free outflow, a prescribed level and a wall, hydrostatic and non-hydrostatic (dispersive), relaxed outflow, issues #46, #49 and #54 ([README](open_boundaries/README.md)).
 - validation/: scripts that compare selected cases to analytic/semianalytic references.

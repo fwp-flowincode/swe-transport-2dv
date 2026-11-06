@@ -3,6 +3,7 @@
 #
 # References:
 # - Ritter (1892), Z. Ver. Deutsch. Ing. 36, 947-954 (dam break on a dry bed)
+# - Stoker (1957), Water Waves, Interscience, ch. 10 (dam break on a wet bed)
 # - Carrier & Greenspan (1958), J. Fluid Mech. 4, 97-109 (standing wave on a planar beach)
 # - Delestre et al. (2013), Int. J. Numer. Methods Fluids 72, 269-300 (SWASHES: analytical solutions with wet/dry fronts)
 
@@ -96,6 +97,40 @@ ritter_front(x::AbstractVector, h::AbstractVector) = x[findlast(>(RITTER_FRONT_D
 
 "Analytical position (m) of the depth RITTER_FRONT_DEPTH at time t (s): x0 + (2 c0 - 3 sqrt(g h_f)) t."
 ritter_front_exact(t::Real; g::Real=9.81) = RITTER_X0 + (2sqrt(g * RITTER_H0) - 3sqrt(g * RITTER_FRONT_DEPTH)) * t
+
+# ---- Stoker dam break on a wet bed (issue #11) -------------------------------------------------------------------
+const STOKER_H1 = 0.2            # m, depth in front of the dam (h1/h0 = 0.2 as in SWASHES; bore Froude number 2.1)
+
+"""
+    stoker_model(nx, nz; scheme="upwind1", kwargs...) -> Model
+
+The Ritter dam break (RITTER_X0, RITTER_H0, same channel and time step) with still water of depth STOKER_H1 in front of
+the dam. `kwargs` override other configuration fields (e.g. use_hydrostatic=false).
+"""
+function stoker_model(nx::Int, nz::Int; scheme::AbstractString="upwind1", kwargs...)
+    model = ritter_model(nx, nz; scheme=scheme, kwargs...)
+    initialize_water_level!(model, [x < RITTER_X0 ? RITTER_H0 : STOKER_H1 for x in wd_x_centres(model.config)]; rho=WD_RHO0)
+    return model
+end
+
+"Stoker depth (m) at the cell centres of `model` at time t (s)."
+stoker_depth(model::Model, t::Real) = [stoker_dam_break(x, t; h0=RITTER_H0, h1=STOKER_H1, x0=RITTER_X0, g=model.config.g)[1] for x in wd_x_centres(model.config)]
+
+"""
+    stoker_bore(x, h; g=9.81) -> Float64
+
+Bore position (m): where the depth `h` (m, at the cell centres `x`) crosses the mean of the middle and the downstream
+depth, (h_m + h1)/2, interpolated linearly between the cells.
+"""
+function stoker_bore(x::AbstractVector, h::AbstractVector; g::Real=9.81)
+    hm, _, _ = stoker_middle_state(; h0=RITTER_H0, h1=STOKER_H1, g=g)
+    level = 0.5 * (hm + STOKER_H1)
+    i = findlast(>(level), h)
+    return x[i] + (h[i] - level) / (h[i] - h[i + 1]) * (x[i + 1] - x[i])
+end
+
+"Analytical bore position (m) at time t (s): x0 + s t."
+stoker_bore_exact(t::Real; g::Real=9.81) = RITTER_X0 + stoker_middle_state(; h0=RITTER_H0, h1=STOKER_H1, g=g)[3] * t
 
 # ---- Carrier-Greenspan standing wave on a planar beach -------------------------------------------------------------
 const CG_AMPLITUDE = 0.4         # -, dimensionless amplitude A (non-breaking for A < 1)
