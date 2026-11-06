@@ -12,6 +12,7 @@ Cases against exact properties or analytical solutions, in 1D and 2DV:
 |---|---|---|
 | Lake at rest over a beach, an island and a bump | stagnant water stays stagnant | u = 0 and level unchanged exactly (500 steps), also stratified |
 | Ritter dam break on a dry bed | Ritter (1892) | L1 depth error 0.9 % at dx = 0.25 m, first-order convergence |
+| Stoker dam break on a wet bed | Stoker (1957) | L1 depth error 0.4 % at dx = 0.25 m, bore within 0.4 %, first-order convergence |
 | Standing wave on a planar beach | Carrier & Greenspan (1958) | shoreline within 9 % of the runup amplitude at dx = 0.05 m |
 | Sloshing over two beaches, two water masses | conservation | water volume and constituent mass to 9e-16, density within its bounds |
 | Standing waves, non-hydrostatic | omega² = g k tanh(k H) | phase speed within 1.9 % up to k H = 3 |
@@ -21,7 +22,7 @@ Run all cases and write the figures (about 1 min):
 
 ```pwsh
 julia --project=. experiments/wetting_drying/plot_wetting_drying.jl            # all cases
-julia --project=. experiments/wetting_drying/plot_wetting_drying.jl ritter     # one case: lake, ritter, runup, sloshing
+julia --project=. experiments/wetting_drying/plot_wetting_drying.jl ritter     # one case: lake, ritter, stoker, runup, ...
 ```
 
 Output goes to `output_barotropic/wetting_drying_figures/`; the figures below are copies in `figures/`. The cases are
@@ -76,6 +77,44 @@ Velocity in 2DV (400 x 12 cells). Hydrostatic theory keeps u uniform over the de
 most 0.0013 m/s at t = 5 s (first-order convergent; a first version had 0.29 m/s, see "Depth-uniform velocity" below):
 
 ![Ritter 2DV](figures/ritter_2dv.gif)
+
+Stoker dam break on a wet bed
+-----------------------------
+
+Issue #11: the Ritter set-up with still water of h1 = 0.2 m in front of the dam (h1/h0 = 0.2 as in SWASHES). The exact
+solution (Stoker 1957) is a rarefaction from x0 - c0 t, a middle state h_m = 0.508 m, u_m = 1.80 m/s, and a bore that
+runs at s = 2.97 m/s (Froude number 2.1) into the still water (`stoker_dam_break`, `stoker_middle_state`; a test checks
+the jump conditions of mass and momentum). The bore position is where the depth crosses (h_m + h1)/2, interpolated
+between the cells.
+
+![Stoker profiles](figures/stoker_profiles.png)
+
+In 1D the depth converges at first order (L1 error 1.2 %, 0.74 %, 0.42 %, 0.25 %, 0.15 % from dx = 1 m to 1/16 m) and the
+bore lies within 0.4 % of the travelled distance (0.12 % at dx = 1/16 m); tvd2 gives L1 0.28 % and a bore within 0.1 % at
+dx = 0.25 m. With 10 hydrostatic layers the depth error is about the same (0.52 % at dx = 0.25 m), but the bore lags by
+1.5-2 % of the travelled distance (0.2 m at t = 5 s) and this converges only slowly (2.0 % at dx = 1 m, 1.5 % at
+0.125 m); behind the bore the layer velocities differ by up to 0.08 m/s (4 %), the lower layers slower. The lag appears
+as soon as the bore lifts the surface through a layer interface (from nz = 3: dz = 0.4 m; with nz = 2 both depths lie in
+the lowest layer). Copying the velocity of a newly opened face layer from upstream instead of from below was tried: it
+moved the bore by 0.1 % and increased the layer spread six-fold, so the lag is not a matter of the start velocity of
+new layers; it is open.
+
+![Stoker convergence](figures/stoker_convergence.png)
+
+Both dam breaks against the number of layers (issue #12 asks for 2, 3, 5 and 10), hydrostatic and non-hydrostatic, at
+dx = 0.25 m. Ritter is the same for every number of layers. The non-hydrostatic Stoker bore has a front of the width of
+the depth and lags the shallow-water bore by about 0.5 m (3.6 % with 10 layers), independent of dx (3.7 % at
+dx = 0.125 m): the shallow-water solution is not its limit.
+
+![Dam breaks and layers](figures/dam_break_layers.png)
+
+Velocity in 2DV, non-hydrostatic (400 x 10 cells):
+
+![Stoker 2DV](figures/stoker_2dv.gif)
+
+A passive constituent (`attach_sediment!` with settling_velocity = 0, erosion_parameter = 0, density_coupling = false;
+1 kg/m³ behind the dam) is conserved to 1e-15 in both dam breaks and both modes, stays within its bounds and leaves the
+flow unchanged bit for bit (test/test_dam_break.jl).
 
 Carrier-Greenspan standing wave on a planar beach
 --------------------------------------------------
@@ -212,6 +251,7 @@ References
 ----------
 
 - Ritter (1892), Z. Ver. Deutsch. Ing. 36, 947-954
+- Stoker (1957), Water Waves, Interscience, New York, ch. 10
 - Carrier & Greenspan (1958), J. Fluid Mech. 4, 97-109
 - Casulli & Cheng (1992), Int. J. Numer. Methods Fluids 15, 629-648
 - Stelling & Duinmeijer (2003), Int. J. Numer. Methods Fluids 43, 1329-1354

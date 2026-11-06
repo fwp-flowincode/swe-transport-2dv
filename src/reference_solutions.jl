@@ -1,4 +1,4 @@
-# Analytical reference solutions: shallow-water equations with wetting and drying (issue #31), uniform channel flow
+# Analytical reference solutions: shallow-water equations with wetting and drying (issue #31; dam breaks #11, #12), uniform channel flow
 # with Chezy friction (issue #14).
 
 const CG_NEWTON_TOL = 1e-13          # -, Newton tolerance on the dimensionless hodograph equations
@@ -26,6 +26,62 @@ function ritter_dam_break(x::Real, t::Real; h0::Real, x0::Real=0.0, g::Real=9.81
     xi <= -c0 && return (float(h0), 0.0)
     xi >= 2c0 && return (0.0, 0.0)
     return ((2c0 - xi)^2 / (9g), 2 * (xi + c0) / 3)
+end
+
+const STOKER_BISECTION_STEPS = 200   # -, bisection steps of the middle-state celerity (interval halves to machine precision)
+
+"""
+    stoker_middle_state(; h0, h1, g=9.81) -> (h_m, u_m, s)
+
+Middle state of the Stoker (1957) dam break on a wet, flat, frictionless bed (depth `h0` (m) upstream, `h1` (m)
+downstream, 0 < h1 < h0): depth h_m (m) and velocity u_m (m/s) between the rarefaction and the bore, and the bore speed
+s (m/s). The celerity c_m = sqrt(g h_m) solves (SWASHES, Delestre et al. 2013, Sec. 4.1.1)
+
+    -8 g h1 c_m^2 (c0 - c_m)^2 + (c_m^2 - g h1)^2 (c_m^2 + g h1) = 0,   c0 = sqrt(g h0),
+
+with sqrt(g h1) < c_m < c0 (the root is found by bisection); then u_m = 2 (c0 - c_m) (Riemann invariant through the
+rarefaction) and s = 2 c_m^2 (c0 - c_m) / (c_m^2 - g h1) (mass jump across the bore, h_m (u_m - s) = -h1 s).
+"""
+function stoker_middle_state(; h0::Real, h1::Real, g::Real=9.81)
+    0 < h1 < h0 || throw(ArgumentError("Stoker dam break needs 0 < h1 < h0"))
+    c0, c1 = sqrt(g * h0), sqrt(g * h1)
+    f(cm) = -8 * g * h1 * cm^2 * (c0 - cm)^2 + (cm^2 - g * h1)^2 * (cm^2 + g * h1)
+    lo, hi = c1, c0   # f(c1) < 0 < f(c0)
+    for _ in 1:STOKER_BISECTION_STEPS
+        mid = 0.5 * (lo + hi)
+        (mid == lo || mid == hi) && break
+        f(mid) < 0 ? (lo = mid) : (hi = mid)
+    end
+    cm = 0.5 * (lo + hi)
+    return (cm^2 / g, 2 * (c0 - cm), 2 * cm^2 * (c0 - cm) / (cm^2 - g * h1))
+end
+
+"""
+    stoker_dam_break(x, t; h0, h1, x0=0.0, g=9.81) -> (h, u)
+
+Stoker (1957) dam break on a wet, flat, frictionless bed: depth `h` (m) and velocity `u` (m/s) at position `x` (m) and
+time `t` (s) > 0 after the removal of a dam at `x0` (m) between still water of depth `h0` (m, x < x0) and `h1` (m,
+x > x0), 0 <= h1 < h0. With c0 = sqrt(g h0), xi = (x - x0)/t and the middle state (h_m, u_m, s) of
+`stoker_middle_state` (c_m = sqrt(g h_m)):
+
+    h = h0,                     u = 0                 for xi <= -c0,
+    h = (2 c0 - xi)^2 / (9 g),  u = 2/3 (xi + c0)     for -c0 < xi <= u_m - c_m   (rarefaction),
+    h = h_m,                    u = u_m               for u_m - c_m < xi <= s,
+    h = h1,                     u = 0                 for xi > s                  (beyond the bore).
+
+h1 = 0 gives the Ritter solution (`ritter_dam_break`). Source: Stoker (1957), Water Waves, Interscience, ch. 10;
+SWASHES (Delestre et al. 2013), Sec. 4.1.1.
+"""
+function stoker_dam_break(x::Real, t::Real; h0::Real, h1::Real, x0::Real=0.0, g::Real=9.81)
+    t > 0 || throw(ArgumentError("t must be > 0"))
+    h1 == 0 && return ritter_dam_break(x, t; h0=h0, x0=x0, g=g)
+    hm, um, s = stoker_middle_state(; h0=h0, h1=h1, g=g)
+    c0, cm = sqrt(g * h0), sqrt(g * hm)
+    xi = (x - x0) / t
+    xi <= -c0 && return (float(h0), 0.0)
+    xi <= um - cm && return ((2c0 - xi)^2 / (9g), 2 * (xi + c0) / 3)
+    xi <= s && return (hm, um)
+    return (float(h1), 0.0)
 end
 
 """
