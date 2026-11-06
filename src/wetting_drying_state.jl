@@ -40,7 +40,7 @@ mutable struct WetDryState{T<:Real}
     w_star::Matrix{T}          # m/s, (nz+1) x nx: predicted vertical velocity at the interfaces
     h_nh::Matrix{T}            # m, nz x nx: layer thicknesses of the provisional level of the free-surface solve
     q_nh::Matrix{T}            # Pa, nz x nx: non-hydrostatic pressure
-    w_nh::Matrix{T}            # m/s, (nz+1) x nx: vertical velocity w^n at the interfaces (theta scheme, issue #34)
+    w_nh::Matrix{T}            # m/s, (nz+1) x nx: w^n at the interfaces from the continuity of u^n (theta < 1, issues #34, #38)
     nh_index::Matrix{Int}      # unknown number of a cell of the pressure problem (0: surface, dry or empty cell)
     nh_rows::Vector{Int}
     nh_cols::Vector{Int}

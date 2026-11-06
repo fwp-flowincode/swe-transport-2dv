@@ -527,11 +527,11 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
 
     # One wave period on a planar beach, forced by the analytical velocity at the offshore boundary; returns the largest
     # shoreline-elevation error, surface-elevation error (m) and the runup amplitude (m).
-    function run_carrier_greenspan(nx, nz, dt; v=WD_VARIANTS[1])
+    function run_carrier_greenspan(nx, nz, dt; v=WD_VARIANTS[1], theta=ModelConfig().theta)
         cg = CarrierGreenspanWave(amplitude=CG_AMPLITUDE, slope=CG_SLOPE, length_scale=CG_LENGTH)
         T = carrier_greenspan_time_scale(cg)
         amplitude = cg.amplitude / 4 * cg.slope * cg.length_scale   # m, vertical runup amplitude (linear)
-        cfg = wd_config(length=CG_LENGTH + CG_ONSHORE, depth=1.5, nx=nx, nz=nz, dt=dt; wd_variant_kwargs(v)...)
+        cfg = wd_config(length=CG_LENGTH + CG_ONSHORE, depth=1.5, nx=nx, nz=nz, dt=dt, theta=theta; wd_variant_kwargs(v)...)
         x = wd_x_centres(cfg)
         x_off(xm) = CG_LENGTH - xm   # m, offshore distance from the still shoreline
         cfg.bed_level = @. CG_STILL_LEVEL - cg.slope * x_off(x)
@@ -617,6 +617,24 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         shore, eta, amplitude = run_carrier_greenspan(480, 15, 0.01; v=variant("nonhydro_tvd2"))
         @test shore <= CG_SHORE_REL_MAX * amplitude
         @test eta <= CG_ETA_REL_MAX * amplitude
+    end
+
+    # Issue #38: w^n of the non-hydrostatic w predictor was w^{n+1} = (w_theta - (1 - theta) w^n) / theta of the step
+    # before, a recursion whose error is multiplied by -(1 - theta)/theta per step; at theta = 0.55 the surface error grew
+    # offshore to 0.37 A (A the runup amplitude), at 0.5 the run blew up. Now w^n comes from the continuity of u^n
+    # (interfaces between cells wet at time n) or is the last interface flux.
+    # Measured (480 x 15, dt = 0.01 s), surface error / A: theta = 0.5: 0.0241, 0.55: 0.0213, 0.6: 0.0213, 0.7: 0.0212,
+    # 1: 0.0211 (hydrostatic 0.021-0.023).
+    CG_THETA_SPREAD_MAX = 0.005   # -, surface errors / A of the theta values may differ by at most this much
+    @testset "test_validate_wd_carrier_greenspan_runup_2dv_nonhydro_theta" begin
+        etas = Float64[]
+        for theta in (0.5, 0.55, 0.6, 1.0)
+            shore, eta, amplitude = run_carrier_greenspan(480, 15, 0.01; v=variant("nonhydro_tvd2"), theta=theta)
+            @test shore <= CG_SHORE_REL_MAX * amplitude
+            @test eta <= CG_ETA_REL_MAX * amplitude
+            push!(etas, eta / amplitude)
+        end
+        @test maximum(etas) - minimum(etas) <= CG_THETA_SPREAD_MAX
     end
 
     # ---- Non-hydrostatic: dispersion of a standing surface wave --------------------------------------------------

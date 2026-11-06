@@ -981,6 +981,38 @@ Tests:
 - `test_verify_froude_bound_warning`: Fr = 0.8 at $\theta=0.7$ warns once and names $\theta=0.72$. There is no warning
   below the bound, at $\theta=0.75$ or $\theta=1$, within the margin, or for Fr = 1e-5 at $\theta=1/2$.
 
+**Non-hydrostatic $w^n$ with wetting and drying (issue #38).** The $w$ predictor of the wet/dry projection starts from
+$w^n$. It used to be recovered from the interface fluxes of the step before,
+$w^{n+1}=(w^{n+\theta}-(1-\theta)w^n)/\theta$. An error of this recursion is multiplied by $-(1-\theta)/\theta$ every
+step: $-0.82$ at $\theta=0.55$, $-1$ at $\theta=1/2$. On the Carrier-Greenspan beach (15 layers, `tvd2`) a sawtooth in
+time grew offshore, 10 m from the shoreline in 0.7 m depth. At $\theta=0.55$ the surface error reached 0.37 of the runup
+amplitude $A$; at $\theta=1/2$ the run blew up. The hydrostatic runs were not affected.
+
+Now $w^n$ has no history:
+- at an interface between two cells that are wet at time $n$ it is the layer continuity of the discharges of time $n$,
+  $w^n_{k+1/2}=w^n_{k-1/2}-\partial_x(h_f u^n)_k$, as on the fixed grid (there $w^{n+1}$ is the continuity of $u^{n+1}$).
+  All cells below such an interface are full at $n$ and $n+1$ or cut by the fixed bed, so their thickness does not
+  change and the integral is exact;
+- at the other interfaces, which the surface rises through in this step, it is the interface flux of the last step, as
+  at $\theta=1$ ($\theta=1$ is unchanged, bit for bit).
+
+The continuity of $u^n$ at every interface was tried first. Where a bore lifts the surface through several layers in one
+step, the cells below fill up, and the integral without their thickness change gave $w$ of metres per second: the
+non-hydrostatic Stoker bore of section 33 blew up with 3 to 10 layers. With the restriction it is the same as before
+(L1 and bore errors within 0.03 percentage points).
+
+Surface error / $A$ after one period (480 x 15 cells, $\Delta t$ = 0.01 s):
+
+| $\theta$ | 0.5 | 0.55 | 0.6 | 0.7 | 1 |
+|---|---|---|---|---|---|
+| hydrostatic, `tvd2` | 0.023 | 0.022 | 0.021 | 0.021 | 0.021 |
+| non-hydrostatic, `tvd2`, before | blow-up | 0.37 | 0.021 | 0.021 | 0.021 |
+| non-hydrostatic, `tvd2` | 0.024 | 0.021 | 0.021 | 0.021 | 0.021 |
+
+The issue also asked whether the shoreline needs local damping, since $|U|/\sqrt{gh}$ exceeds
+$\mathrm{Fr}_{\max}(\theta)$ there for every $\theta<1$. The shoreline errors are the same for all $\theta$ (8.3-9.4 % of
+$A$, hydrostatic and non-hydrostatic), so the thin film there needs none.
+
 The explicit momentum advection had Courant-number limits of its own, independent of $\theta$ (`upwind1` from
 $C=U\Delta t/\Delta x\approx0.3$ with 8 layers, `tvd2` already at $C=0.1$); they came from inconsistent discrete momentum
 fluxes and were removed in issue #37 (section 20).
@@ -2045,10 +2077,10 @@ travelled):
 |---|---|---|---|---|---|
 | Stoker | 1 | 0.42 % | -0.34 % | | |
 | Stoker | 2 | 0.42 % | -0.39 % | 0.54 % | -0.51 % |
-| Stoker | 3 | 0.43 % | -0.83 % | 0.84 % | -2.2 % |
-| Stoker | 5 | 0.51 % | -1.5 % | 0.95 % | -3.4 % |
-| Stoker | 10 | 0.52 % | -1.7 % | 1.03 % | -3.6 % |
-| Ritter | 1-10 | 0.90 % | 10.3-11.3 % | 1.00-1.06 % | 10.3-11.3 % |
+| Stoker | 3 | 0.43 % | -0.83 % | 0.81 % | -2.2 % |
+| Stoker | 5 | 0.51 % | -1.5 % | 0.96 % | -3.4 % |
+| Stoker | 10 | 0.52 % | -1.7 % | 1.01 % | -3.6 % |
+| Ritter | 1-10 | 0.90 % | 10.3-11.3 % | 1.00-1.04 % | 10.3-11.3 % |
 
 - Stoker 1D converges at first order (L1 1.2 %, 0.74 %, 0.42 %, 0.25 %, 0.15 % from $\Delta x$ = 1 to 1/16 m; bore
   0.40 % to 0.12 %); tvd2: L1 0.28 %, bore -0.10 %.
@@ -2532,7 +2564,7 @@ Purpose: an `initialize_*!` call on a model that has already run must give the s
 Reference: in the incremental pressure correction (van Kan 1986, section 19) the predictor carries the full
 non-hydrostatic pressure gradient of the previous step ($q^n$ in `ws.p_corr`), so a stale $q^n$ would act as a spurious
 force after a re-initialisation. Every `initialize_*!` therefore resets this history (`_reset_nonhydrostatic_history!`,
-also `q_nh` and `w_nh` of the wetting-drying mode).
+also `q_nh` of the wetting-drying mode; its `w_nh` is recomputed from $u^n$ every step, issue #38).
 
 Validation section: after 10 non-hydrostatic lock-exchange steps `p_corr` is non-zero; re-initialised to uniform density,
 one step matches a fresh model in $u$, $w$ and $\eta$ to $10^{-11}$.
@@ -3057,6 +3089,9 @@ Exactness, conservation and positivity tests run for the four variants hydrostat
   1 % better (13.88 mm), an effect of the anti-diffusive time error.
 - `test_validate_wd_carrier_greenspan_runup_2dv_nonhydro`: long wave ($kH\ll1$): the non-hydrostatic mode within the
   hydrostatic bounds.
+- `test_validate_wd_carrier_greenspan_runup_2dv_nonhydro_theta`: the same run at $\theta$ = 1/2, 0.55, 0.6 and 1: within
+  the same bounds, and the surface errors / $A$ differ by at most 0.005 (observed 0.0211-0.0241; 0.37 at $\theta=0.55$
+  and a blow-up at 1/2 before issue #38, section 19).
 - `test_validate_wd_nonhydro_standing_wave_full_dispersion_{upwind1,tvd2}`: closed basin, $kH=\pi/2$ (the shallow-water
   and the full period differ by more than 25 %): period error below 2 % on 80 x 40 cells (observed 0.89 %), smaller than
   on 40 x 20 (1.75 %), closer to $\omega^2=gk\tanh(kH)$ than to the shallow-water relation.

@@ -929,6 +929,29 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
 
     # 2. w predictor at the interfaces k = 2..nz between two wet cells (k-1 below, k above), from w^n
     # WHY st.w at theta = 1: the interface fluxes of the last step are w^n there (the former scheme, bit for bit)
+    # theta < 1: w^n from the layer continuity of the discharges of time n (wd.q = hf u^n, set at the start of the step),
+    # as on the fixed grid (st.w from u^{n+1}), at the interfaces between two cells that are wet at time n: all cells
+    # below such an interface are full at n and n+1 (or cut by the fixed bed), so their thickness does not change and the
+    # integral is exact. Elsewhere (the surface rises through the interface in this step) the interface flux of the last
+    # step, st.w, as at theta = 1.
+    # WHY not w^{n+1} = (w_theta - (1 - theta) w^n) / theta from the stored w^n (the former scheme, issue #38): an error
+    # of that recursion is multiplied by -(1 - theta)/theta every step, -1 at theta = 1/2, and the undamped sawtooth in
+    # time grew offshore on the Carrier-Greenspan beach (surface error 0.37 of the runup amplitude at theta = 0.55, blow-up
+    # at 0.5). Computed from u^n, w^n has no history and needs no initialisation.
+    # WHY not the continuity of u^n everywhere: where a bore lifts the surface through several layers in one step, the
+    # cells below the interface fill up and the integral without their thickness change gave w of metres per second (the
+    # non-hydrostatic Stoker bore blew up).
+    if theta != 1.0
+        @inbounds for i in 1:nx
+            wd.w_nh[1, i] = 0.0
+            w_cont = 0.0   # m/s, continuity integral of the discharges of time n up to interface k + 1
+            for k in 1:nz
+                w_cont -= (wd.q[k, i + 1] - wd.q[k, i]) / dx
+                full_below = k < nz && wd.h[k, i] > WD_EMPTY_CELL_THICKNESS && wd.h[k + 1, i] > WD_EMPTY_CELL_THICKNESS
+                wd.w_nh[k + 1, i] = full_below ? w_cont : st.w[k + 1, i]
+            end
+        end
+    end
     W = theta == 1.0 ? st.w : wd.w_nh
     u0 = wd.u_old
     fill!(w_star, 0.0)
@@ -1222,15 +1245,6 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
         st.w[nz + 1, i] = 0.0
     end
     model.last_kinematic_mismatch = max_mismatch
-    if !cfg.use_hydrostatic && nz > 1
-        # w^{n+1} of the non-hydrostatic mode: st.w holds the theta fluxes theta w^{n+1} + (1 - theta) w^n; interfaces
-        # that were not between two wet cells at both levels start from st.w
-        @inbounds for i in 1:nx, k in 1:(nz + 1)
-            interior = 1 < k <= nz && wd.h[k - 1, i] > WD_EMPTY_CELL_THICKNESS && wd.h[k, i] > WD_EMPTY_CELL_THICKNESS &&
-                wd.h_new[k - 1, i] > WD_EMPTY_CELL_THICKNESS && wd.h_new[k, i] > WD_EMPTY_CELL_THICKNESS
-            wd.w_nh[k, i] = interior ? (st.w[k, i] - (1.0 - theta) * wd.w_nh[k, i]) / theta : st.w[k, i]
-        end
-    end
 
     # 7. constituent transport; k-epsilon (issue #30): turbulent density diffusion with nu_t of time n, then k and eps on
     # the new geometry
