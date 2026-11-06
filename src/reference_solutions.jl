@@ -1,5 +1,5 @@
 # Analytical reference solutions: shallow-water equations with wetting and drying (issue #31; dam breaks #11, #12), uniform channel flow
-# with Chezy friction (issue #14).
+# with Chezy friction (issue #14), two-layer internal waves (issue #23).
 
 const CG_NEWTON_TOL = 1e-13          # -, Newton tolerance on the dimensionless hodograph equations
 const CG_NEWTON_MAXITER = 60         # -, Newton iterations before giving up
@@ -552,4 +552,50 @@ function sluice_gate_jump_position(q::Real, a::Real, C::Real, tailwater::Real; c
     xj = position(0.5 * (lo + hi))
     xj < x_end || throw(DomainError(tailwater, "the jump is pushed out of the reach"))
     return xj
+end
+
+"""
+    two_layer_internal_wave(; k, h_upper, h_lower, rho_upper, rho_lower, rho0=1000.0, g=9.81, hydrostatic=false)
+        -> (omega, surface_ratio)
+
+Internal (baroclinic) mode of two homogeneous layers with a free surface over a flat bed, linear, Boussinesq: angular
+frequency `omega` (rad/s) of the wavenumber `k` (1/m) and the ratio `surface_ratio` (-) of the surface to the interface
+displacement (negative: counter-phase). Layer thicknesses `h_upper`, `h_lower` (m), densities `rho_upper` < `rho_lower`
+(kg/m^3), reference density `rho0` (kg/m^3), `g` (m/s^2), reduced gravity g' = g (rho_lower - rho_upper) / rho0.
+
+The linear system: kinematic conditions at the surface eta and the interface zeta, the dynamic surface condition
+phi_t + g eta = 0 and the pressure continuity at the displaced interface, phi_lower,t - phi_upper,t = -g' zeta. (The
+reference density enters only through g'; another choice changes omega^2 by O((rho_upper - rho0)/rho0).) Eliminating it
+gives, non-hydrostatic (potential flow in both layers), with C_u = coth(k h_upper), C_l = coth(k h_lower):
+
+    (C_u C_l + 1) omega^4 - (g k (C_u + C_l) + g' k C_u) omega^2 + g g' k^2 = 0,
+    surface_ratio = -omega^2 / (g k sinh(k h_upper) - omega^2 cosh(k h_upper));
+
+the smaller root is the internal mode (the larger one the surface wave; with g' = 0 it is omega^2 = g k tanh(k H)). Its
+rigid-lid limit is omega^2 = g' k / (C_u + C_l) (Gill 1982, sec. 6.2), which the free surface changes by O(g'/g).
+Hydrostatic (two-layer shallow water, c = omega / k, the long-wave limit of the above):
+
+    c^4 - (g H + g' h_lower) c^2 + g g' h_upper h_lower = 0,   surface_ratio = (c^2 - g' h_lower) / (g h_lower),
+
+with the long-wave rigid-lid limit c^2 = g' h_upper h_lower / H. test_verify_two_layer_internal_wave_relation checks the
+residuals of the linear system. References: Gill (1982), Atmosphere-Ocean Dynamics, ch. 6; Cushman-Roisin &
+Beckers (2011), Introduction to Geophysical Fluid Dynamics, ch. 12-13.
+"""
+function two_layer_internal_wave(; k::Real, h_upper::Real, h_lower::Real, rho_upper::Real, rho_lower::Real,
+        rho0::Real=1000.0, g::Real=9.81, hydrostatic::Bool=false)
+    (k > 0 && h_upper > 0 && h_lower > 0) || throw(ArgumentError("k, h_upper and h_lower must be > 0"))
+    rho_lower > rho_upper || throw(ArgumentError("rho_lower must exceed rho_upper (stable stratification)"))
+    gp = g * (rho_lower - rho_upper) / rho0   # m/s^2, reduced gravity
+    H = h_upper + h_lower
+    if hydrostatic
+        # WHY this form of the smaller root of c^4 - b c^2 + q = 0: 2q / (b + sqrt(b^2 - 4q)) avoids the cancellation
+        # of (b - sqrt(b^2 - 4q)) / 2 when q << b^2 (g' << g)
+        b, q = g * H + gp * h_lower, g * gp * h_upper * h_lower
+        c2 = 2q / (b + sqrt(b^2 - 4q))
+        return (sqrt(c2) * k, (c2 - gp * h_lower) / (g * h_lower))
+    end
+    Cu, Cl = coth(k * h_upper), coth(k * h_lower)
+    a, b, q = Cu * Cl + 1, g * k * (Cu + Cl) + gp * k * Cu, g * gp * k^2
+    om2 = 2q / (b + sqrt(b^2 - 4a * q))   # smaller root of a om^4 - b om^2 + q = 0 (as above)
+    return (sqrt(om2), -om2 / (g * k * sinh(k * h_upper) - om2 * cosh(k * h_upper)))
 end

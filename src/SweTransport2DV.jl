@@ -38,7 +38,7 @@ export build_poisson_matrix, solve_nonhydrostatic_pressure, PressureCorrectionSo
 export solve!
 export QUIVER_STRIDE, QUIVER_TARGET_COUNT_X, QUIVER_TARGET_COUNT_Z, QUIVER_TARGET_LENGTH_FACTOR
 export plot_state, create_animation, plot_pressure_buoyancy_diagnostics
-export ModelConfig, Model, BarotropicSolver, theta_froude_max, theta_for_froude, surface_froude_number, solve_variable_thickness!, BedGeometry
+export ModelConfig, Model, BarotropicSolver, theta_froude_max, theta_for_froude, baroclinic_extrapolation_weight, surface_froude_number, solve_variable_thickness!, BedGeometry
 export top_layer_face_thickness!, advect_density_top_layer!, use_variable_top_layer
 export VegetationStemConfig, VegetationStem, VegetationModel, VegetationPatch, patch_frontal_area
 export KEpsilonState, k_epsilon_step!, turbulent_viscosity_u!, implicit_vertical_diffusion!, bed_friction_coefficient, turbulence_closure, ke_time_scale
@@ -48,7 +48,7 @@ export attach_vegetation!, clear_vegetation!, vegetation_source!, copy_vegetatio
 export WetDryState, layer_thicknesses!, water_depth, initialize_water_level!, set_sluice_gate!, clear_sluice_gates!
 export SedimentState, attach_sediment!, suspended_sediment_mass
 export ModelPerformance, reset_performance!, performance_models, print_performance_report, process_cpu_time
-export ritter_dam_break, stoker_dam_break, stoker_middle_state, CarrierGreenspanWave, carrier_greenspan_time_scale, carrier_greenspan_rest_time
+export ritter_dam_break, stoker_dam_break, stoker_middle_state, two_layer_internal_wave, CarrierGreenspanWave, carrier_greenspan_time_scale, carrier_greenspan_rest_time
 export carrier_greenspan_shoreline, carrier_greenspan_solution
 export chezy_equilibrium_velocity, chezy_spinup_velocity, chezy_viscous_profile, chezy_roughness_length, chezy_backwater_depth
 export critical_depth, bernoulli_depth, conjugate_depth, swashes_bump_bed, bump_flow_depth, hydraulic_jump_position

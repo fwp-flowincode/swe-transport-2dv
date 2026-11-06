@@ -277,9 +277,10 @@ end
 # above the surface extrapolate with the density of the surface layer.
 # WHY nominal centres (not the centroids of cut cells): a horizontally uniform stratification at rest then gives
 # bit-identical p' in neighbouring columns whatever their bed, i.e. no spurious baroclinic force (lake at rest).
-function _wd_baroclinic_pressure!(model::Model, wd::WetDryState)
+# `rho` (kg/m^3): the buoyant density of time n (the mixture density with coupled sediment, issue #64), or its
+# extrapolation for the momentum predictor (_baroclinic_density, issue #23).
+function _wd_baroclinic_pressure!(model::Model, wd::WetDryState; rho::AbstractMatrix=_wd_buoyant_density(model, wd))
     cfg = model.config
-    rho = _wd_buoyant_density(model, wd)   # the mixture density with coupled sediment (issue #64)
     dz = model.dz
     nz = cfg.nz
     @inbounds for i in 1:cfg.nx
@@ -1165,7 +1166,8 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
         copyto!(ws.u_old, st.u)   # u^n with the newly opened face layers (theta part of the continuity flux)
         @. wd.q = wd.hf * st.u   # discharges of time n, for the advection
     end
-    @timeit model.timers "wd/baroclinic_pressure" _wd_baroclinic_pressure!(model, wd)
+    @timeit model.timers "wd/baroclinic_pressure" _wd_baroclinic_pressure!(model, wd;
+        rho=_baroclinic_density(model, _wd_buoyant_density(model, wd); wet=wd.h, min_thickness=WD_EMPTY_CELL_THICKNESS))
 
     # 2. momentum predictor, with the explicit parts of the theta scheme (issue #34): -(1 - theta) g d(eta^n)/dx and,
     # non-hydrostatic, -(1 - theta)/rho0 dq^n/dx (wd.q_nh still holds q^n)

@@ -117,6 +117,7 @@ function attach_sediment!(model::Model; settling_velocity::Real, critical_erosio
         0.0, 0.0, 0.0, 0.0)
     wd.sediment = sed
     _wd_mixture_density!(model, sed)
+    model.rho_previous_valid = false   # the buoyant density changed: no history for the extrapolation (issue #23)
     _wd_baroclinic_pressure!(model, wd)
     return sed
 end
