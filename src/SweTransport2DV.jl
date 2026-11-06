@@ -20,6 +20,7 @@ include("turbulence.jl")
 include("model.jl")
 include("vegetation.jl")
 include("wetting_drying.jl")
+include("sediment.jl")
 include("reference_solutions.jl")
 
 export State
@@ -43,6 +44,7 @@ export KE_C_MU_VALUE, KE_C1_VALUE, KE_C2_VALUE
 export update_stem_posture!, vegetation_drag_rate, stem_tip_deflection, stem_deflected_height, VEGETATION_EXPLICIT_DRAG_LIMIT
 export attach_vegetation!, clear_vegetation!, vegetation_source!, copy_vegetation, vegetation_path, set_x_inflow_outflow!, clear_x_inflow_outflow!
 export WetDryState, layer_thicknesses!, water_depth, initialize_water_level!, set_sluice_gate!, clear_sluice_gates!
+export SedimentState, attach_sediment!, suspended_sediment_mass
 export ritter_dam_break, CarrierGreenspanWave, carrier_greenspan_time_scale, carrier_greenspan_rest_time
 export carrier_greenspan_shoreline, carrier_greenspan_solution
 export chezy_equilibrium_velocity, chezy_spinup_velocity, chezy_viscous_profile, chezy_roughness_length, chezy_backwater_depth

@@ -25,6 +25,8 @@ Structure
 - advection_stability/: stability of the momentum advection with a mean flow, issue #37 ([README](advection_stability/README.md)).
 - sloped_channel/: uniform and gradually varied flow with Chezy friction, discharge and water-level boundaries, issue #14 ([README](sloped_channel/README.md)).
 - obstacles/: flow over a bump and a broad-crested weir, sub-, trans- and supercritical, hydraulic jump, tracer, issue #47; recirculation behind a step and a weir, hydrostatic against non-hydrostatic, issue #50; bed cell of k-epsilon against the position of the bed in the layers, issue #62 ([README](obstacles/README.md)).
+- jet_sediment/: a jet pulse from a pipe in the wall of a basin erodes a mud bed, suspended cohesive sediment with
+  settling, Partheniades erosion and density coupling, issue #64 ([README](jet_sediment/README.md)).
 - splitter_plate/: stratified mixing layer behind a splitter plate, two streams of different velocity and salinity,
   k-epsilon, compared with measurements extracted from the Delft3D-FLOW Validation Document (2008), issue #42
   ([README](splitter_plate/README.md)).

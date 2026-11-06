@@ -21,4 +21,5 @@ include("test_common.jl")
     include("test_sluice_gate.jl")
     include("test_recirculation.jl")
     include("test_splitter_plate.jl")
+    include("test_sediment.jl")
 end

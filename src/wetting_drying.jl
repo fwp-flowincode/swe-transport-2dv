@@ -76,6 +76,7 @@ mutable struct WetDryState{T<:Real}
     gate_active::Vector{Bool}    # nx+1: the gate cuts the flow area of the face in this step (upstream level above it)
     left_k::Any     # nothing (zero gradient), or k (m^2/s^2, length nz) of the inflow at the left boundary face (#42)
     left_eps::Any   # nothing (zero gradient), or eps (m^2/s^3, length nz) of the inflow at the left boundary face (#42)
+    sediment::Any   # nothing, or the SedimentState of suspended sediment (attach_sediment!, issue #64)
 end
 
 function WetDryState(cfg::ModelConfig; T::Type{<:Real}=Float64)
@@ -91,7 +92,7 @@ function WetDryState(cfg::ModelConfig; T::Type{<:Real}=Float64)
         zeros(T, nx), zeros(T, nx), zeros(T, nx), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz),
         zeros(T, nz, nx + 1), zeros(T, nz + 1, nx), zeros(T, nz, nx), zeros(T, nz, nx), zeros(T, nz + 1, nx), zeros(Int, nz, nx),
         Int[], Int[], T[], T[], fill(T(-1), nz, nx + 1), 0.0, 0.0, 0, 0, nothing, fill(T(Inf), nx + 1), ones(T, nx + 1), fill(false, nx + 1),
-        nothing, nothing)
+        nothing, nothing, nothing)
 end
 
 """
@@ -334,7 +335,7 @@ end
 # bit-identical p' in neighbouring columns whatever their bed, i.e. no spurious baroclinic force (lake at rest).
 function _wd_baroclinic_pressure!(model::Model, wd::WetDryState)
     cfg = model.config
-    rho = model.state.rho
+    rho = _wd_buoyant_density(model, wd)   # the mixture density with coupled sediment (issue #64)
     dz = model.dz
     nz = cfg.nz
     @inbounds for i in 1:cfg.nx
@@ -1250,6 +1251,8 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     # 7. constituent transport; k-epsilon (issue #30): turbulent density diffusion with nu_t of time n, then k and eps on
     # the new geometry
     _wd_transport_density!(model, wd)
+    # suspended sediment (issue #64): with nu_t of time n, like the turbulent density diffusion; updates the mixture density
+    wd.sediment === nothing || _wd_sediment_step!(model, wd, wd.sediment)
     if model.turbulence !== nothing
         _wd_turbulent_density_diffusion!(model, wd, model.turbulence)
         _wd_k_epsilon_step!(model, wd, model.turbulence)
@@ -1291,9 +1294,20 @@ end
 # values outside the initial bounds (possible in thin cells, where the outflow can exceed the old volume) are clipped and
 # the clipped mass is redistributed over the cells with room for it. Both keep the constituent mass exact to round-off.
 function _wd_transport_density!(model::Model, wd::WetDryState)
+    _wd_transport_scalar!(model, wd, model.state.rho, model.x_boundary_rho_left, model.rho_min_init, model.rho_max_init)
+    return nothing
+end
+
+# The transport above for any cell field `rho` (the density, or a suspended-sediment concentration, issue #64) with the
+# inflow value `rho_in` at the left boundary face (nothing: the first cell, zero gradient; one value or one per layer),
+# the value `rho_right` of water entering through the right boundary face (nothing: the last cell, zero gradient) and the
+# bounds [rho_lo, rho_hi] of the clipping. Returns the amounts (units of rho times m^2, per unit width) that entered
+# through the left and left through the right boundary face in the step, for the budgets.
+function _wd_transport_scalar!(model::Model, wd::WetDryState, rho::AbstractMatrix{<:Real}, rho_in, rho_lo::Real,
+    rho_hi::Real; rho_right=nothing)
     cfg = model.config
     st = model.state
-    rho, q, W = st.rho, wd.q, st.w
+    q, W = wd.q, st.w
     nz, nx = cfg.nz, cfg.nx
     dt, dx = cfg.dt, model.dx
     M = wd.mass   # the increment D
@@ -1302,7 +1316,7 @@ function _wd_transport_density!(model::Model, wd::WetDryState)
     end
     second = cfg.transport_advection_scheme == "tvd2"
     wet(k, i) = wd.h[k, i] > WD_EMPTY_CELL_THICKNESS
-    rho_in = model.x_boundary_rho_left   # kg/m^3, density of the inflow at the left boundary (or nothing)
+    inflow = outflow = 0.0
     @inbounds for f in 1:(nx + 1), k in 1:nz
         qf = q[k, f]
         qf == 0.0 && continue
@@ -1312,10 +1326,13 @@ function _wd_transport_density!(model::Model, wd::WetDryState)
         has = 1 <= upup <= nx && 1 <= down <= nx && 1 < f <= nx && wet(k, upup) && wet(k, up) && wet(k, down)
         courant = has ? abs(qf) * dt / (dx * wd.h[k, up]) : 0.0
         rho_f = (f == 1 && qf > 0.0 && rho_in !== nothing) ? _inflow_value(rho_in, k) :
+            (f == nx + 1 && qf < 0.0 && rho_right !== nothing) ? _inflow_value(rho_right, k) :
             _wd_face_density(rho[k, up], has ? rho[k, upup] : 0.0, has ? rho[k, down] : 0.0, courant, has, second)
         flux = dt / dx * qf * rho_f
         f > 1 && (M[k, f - 1] -= flux)
         f <= nx && (M[k, f] += flux)
+        f == 1 && (inflow += flux * dx)
+        f == nx + 1 && (outflow += flux * dx)
     end
     @inbounds for i in 1:nx, k in 2:nz
         wk = W[k, i]
@@ -1328,7 +1345,6 @@ function _wd_transport_density!(model::Model, wd::WetDryState)
         M[k, i] += flux
     end
 
-    rho_lo, rho_hi = model.rho_min_init, model.rho_max_init
     pool = 0.0   # kg/m^2 (per dx): mass that could not be kept in place
     @inbounds for i in 1:nx
         residual = 0.0
@@ -1371,7 +1387,7 @@ function _wd_transport_density!(model::Model, wd::WetDryState)
             end
         end
     end
-    return nothing
+    return inflow, outflow
 end
 
 
@@ -1503,6 +1519,7 @@ function _wd_k_epsilon_step!(model::Model, wd::WetDryState, ke::KEpsilonState)
     h = wd.h_new
     k, eps, nu_t = ke.k, ke.eps, ke.nu_t
     model.vegetation === nothing && fill!(ke.veg_work, 0.0)
+    rho_b = _wd_buoyant_density(model, wd)   # kg/m^3, the mixture density with coupled sediment (issue #64)
     zc(kk, i) = max((kk - 1) * dz, wd.bed[i]) + 0.5 * h[kk, i]   # m, height of the wet-cell centre
     wet(kk, i) = 1 <= i <= nx && h[kk, i] > WD_EMPTY_CELL_THICKNESS
     wc(kk, i) = 0.5 * (st.w[kk, i] + st.w[kk + 1, i])
@@ -1518,7 +1535,7 @@ function _wd_k_epsilon_step!(model::Model, wd::WetDryState, ke::KEpsilonState)
             dudx = (st.u[kk, i + 1] - st.u[kk, i]) / dx
             ke.strain2[kk, i] = (dudz + dwdx)^2 + 4 * dudx^2
             ke.production[kk, i] = nu_t[kk, i] * ke.strain2[kk, i]
-            n2 = kup == kdn ? 0.0 : -(cfg.g / cfg.rho0) * (st.rho[kup, i] - st.rho[kdn, i]) / (zc(kup, i) - zc(kdn, i))
+            n2 = kup == kdn ? 0.0 : -(cfg.g / cfg.rho0) * (rho_b[kup, i] - rho_b[kdn, i]) / (zc(kup, i) - zc(kdn, i))
             ke.buoyancy[kk, i] = -(nu_t[kk, i] / KE_SIGMA_RHO) * n2
         end
     end
