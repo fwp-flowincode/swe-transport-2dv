@@ -2,6 +2,7 @@
 # built-in run! outputs without animation (final-state plot, pressure/buoyancy diagnostics in
 # output_barotropic/lock_exchange/). Settings and references: cases.jl; documented figures: README.md.
 
+include(joinpath(@__DIR__, "..", "common", "performance.jl"))   # performance overview at exit (issue #10)
 using SweTransport2DV
 using Printf
 

@@ -34,6 +34,7 @@ struct BedGeometry
     u_active::BitMatrix
     w_open::BitMatrix
     w_active::BitMatrix
+    wet_values::Vector{Float64}   # work array, one entry per wet cell (constituent mass without allocation, issue #10)
 end
 
 """
@@ -100,5 +101,5 @@ function BedGeometry(bed_level::Union{Nothing,AbstractVector{<:Real}}, nz::Int, 
         w_open[k, i] = k > k_bed[i]
     end
 
-    return BedGeometry(has_bed, any(>(1), k_bed), levels, k_bed, bed_face_level, k_bed_face, wet_cell, u_open, u_active, w_open, w_active)
+    return BedGeometry(has_bed, any(>(1), k_bed), levels, k_bed, bed_face_level, k_bed_face, wet_cell, u_open, u_active, w_open, w_active, zeros(count(wet_cell)))
 end

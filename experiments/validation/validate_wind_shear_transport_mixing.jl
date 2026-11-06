@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "..", "common", "performance.jl"))   # performance overview at exit (issue #10)
 using SweTransport2DV
 using Printf
 using Statistics

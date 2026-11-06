@@ -4,6 +4,7 @@
 #
 # WHY dt = 0.005 s (formerly 0.05 s): the time-step rule U dt/min(dx, dz) <= 0.05 gives dt <= 0.0058 s on dx = 0.01 m.
 
+include(joinpath(@__DIR__, "..", "common", "performance.jl"))   # performance overview at exit (issue #10)
 using SweTransport2DV
 using Printf
 

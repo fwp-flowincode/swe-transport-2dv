@@ -2,6 +2,7 @@
 # outputs (final-state plot, animation, pressure/buoyancy diagnostics in output_barotropic/rayleigh_taylor/).
 # Case definition, settings and references: cases.jl. Documented figures: plot_rayleigh_taylor.jl and README.md.
 
+include(joinpath(@__DIR__, "..", "common", "performance.jl"))   # performance overview at exit (issue #10)
 using SweTransport2DV
 using Printf
 

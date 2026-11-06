@@ -18,6 +18,7 @@
 # WHY: batch run without a display; same GR workstation choice as src/visualization.jl.
 get!(ENV, "GKSwstype", "100")
 
+include(joinpath(@__DIR__, "..", "common", "performance.jl"))   # performance overview at exit (issue #10)
 using SweTransport2DV
 using Plots
 using Printf

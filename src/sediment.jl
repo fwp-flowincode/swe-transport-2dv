@@ -142,10 +142,12 @@ end
 
 # Density (kg/m^3) for the baroclinic pressure and the k-epsilon buoyancy: the mixture density with coupled sediment,
 # else the transported density.
-function _wd_buoyant_density(model::Model, wd::WetDryState)
+# WHY the type assertion: wd.sediment is untyped (Any); without it every rho[k, i] of the callers is dynamically typed
+# and boxed (2.5 MiB per call of the baroclinic pressure on 200 x 56 cells)
+function _wd_buoyant_density(model::Model{T}, wd::WetDryState) where {T}
     sed = wd.sediment
     (sed === nothing || !sed.density_coupling) && return model.state.rho
-    return sed.rho_mix
+    return sed.rho_mix::Matrix{T}
 end
 
 # Wall cell kw of column i in the thicknesses h, the thickness below it (m) and the height of its centre z1 (m): the cell
@@ -163,6 +165,12 @@ function _wd_wall_cell(model::Model, h::AbstractMatrix{<:Real}, i::Int, klo::Int
     z1 = max(below + 0.5 * h[kw, i], WD_FRICTION_Z1_MIN_FACTOR * model.config.bed_roughness_length)
     return kw, z1
 end
+
+# Turbulent diffusivity K = nu_t/sigma_c (m^2/s) at the interface between the cells ka and kb of column i (0 without
+# k-epsilon). WHY a function, not a closure in the column loop: the closure was allocated for every cell (issue #10).
+@inline _sed_diffusivity(::Nothing, ka::Int, kb::Int, i::Int) = 0.0
+@inline _sed_diffusivity(ke::KEpsilonState, ka::Int, kb::Int, i::Int) =
+    @inbounds 0.5 * (ke.nu_t[ka, i] + ke.nu_t[kb, i]) / SED_SCHMIDT
 
 # Advection of c with the step fluxes, then settling, turbulent diffusion and the bed exchange per column.
 function _wd_sediment_step!(model::Model, wd::WetDryState, sed::SedimentState)
@@ -196,9 +204,8 @@ function _wd_sediment_step!(model::Model, wd::WetDryState, sed::SedimentState)
         n = khi - klo + 1
         for j in 1:n
             k = klo + j - 1
-            K(ka, kb) = ke === nothing ? 0.0 : 0.5 * (ke.nu_t[ka, i] + ke.nu_t[kb, i]) / SED_SCHMIDT   # m^2/s
-            kd = j > 1 ? dt * K(k, k - 1) / (0.5 * (h[k, i] + h[k - 1, i])) : 0.0
-            ku = j < n ? dt * K(k, k + 1) / (0.5 * (h[k, i] + h[k + 1, i])) : 0.0
+            kd = j > 1 ? dt * _sed_diffusivity(ke, k, k - 1, i) / (0.5 * (h[k, i] + h[k - 1, i])) : 0.0
+            ku = j < n ? dt * _sed_diffusivity(ke, k, k + 1, i) / (0.5 * (h[k, i] + h[k + 1, i])) : 0.0
             # settling: out through the lower face (into the cell below or the bed), in from the cell above
             lower[j] = -kd
             upper[j] = -ku - (j < n ? dt * ws : 0.0)

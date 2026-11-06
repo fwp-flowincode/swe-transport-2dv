@@ -7,6 +7,7 @@
 #
 # Run: julia --project experiments/advection_stability/channel_scan.jl [theta]   (default theta = 0.7; a few minutes)
 
+include(joinpath(@__DIR__, "..", "common", "performance.jl"))   # performance overview at exit (issue #10)
 using SweTransport2DV, Printf
 
 const GRAVITY = 9.81           # m/s^2, as ModelConfig's default g
