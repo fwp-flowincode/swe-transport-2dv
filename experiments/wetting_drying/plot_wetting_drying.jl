@@ -4,8 +4,9 @@
 #   julia --project=<repository> experiments/wetting_drying/plot_wetting_drying.jl [mode ...]
 # Modes: lake, ritter, stoker (wet-bed dam break, and both dam breaks against the number of layers), runup, sloshing, mms
 # (manufactured solution of the momentum advection), schemes (upwind1 against tvd2), dispersion (non-hydrostatic
-# standing waves), solitary (solitary wave runup, Synolakis 1987); default: all.
-# Each takes a few minutes or less.
+# standing waves), solitary (solitary wave runup, Synolakis 1987); default: all of these.
+# Each takes a few minutes or less. Not in the default: theta (Carrier-Greenspan runup against theta, non-hydrostatic,
+# before and after issue #38; about 10 min, see its section for the "before" results).
 # Output: output_barotropic/wetting_drying_figures/; the PNG and GIF files are copied to figures/.
 
 # WHY: batch run without a display; same GR workstation choice as src/visualization.jl.
@@ -720,6 +721,223 @@ function plot_solitary()
     save_gif(anim, "solitary_nonhydro.gif")
 end
 
+# ---- Theta against the non-hydrostatic wet/dry step (issue #38) ------------------------------------------------------
+# The Carrier-Greenspan runup of the "runup" mode, 15 layers, tvd2, for several theta, hydrostatic and non-hydrostatic.
+# The runs write their results to CSV files labelled by WD_THETA_TAG (default "now"). The figures compare them with the
+# files of the tag "before", written by the same script against the package before issue #38:
+#   git worktree add ../swe-before 241800b
+#   WD_THETA_TAG=before julia --project=../swe-before experiments/wetting_drying/plot_wetting_drying.jl theta
+#   julia --project=. experiments/wetting_drying/plot_wetting_drying.jl theta
+# WD_THETA_PLOT_ONLY=1 redraws the figures from the CSV files without running the cases.
+# WHY the same script for both: identical set-up, diagnostics and sampling; only the package differs.
+const THETA_TAG = get(ENV, "WD_THETA_TAG", "now")
+const THETA_PLOT_ONLY = get(ENV, "WD_THETA_PLOT_ONLY", "0") == "1"   # redraw the figures from the CSV files of a former run
+const THETA_VALUES = (0.5, 0.55, 0.6, 0.65, 0.7, 0.8, 0.9, 1.0)   # -, theta of the sweep
+const THETA_SERIES = (0.5, 0.55)               # -, theta values whose time series are plotted
+const THETA_NX = 480                           # -, sweep grid (dx = 0.05 m, as test_wetting_drying.jl)
+const THETA_NZ = 15                            # -, layers of 0.1 m
+const THETA_DT_DX = 0.2                        # s/m, time step per grid spacing (dt = 0.01 s at dx = 0.05 m)
+const THETA_CONV_NX = (120, 240, 480, 960)     # -, convergence grids (dx = 0.2 ... 0.025 m), refined in x only
+const THETA_CONV_THETA = 0.55                  # -, theta of the convergence study (the case of the issue)
+const THETA_SAMPLE_INTERVAL = 0.1              # s, interval of the surface comparison (the reference is costly)
+const THETA_BLOWUP_REL = 10.0                  # -, a surface error above this many runup amplitudes ends a run (blow-up)
+const THETA_SHORE_GAP = 2                      # -, cells next to the shoreline left out of the surface error (as the test)
+const THETA_LABELS = Dict("hydro" => "hydrostatic", "nonhydro" => "non-hydrostatic")
+
+"""
+    theta_run(nx, theta; hydro, series=false)
+
+One period of the Carrier-Greenspan runup (`cg_model`, tvd2, THETA_NZ layers, dt = THETA_DT_DX dx). Returns the largest
+surface error of the wet cells and shoreline error, both relative to the runup amplitude A/4 slope L (-), the time of a
+blow-up relative to the period (NaN if none; the model threw or the surface error exceeded THETA_BLOWUP_REL), and, with
+`series`, the time series t / period, max |w| (m/s) and the surface error / A at the sample times.
+"""
+function theta_run(nx::Int, theta::Real; hydro::Bool, series::Bool=false)
+    dt = THETA_DT_DX * (CG_LENGTH + CG_ONSHORE) / nx
+    model, t0 = cg_model(nx, THETA_NZ, dt; scheme="tvd2", use_hydrostatic=hydro, theta=theta)
+    period = pi * carrier_greenspan_time_scale(CG_WAVE)
+    amplitude = cg_runup_amplitude()
+    x = wd_x_centres(model.config)
+    nsteps = round(Int, period / dt)
+    every = max(1, round(Int, THETA_SAMPLE_INTERVAL / dt))
+    eta_max = shore_max = 0.0
+    blowup = NaN
+    ts, wmax, etas = Float64[], Float64[], Float64[]
+    for n in 1:nsteps
+        t = n * dt
+        ok = try
+            step_forward!(model)
+            all(isfinite, model.state.u)
+        catch
+            false
+        end
+        if !ok
+            blowup = t / period
+            break
+        end
+        level, _ = cg_shoreline(model)
+        shore_max = max(shore_max, abs(level - carrier_greenspan_shoreline(CG_WAVE, t0 + t)[2]) / amplitude)
+        n % every == 0 || continue
+        i_shore = findlast(>(CG_SHORE_DEPTH), water_depth(model))
+        exact = cg_surface_exact(x[1:(i_shore - THETA_SHORE_GAP)], t0 + t)
+        zeta = wd_water_level(model)
+        err = maximum((abs(zeta[i] - CG_STILL_LEVEL - e) for (i, e) in enumerate(exact) if !isnan(e)); init=0.0) / amplitude
+        eta_max = max(eta_max, err)
+        if series
+            push!(ts, t / period)
+            push!(wmax, maximum(abs, model.state.w))
+            push!(etas, err)
+        end
+        if err > THETA_BLOWUP_REL
+            blowup = t / period
+            break
+        end
+    end
+    return (; eta=eta_max, shore=shore_max, blowup, ts, wmax, etas)
+end
+
+theta_csv(name, tag) = joinpath(OUTPUT_DIR, "theta_$(name)_$(tag).csv")
+
+function write_csv(path, header, rows)
+    open(path, "w") do io
+        println(io, join(header, ","))
+        for r in rows
+            println(io, join(r, ","))
+        end
+    end
+    println("Saved: $(abspath(path))")
+end
+
+"Rows of a CSV file written by `write_csv` as named tuples of strings, or nothing if the file is missing."
+function read_csv(path)
+    isfile(path) || return nothing
+    lines = readlines(path)
+    header = Symbol.(split(lines[1], ","))
+    return [NamedTuple{Tuple(header)}(Tuple(split(l, ","))) for l in lines[2:end]]
+end
+
+pf(s) = parse(Float64, s)
+
+function theta_compute()
+    println("\n=== Carrier-Greenspan runup against theta ($(THETA_TAG)) ===")
+    sweep, series, conv = [], [], []
+    for mode in ("hydro", "nonhydro"), theta in THETA_VALUES
+        r = theta_run(THETA_NX, theta; hydro=mode == "hydro", series=theta in THETA_SERIES)
+        @printf("%-9s theta = %.2f | surface error %.4f A, shoreline error %.4f A%s\n", mode, theta, r.eta, r.shore,
+            isnan(r.blowup) ? "" : @sprintf(", blow-up at t / period = %.2f", r.blowup))
+        push!(sweep, (mode, theta, r.eta, r.shore, r.blowup))
+        for j in eachindex(r.ts)
+            push!(series, (mode, theta, r.ts[j], r.wmax[j], r.etas[j]))
+        end
+    end
+    for mode in ("hydro", "nonhydro"), nx in THETA_CONV_NX
+        r = theta_run(nx, THETA_CONV_THETA; hydro=mode == "hydro")
+        dx = (CG_LENGTH + CG_ONSHORE) / nx
+        @printf("%-9s theta = %.2f dx = %.4f m | surface error %.4f A, shoreline error %.4f A%s\n", mode,
+            THETA_CONV_THETA, dx, r.eta, r.shore, isnan(r.blowup) ? "" : @sprintf(", blow-up at t / period = %.2f", r.blowup))
+        push!(conv, (mode, dx, r.eta, r.shore, r.blowup))
+    end
+    write_csv(theta_csv("sweep", THETA_TAG), ("mode", "theta", "eta", "shore", "blowup"), sweep)
+    write_csv(theta_csv("series", THETA_TAG), ("mode", "theta", "t", "wmax", "eta"), series)
+    write_csv(theta_csv("convergence", THETA_TAG), ("mode", "dx", "eta", "shore", "blowup"), conv)
+end
+
+# Observed orders between successive grids, log2(e(2 dx) / e(dx)).
+observed_orders(e) = [log2(e[j] / e[j + 1]) for j in 1:(length(e) - 1)]
+
+# Value for a log axis: a blown-up run is drawn at the top of the axis.
+theta_plotted(v, blowup, top) = isnan(blowup) ? v : top
+
+function plot_theta()
+    THETA_PLOT_ONLY || theta_compute()
+    THETA_TAG == "now" || return
+    before = read_csv(theta_csv("sweep", "before"))
+    before === nothing && println("No results of the tag \"before\" in $(OUTPUT_DIR): the figures show the current scheme only.")
+    sweeps = [("now", read_csv(theta_csv("sweep", "now"))), ("before", before)]
+    top = 2.0   # -, top of the error axes: a blow-up is drawn there
+    styles = Dict(("hydro", "now") => (color=1, linestyle=:solid, marker=:circle),
+        ("nonhydro", "now") => (color=2, linestyle=:solid, marker=:diamond),
+        ("nonhydro", "before") => (color=2, linestyle=:dash, marker=:xcross),
+        ("hydro", "before") => (color=1, linestyle=:dot, marker=:none))
+
+    # 1. errors against theta
+    panels = []
+    for (field, name) in ((:eta, "surface error / A"), (:shore, "shoreline error / A"))
+        p = plot(xlabel="θ (-)", ylabel=name, yscale=:log10, ylims=(0.005, top), legend=field == :eta ? :right : false,
+            title=field == :eta ? "Surface (wet cells, largest over one period)" : "Shoreline (largest over one period)",
+            titlefontsize=10)
+        for (tag, rows) in sweeps, mode in ("nonhydro", "hydro")
+            rows === nothing && continue
+            tag == "before" && mode == "hydro" && continue   # the hydrostatic step did not change
+            sel = [r for r in rows if r.mode == mode]
+            th = pf.(getfield.(sel, :theta))
+            v = [theta_plotted(pf(getfield(r, field)), pf(r.blowup), top) for r in sel]
+            s = styles[(mode, tag)]
+            plot!(p, th, v; label="$(THETA_LABELS[mode]), $(tag == "now" ? "issue #38" : "before (blow-up at the top)")",
+                linewidth=2, s...)
+        end
+        push!(panels, p)
+    end
+    save_figure(plot(panels...; layout=(1, 2), size=(1150, 430), left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM,
+        plot_title="Carrier-Greenspan runup, 480 x 15 cells, tvd2, dt = 0.01 s", plot_titlefontsize=11), "theta_wd_error.png")
+
+    # 2. time series of the non-hydrostatic runs
+    series = [("now", read_csv(theta_csv("series", "now"))), ("before", read_csv(theta_csv("series", "before")))]
+    panels = []
+    for theta in THETA_SERIES, (field, name) in ((:wmax, "max |w| (m/s)"), (:eta, "surface error / A"))
+        p = plot(xlabel="t / period (-)", ylabel=name, yscale=:log10, title=@sprintf("non-hydrostatic, θ = %.2f", theta),
+            titlefontsize=10, legend=:topleft)
+        for (tag, rows) in series
+            rows === nothing && continue
+            for mode in (tag == "now" ? ("hydro", "nonhydro") : ("nonhydro",))
+                sel = [r for r in rows if r.mode == mode && pf(r.theta) == theta]
+                isempty(sel) && continue
+                v = max.(pf.(getfield.(sel, field)), 1e-6)
+                s = styles[(mode, tag)]
+                plot!(p, pf.(getfield.(sel, :t)), v; color=s.color, linestyle=s.linestyle, linewidth=mode == "hydro" ? 1 : 2,
+                    label="$(THETA_LABELS[mode]), $(tag == "now" ? "issue #38" : "before")")
+            end
+        end
+        push!(panels, p)
+    end
+    save_figure(plot(panels...; layout=(2, 2), size=(1150, 700), left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM,
+        plot_title="Growth offshore: max |w| and surface error over one period (hydrostatic for reference)",
+        plot_titlefontsize=11), "theta_wd_growth.png")
+
+    # 3. convergence at theta = THETA_CONV_THETA
+    conv = [("now", read_csv(theta_csv("convergence", "now"))), ("before", read_csv(theta_csv("convergence", "before")))]
+    panels = []
+    for (field, name) in ((:eta, "surface error / A"), (:shore, "shoreline error / A"))
+        dx_ticks = [(CG_LENGTH + CG_ONSHORE) / nx for nx in THETA_CONV_NX]
+        p = plot(xlabel="dx (m)", ylabel=name, xscale=:log10, yscale=:log10, ylims=(0.005, top), legend=:outerbottom,
+            xticks=(dx_ticks, [@sprintf("%g", d) for d in dx_ticks]), title=field == :eta ? "Surface" : "Shoreline",
+            titlefontsize=10, legendfontsize=8)
+        for (tag, rows) in conv, mode in ("nonhydro", "hydro")
+            rows === nothing && continue
+            tag == "before" && mode == "hydro" && continue
+            sel = [r for r in rows if r.mode == mode]
+            dx = pf.(getfield.(sel, :dx))
+            e = pf.(getfield.(sel, field))
+            blown = .!isnan.(pf.(getfield.(sel, :blowup)))
+            v = [b ? top : ei for (ei, b) in zip(e, blown)]
+            orders = any(blown) ? "" : " (orders " * join([@sprintf("%.2f", o) for o in observed_orders(e)], ", ") * ")"
+            s = styles[(mode, tag)]
+            plot!(p, dx, v; label="$(THETA_LABELS[mode]), $(tag == "now" ? "issue #38" : "before (blow-up at the top)")$(orders)",
+                linewidth=2, s...)
+            @printf("convergence %-9s %-6s %-9s errors %s%s\n", mode, tag, String(field), join([@sprintf("%.4f", ei) for ei in e], " "), orders)
+        end
+        rows = conv[1][2]
+        sel = [r for r in rows if r.mode == "nonhydro"]
+        dx = pf.(getfield.(sel, :dx))
+        e = pf.(getfield.(sel, field))
+        plot!(p, dx, e[end] .* (dx ./ dx[end]); color=:gray50, linestyle=:dot, label="first order")
+        push!(panels, p)
+    end
+    save_figure(plot(panels...; layout=(1, 2), size=(1150, 560), left_margin=FIGURE_MARGIN_MM, bottom_margin=FIGURE_MARGIN_MM,
+        plot_title=@sprintf("Convergence at θ = %.2f, 15 layers, tvd2, dt = %.1f s/m · dx", THETA_CONV_THETA, THETA_DT_DX),
+        plot_titlefontsize=11), "theta_wd_convergence.png")
+end
+
 mkpath(OUTPUT_DIR)
 mkpath(FIGURE_DIR)
 for mode in MODES
@@ -732,5 +950,6 @@ for mode in MODES
     mode == "schemes" ? plot_schemes() :
     mode == "dispersion" ? plot_dispersion() :
     mode == "solitary" ? plot_solitary() :
-    error("unknown mode '$(mode)'; use lake, ritter, runup, sloshing, mms, schemes, dispersion or solitary")
+    mode == "theta" ? plot_theta() :
+    error("unknown mode '$(mode)'; use lake, ritter, stoker, runup, sloshing, mms, schemes, dispersion, solitary or theta")
 end

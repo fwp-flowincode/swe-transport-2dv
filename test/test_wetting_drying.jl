@@ -624,7 +624,8 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
     # offshore to 0.37 A (A the runup amplitude), at 0.5 the run blew up. Now w^n comes from the continuity of u^n
     # (interfaces between cells wet at time n) or is the last interface flux.
     # Measured (480 x 15, dt = 0.01 s), surface error / A: theta = 0.5: 0.0241, 0.55: 0.0213, 0.6: 0.0213, 0.7: 0.0212,
-    # 1: 0.0211 (hydrostatic 0.021-0.023).
+    # 1: 0.0211 (hydrostatic 0.021-0.023). WHY the wide spread bound: at theta = 1/2 the non-hydrostatic result depends on
+    # round-off (0.0214 with dt = 0.010000000000000002 s) and weak growth appears on finer grids (docs section 19).
     CG_THETA_SPREAD_MAX = 0.005   # -, surface errors / A of the theta values may differ by at most this much
     @testset "test_validate_wd_carrier_greenspan_runup_2dv_nonhydro_theta" begin
         etas = Float64[]

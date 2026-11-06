@@ -17,6 +17,7 @@ Cases against exact properties or analytical solutions, in 1D and 2DV:
 | Sloshing over two beaches, two water masses | conservation | water volume and constituent mass to 9e-16, density within its bounds |
 | Standing waves, non-hydrostatic | omega² = g k tanh(k H) | phase speed within 1.9 % up to k H = 3 |
 | Solitary wave on a plane beach | Synolakis (1987) | maximum runup converges to the law (94 % at dx = 0.05 m, 100 % at 0.0125 m) |
+| Runup, non-hydrostatic, against theta | Carrier & Greenspan (1958) | surface error 2.1-2.4 % of the runup amplitude for theta = 0.5-1 (before issue #38: 37 % at 0.55, blow-up at 0.5) |
 
 Run all cases and write the figures (about 1 min):
 
@@ -134,6 +135,44 @@ thin film on the beach drains; the steps at dx = 0.1 m are the cells of the beac
 ![Surface profiles](figures/runup_profiles.png)
 
 ![Runup 2DV](figures/runup_2dv.gif)
+
+Runup against theta, non-hydrostatic (issue #38)
+------------------------------------------------
+
+The same runup with 15 layers and tvd2, for theta from 0.5 to 1, hydrostatic and non-hydrostatic (mode `theta`, about
+4 min; not in the default list). The non-hydrostatic w predictor used to start from w^n recovered from the interface
+fluxes of the step before, w^{n+1} = (w_theta - (1 - theta) w^n) / theta, a recursion that multiplies its error by
+-(1 - theta)/theta every step. Now w^n comes from the continuity of u^n (docs/TESTS_TECHNICAL_DOCUMENTATION.md, section
+19). The "before" curves are the same script run against the package before the change:
+
+```pwsh
+git worktree add ../swe-before 241800b
+$env:WD_THETA_TAG = "before"; julia --project=../swe-before experiments/wetting_drying/plot_wetting_drying.jl theta
+$env:WD_THETA_TAG = "now";    julia --project=. experiments/wetting_drying/plot_wetting_drying.jl theta
+```
+
+(`WD_THETA_PLOT_ONLY=1` redraws the figures from the CSV files in the output folder.)
+
+![Error against theta](figures/theta_wd_error.png)
+
+On 480 x 15 cells (dx = 0.05 m) the surface error was 0.37 of the runup amplitude at theta = 0.55 and the run blew up at
+0.5; now it is 0.021 for every theta (0.024 at 0.5, see below), as hydrostatic. The shoreline error does not depend
+on theta (8-9 %).
+
+![Growth](figures/theta_wd_growth.png)
+
+The old scheme followed the new one until a sawtooth in time took off offshore (from t = 0.27 period at theta = 0.5, from
+0.77 at 0.55).
+
+![Convergence](figures/theta_wd_convergence.png)
+
+At theta = 0.55 the old scheme was right on the coarse grids and failed with refinement (0.37 at dx = 0.05 m, blow-up at
+0.025 m). Now the surface error converges at first order (orders 0.92, 0.91, then 0.33) and the shoreline at order
+0.6-0.7, as hydrostatic. On the finest grid the non-hydrostatic surface error is 0.017 (hydrostatic 0.012): short
+non-hydrostatic waves from the start are damped less at theta close to 1/2 (0.015 with theta = 0.7); they decay from
+period to period. Theta = 1/2 itself remains marginal in the non-hydrostatic mode: on the finest grid max |w| grows from
+0.12 to 0.30 m/s in the second period and then stays, the result on 480 x 15 cells depends on round-off (0.021 or
+0.024). Use theta >= 0.55 there; the default 0.7 is unaffected.
 
 Sloshing over two beaches with two water masses
 -----------------------------------------------

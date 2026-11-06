@@ -1007,7 +1007,22 @@ Surface error / $A$ after one period (480 x 15 cells, $\Delta t$ = 0.01 s):
 |---|---|---|---|---|---|
 | hydrostatic, `tvd2` | 0.023 | 0.022 | 0.021 | 0.021 | 0.021 |
 | non-hydrostatic, `tvd2`, before | blow-up | 0.37 | 0.021 | 0.021 | 0.021 |
-| non-hydrostatic, `tvd2` | 0.024 | 0.021 | 0.021 | 0.021 | 0.021 |
+| non-hydrostatic, `tvd2` | 0.021-0.024 | 0.021 | 0.021 | 0.021 | 0.021 |
+
+Convergence at $\theta=0.55$ (15 layers, $\Delta t$ = 0.2 s/m $\cdot\,\Delta x$, $\Delta x$ = 0.2 to 0.025 m): before the
+change the coarse grids were right and the error grew with refinement (0.040, 0.37 of $A$, blow-up at 0.025 m); now the
+surface error converges at first order like the hydrostatic one (orders 0.92, 0.91; hydrostatic 0.93, 0.83, 0.84), the
+shoreline error at order 0.6-0.7 in both modes. On the finest grid the non-hydrostatic surface error is 0.017 $A$
+(hydrostatic 0.012): at $\theta=0.55$ short non-hydrostatic waves from the start are damped less (largest error
+offshore at $t$ = 0.27 period; 0.015 $A$ at the shoreline with $\theta$ = 0.7 and 1), and they decay from period to
+period (max $|w|$ 0.088, 0.069, 0.066 m/s over three periods).
+
+$\theta=1/2$, non-hydrostatic, remains marginal: on 480 x 15 cells the surface error is 0.021 or 0.024 $A$ depending on
+round-off ($\Delta t$ = 0.01 s or 0.010000000000000002 s), and on the finest grid max $|w|$ grows from 0.12 to
+0.30 m/s between the first and the second period and then stays (0.31 m/s), while the hydrostatic run at $\theta=1/2$
+stays at 0.045 m/s. The cause is not determined (a candidate is the explicit advection of $w$ in the non-hydrostatic
+predictor, which the hydrostatic mode does not have); $\theta\ge0.55$ is the usable range of the non-hydrostatic wet/dry
+step, the default 0.7 is unaffected. Figures: `experiments/wetting_drying/`, mode `theta`.
 
 The issue also asked whether the shoreline needs local damping, since $|U|/\sqrt{gh}$ exceeds
 $\mathrm{Fr}_{\max}(\theta)$ there for every $\theta<1$. The shoreline errors are the same for all $\theta$ (8.3-9.4 % of
@@ -3090,7 +3105,7 @@ Exactness, conservation and positivity tests run for the four variants hydrostat
 - `test_validate_wd_carrier_greenspan_runup_2dv_nonhydro`: long wave ($kH\ll1$): the non-hydrostatic mode within the
   hydrostatic bounds.
 - `test_validate_wd_carrier_greenspan_runup_2dv_nonhydro_theta`: the same run at $\theta$ = 1/2, 0.55, 0.6 and 1: within
-  the same bounds, and the surface errors / $A$ differ by at most 0.005 (observed 0.0211-0.0241; 0.37 at $\theta=0.55$
+  the same bounds, and the surface errors / $A$ differ by at most 0.005 (observed 0.0211-0.0241, the value at 1/2 depends on round-off; 0.37 at $\theta=0.55$
   and a blow-up at 1/2 before issue #38, section 19).
 - `test_validate_wd_nonhydro_standing_wave_full_dispersion_{upwind1,tvd2}`: closed basin, $kH=\pi/2$ (the shallow-water
   and the full period differ by more than 25 %): period error below 2 % on 80 x 40 cells (observed 0.89 %), smaller than
