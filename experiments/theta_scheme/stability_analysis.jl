@@ -16,6 +16,7 @@
 #
 # Run: julia --project experiments/theta_scheme/stability_analysis.jl
 
+include(joinpath(@__DIR__, "..", "common", "performance.jl"))   # performance overview at exit (issue #10)
 using Printf
 using SweTransport2DV: theta_froude_max
 

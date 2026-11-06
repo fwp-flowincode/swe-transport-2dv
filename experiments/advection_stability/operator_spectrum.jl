@@ -14,6 +14,7 @@
 #
 # Run: julia --project experiments/advection_stability/operator_spectrum.jl   (about a minute)
 
+include(joinpath(@__DIR__, "..", "common", "performance.jl"))   # performance overview at exit (issue #10)
 using SweTransport2DV, LinearAlgebra, Printf
 const S = SweTransport2DV
 

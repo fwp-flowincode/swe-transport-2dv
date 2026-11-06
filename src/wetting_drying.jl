@@ -21,63 +21,7 @@ const WD_POSITIVITY_ROUNDOFF_FACTOR = 2
 # the coefficient at c_b = (kappa/ln 10)^2 = 0.032
 const WD_FRICTION_Z1_MIN_FACTOR = 10.0
 
-"""
-    WetDryState
-
-Bed, layer geometry, fluxes and work arrays of the wetting-drying time step (sizes for nz layers and nx columns).
-- `bed` (m, nx): bed level per column; `bed_face` (m, nx+1): bed level at the u-faces (higher neighbour).
-- `h`, `h_new` (m, nz x nx): layer thicknesses at the old and new time level.
-- `hf` (m, nz x (nx+1)): layer thicknesses at the u-faces (upwind water level, face bed).
-- `q` (m^2/s, nz x (nx+1)): layer discharges hf*u of the step.
-- `p_anom` (Pa, nz x nx): baroclinic pressure g * integral from z to zeta of (rho - rho0), at the nominal layer centres.
-- `time` (s): model time, advanced by every step (used by a time-dependent boundary velocity).
-- `gate_edge` (m, nx+1), `gate_contraction` (-, nx+1): sluice gates at the u-faces (`set_sluice_gate!`).
-"""
-mutable struct WetDryState{T<:Real}
-    bed::Vector{T}
-    bed_face::Vector{T}
-    h::Matrix{T}
-    h_new::Matrix{T}
-    hf::Matrix{T}
-    q::Matrix{T}
-    p_anom::Matrix{T}
-    mass::Matrix{T}
-    a_face::Vector{T}
-    U_hat::Vector{T}
-    rhs::Vector{T}
-    cp::Vector{T}
-    dp::Vector{T}
-    delta::Vector{T}
-    eta_iter::Vector{T}   # m, Newton iterate of the free-surface solve
-    outflow::Vector{T}    # m, outflow volume of each column in the last step (round-off scale of the depth check)
-    tri_a::Vector{T}
-    tri_b::Vector{T}
-    tri_c::Vector{T}
-    tri_d::Vector{T}
-    # non-hydrostatic correction (use_hydrostatic=false)
-    u_old::Matrix{T}           # m/s, nz x (nx+1): u of time n
-    w_star::Matrix{T}          # m/s, (nz+1) x nx: predicted vertical velocity at the interfaces
-    h_nh::Matrix{T}            # m, nz x nx: layer thicknesses of the provisional level of the free-surface solve
-    q_nh::Matrix{T}            # Pa, nz x nx: non-hydrostatic pressure
-    w_nh::Matrix{T}            # m/s, (nz+1) x nx: vertical velocity w^n at the interfaces (theta scheme, issue #34)
-    nh_index::Matrix{Int}      # unknown number of a cell of the pressure problem (0: surface, dry or empty cell)
-    nh_rows::Vector{Int}
-    nh_cols::Vector{Int}
-    nh_vals::Vector{T}
-    nh_rhs::Vector{T}
-    hf_prev::Matrix{T}         # m, nz x (nx+1): face layer thicknesses of the previous step (-1: none yet)
-    time::Float64
-    clamped_volume::Float64   # m^2 (per unit width): volume added by setting round-off negative depths to zero
-    newton_iterations::Int        # Newton iterations of the last free-surface solve
-    newton_iterations_max::Int    # largest number of Newton iterations so far
-    left_velocity::Any   # nothing, or a function t (s) -> u (m/s, scalar or length nz) at the left boundary face
-    gate_edge::Vector{T}         # m, nx+1: lower edge of a sluice gate above the grid bottom (Inf: no gate; issue #48)
-    gate_contraction::Vector{T}  # -, nx+1: contraction coefficient of the gate opening (1: none)
-    gate_active::Vector{Bool}    # nx+1: the gate cuts the flow area of the face in this step (upstream level above it)
-    left_k::Any     # nothing (zero gradient), or k (m^2/s^2, length nz) of the inflow at the left boundary face (#42)
-    left_eps::Any   # nothing (zero gradient), or eps (m^2/s^3, length nz) of the inflow at the left boundary face (#42)
-    sediment::Any   # nothing, or the SedimentState of suspended sediment (attach_sediment!, issue #64)
-end
+# The WetDryState struct is defined in wetting_drying_state.jl (before Model, which holds it as a typed field).
 
 function WetDryState(cfg::ModelConfig; T::Type{<:Real}=Float64)
     nz, nx = cfg.nz, cfg.nx
@@ -92,7 +36,7 @@ function WetDryState(cfg::ModelConfig; T::Type{<:Real}=Float64)
         zeros(T, nx), zeros(T, nx), zeros(T, nx), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz),
         zeros(T, nz, nx + 1), zeros(T, nz + 1, nx), zeros(T, nz, nx), zeros(T, nz, nx), zeros(T, nz + 1, nx), zeros(Int, nz, nx),
         Int[], Int[], T[], T[], fill(T(-1), nz, nx + 1), 0.0, 0.0, 0, 0, nothing, fill(T(Inf), nx + 1), ones(T, nx + 1), fill(false, nx + 1),
-        nothing, nothing, nothing)
+        nothing, nothing, nothing, nothing, spzeros(T, 0, 0), Int[], Int[], Int[], 0, 0)
 end
 
 """
@@ -1094,10 +1038,11 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
         push!(rows, P); push!(cols, P); push!(vals, diag)
         rhs[P] = -rho0 / dt * div
     end
-    # PERF: the wet domain changes every step, so the matrix is assembled and factorized every step (sparse, O(n) work
-    # and memory); a lake at rest has rhs = 0 and gives q = 0 exactly.
-    A = sparse(rows, cols, vals, n, n)
-    sol = cholesky(Symmetric(A)) \ rhs
+    # PERF: the coefficients change every step (layer thicknesses), so the matrix is assembled and factorized every step
+    # (sparse, O(n) work and memory); a lake at rest has rhs = 0 and gives q = 0 exactly.
+    same_pattern = @timeit model.timers "sparse_assembly" _wd_pressure_matrix!(wd, rows, cols, vals, n)
+    F = @timeit model.timers "cholesky" _wd_pressure_factor!(wd, same_pattern)
+    sol = @timeit model.timers "solve" F \ rhs
     # WHY 1/theta^2: the system makes the theta flux divergence-free with the correction -dt/rho0 grad(sol); the
     # pressure enters u^{n+1} with theta dt and the theta flux with theta^2 dt, so q = sol / theta^2 (Pa)
     @inbounds for i in 1:nx, k in 1:nz
@@ -1112,6 +1057,43 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
     end
     model.last_nonhydro_pcorr_max = maximum(abs, wd.q_nh)
     return nothing
+end
+
+# Pressure matrix wd.nh_matrix (n x n) from the triplets (rows, cols, vals); returns whether the pattern is that of the
+# last step. The pattern changes only when a cell becomes an unknown or stops being one (surface or dry cell), the
+# values every step. Same pattern: the values are written into the stored matrix through the triplet positions
+# (wd.nh_nonzero), without the sort of `sparse` (0.8 ms and 1.9 MiB per step on 11000 unknowns, issue #10). The
+# triplets have no duplicates (one per cell pair), so each one has its own non-zero.
+function _wd_pressure_matrix!(wd::WetDryState, rows::Vector{Int}, cols::Vector{Int}, vals::Vector, n::Int)
+    if wd.nh_factor !== nothing && size(wd.nh_matrix, 1) == n && rows == wd.nh_pattern_rows && cols == wd.nh_pattern_cols
+        nz = wd.nh_matrix.nzval
+        @inbounds for t in eachindex(vals)
+            nz[wd.nh_nonzero[t]] = vals[t]
+        end
+        return true
+    end
+    wd.nh_matrix = sparse(rows, cols, vals, n, n)
+    # WHY the triplet numbers as values: sparse sorts the triplets into CSC order; its nzval then names the triplet of
+    # each non-zero (exact in Float64 for fewer than 2^53 triplets)
+    order = sparse(rows, cols, Float64.(eachindex(rows)), n, n)
+    resize!(wd.nh_nonzero, length(rows))
+    @inbounds for (position, t) in enumerate(order.nzval)
+        wd.nh_nonzero[Int(t)] = position
+    end
+    copyto!(resize!(wd.nh_pattern_rows, length(rows)), rows)
+    copyto!(resize!(wd.nh_pattern_cols, length(cols)), cols)
+    return false
+end
+
+# Cholesky factor of wd.nh_matrix. WHY the reuse: the symbolic analysis (fill-reducing ordering, elimination tree) is
+# half of the factorization (5.7 of 11.7 ms on 11000 unknowns, issue #10) and depends only on the pattern. Same
+# pattern: the same ordering and the same numeric operations, the factor is bit-identical to a new one.
+function _wd_pressure_factor!(wd::WetDryState, same_pattern::Bool)
+    wd.nh_factorizations += 1
+    same_pattern && return cholesky!(wd.nh_factor, Symmetric(wd.nh_matrix))
+    wd.nh_factor = cholesky(Symmetric(wd.nh_matrix))
+    wd.nh_symbolic_analyses += 1
+    return wd.nh_factor
 end
 
 """
@@ -1153,12 +1135,14 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     _wd_check_depth_positivity(model, wd)
 
     # 1. geometry at time n
-    _wd_cell_thicknesses!(wd.h, model, wd)
-    _wd_face_thicknesses!(model, wd)
-    _wd_initialize_new_face_layers!(model, wd)
-    copyto!(ws.u_old, st.u)   # u^n with the newly opened face layers (theta part of the continuity flux)
-    @. wd.q = wd.hf * st.u   # discharges of time n, for the advection
-    _wd_baroclinic_pressure!(model, wd)
+    @timeit model.timers "wd/geometry" begin
+        _wd_cell_thicknesses!(wd.h, model, wd)
+        _wd_face_thicknesses!(model, wd)
+        _wd_initialize_new_face_layers!(model, wd)
+        copyto!(ws.u_old, st.u)   # u^n with the newly opened face layers (theta part of the continuity flux)
+        @. wd.q = wd.hf * st.u   # discharges of time n, for the advection
+    end
+    @timeit model.timers "wd/baroclinic_pressure" _wd_baroclinic_pressure!(model, wd)
 
     # 2. momentum predictor, with the explicit parts of the theta scheme (issue #34): -(1 - theta) g d(eta^n)/dx and,
     # non-hydrostatic, -(1 - theta)/rho0 dq^n/dx (wd.q_nh still holds q^n)
@@ -1177,7 +1161,7 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     fhi = open_bc ? nx + 1 : nx
     ke = model.turbulence
     eddy_diffusion = ke !== nothing && ke.horizontal_diffusion
-    @inbounds for f in 2:fhi
+    @timeit model.timers "wd/momentum_predictor" @inbounds for f in 2:fhi
         depth_totals = _wd_advection_depth_totals(wd, f)
         boundary = f == nx + 1
         surface_slope = boundary ? _right_boundary_slope(ws.eta_old, model, dx; old=true) : (ws.eta_old[f] - ws.eta_old[f - 1]) / dx
@@ -1211,25 +1195,25 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     _wd_boundary_velocities!(model, wd, ws.u_hat, wd.time + dt)
 
     # 3.-4. free-surface solve with exact volume positivity, velocity correction
-    _wd_free_surface_solve!(model, wd)
+    @timeit model.timers "wd/free_surface_solve" _wd_free_surface_solve!(model, wd)
 
     # 4b. non-hydrostatic: pressure q from the projection of the free-surface velocities, its gradient added to the
     # predictor, and the free-surface solve repeated, so that the final velocities come from the positive solve (a
     # single layer has no vertical structure: hydrostatic)
     if !cfg.use_hydrostatic && nz > 1
-        _wd_nonhydrostatic_correction!(model, wd)
-        _wd_free_surface_solve!(model, wd)
+        @timeit model.timers "wd/nonhydro_correction" _wd_nonhydrostatic_correction!(model, wd)
+        @timeit model.timers "wd/free_surface_solve" _wd_free_surface_solve!(model, wd)
     end
 
     # 5. new water level from the flux divergence (equals V(eta^{n+1}) of the solve)
-    _wd_update_level_from_fluxes!(model, wd)
+    @timeit model.timers "wd/level_and_w" _wd_update_level_from_fluxes!(model, wd)
 
     # 6. vertical fluxes through the fixed interfaces (m/s), integrated upwards from the bed
-    @inbounds for i in 1:nx
+    @timeit model.timers "wd/level_and_w" @inbounds for i in 1:nx
         layer_thicknesses!(view(wd.h_new, :, i), _wd_level(model, i), wd.bed[i], model.dz)
     end
     max_mismatch = 0.0
-    @inbounds for i in 1:nx
+    @timeit model.timers "wd/level_and_w" @inbounds for i in 1:nx
         st.w[1, i] = 0.0
         for k in 1:nz
             st.w[k + 1, i] = st.w[k, i] - ((wd.h_new[k, i] - wd.h[k, i]) / dt + (wd.q[k, i + 1] - wd.q[k, i]) / dx)
@@ -1250,19 +1234,19 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
 
     # 7. constituent transport; k-epsilon (issue #30): turbulent density diffusion with nu_t of time n, then k and eps on
     # the new geometry
-    _wd_transport_density!(model, wd)
+    @timeit model.timers "wd/density_transport" _wd_transport_density!(model, wd)
     # suspended sediment (issue #64): with nu_t of time n, like the turbulent density diffusion; updates the mixture density
-    wd.sediment === nothing || _wd_sediment_step!(model, wd, wd.sediment)
+    wd.sediment === nothing || @timeit model.timers "wd/sediment" _wd_sediment_step!(model, wd, wd.sediment)
     if model.turbulence !== nothing
-        _wd_turbulent_density_diffusion!(model, wd, model.turbulence)
-        _wd_k_epsilon_step!(model, wd, model.turbulence)
+        @timeit model.timers "wd/density_transport" _wd_turbulent_density_diffusion!(model, wd, model.turbulence)
+        @timeit model.timers "wd/k_epsilon" _wd_k_epsilon_step!(model, wd, model.turbulence)
     end
     wd.time += dt
 
     # Hydrostatic and non-hydrostatic pressure components in the wet cells.
     copyto!(wd.h, wd.h_new)
-    _wd_baroclinic_pressure!(model, wd)
-    @inbounds for i in 1:nx, k in 1:nz
+    @timeit model.timers "wd/final_pressure" _wd_baroclinic_pressure!(model, wd)
+    @timeit model.timers "wd/final_pressure" @inbounds for i in 1:nx, k in 1:nz
         p_hydro = wd.h[k, i] > 0.0 ? cfg.rho0 * g * (_wd_level(model, i) - (k - 0.5) * model.dz) + wd.p_anom[k, i] : 0.0
         p_corr = cfg.use_hydrostatic ? 0.0 : wd.q_nh[k, i]
         model.last_p_hydro[k, i] = p_hydro

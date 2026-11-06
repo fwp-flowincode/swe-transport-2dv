@@ -3,6 +3,7 @@
 # output_barotropic/kelvin_helmholtz/). Settings and references: cases.jl; documented figures: plot_kelvin_helmholtz.jl
 # and README.md.
 
+include(joinpath(@__DIR__, "..", "common", "performance.jl"))   # performance overview at exit (issue #10)
 using SweTransport2DV
 using Printf
 

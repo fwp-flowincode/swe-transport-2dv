@@ -11,6 +11,7 @@
 #
 # Run: julia --project experiments/sloped_channel/run_cases.jl   (about two minutes)
 
+include(joinpath(@__DIR__, "..", "common", "performance.jl"))   # performance overview at exit (issue #10)
 using SweTransport2DV, Printf
 
 const C_CHEZY = 50.0     # m^(1/2)/s

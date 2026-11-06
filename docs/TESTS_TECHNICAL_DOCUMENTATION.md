@@ -1941,6 +1941,82 @@ real basin; during the pulse the discharge has to leave through the basin, a 0.3
 above $\tau_{ce}$ away from the jet and raises the level by about $q/\sqrt{gH}=0.54$ m); one fraction without flocculation
 and consolidation; unlimited erodible bed; assumed mud parameters.
 
+### 32) Performance: type-stable kernels, reuse of the pressure factorization, performance overview (issue #10)
+
+**Measurement.** Every model records its steps and their wall-clock time and allocations (`model.performance`, set in
+`step_forward!`); with the section timers (TimerOutputs: `step/*` of the fixed grid, `wd/*` of the wetting-drying step,
+`pressure/*` of the fixed-grid pressure solver) they are collected per session. `print_performance_report()`
+(`src/performance.jl`) prints wall-clock, CPU (all threads), compilation and GC time, the allocations, one row per
+model with the cost per cell and step and the merged section timers; `reset_performance!()` starts a new overview.
+Every script in `experiments/` includes `experiments/common/performance.jl`, which prints the overview at exit.
+
+**Causes found** (allocation profiler, `Profile.Allocs`, on the jet of section 31 and the lock exchange):
+- untyped fields of `Model` (`turbulence`, `wetdry`, `x_boundary_eta_left`, `x_boundary_eta_right`,
+  `x_boundary_rho_left`, all `Any`): every value computed from them in a kernel was dynamically typed and boxed, 16 bytes
+  per cell and operation. Affected: the k-epsilon terms of the wetting-drying predictor, the k-epsilon and sediment
+  steps, the free-surface solve (level of the open boundary), the face thicknesses and the surface Froude check of every
+  face (also on the fixed grid: about 1 MiB per step on 300 x 40 cells). Now typed (`Union{Nothing,KEpsilonState{T}}`,
+  `Union{Nothing,WetDryState{T}}`, `Union{Nothing,Float64}`, `Union{Nothing,Float64,Vector{Float64}}`); `WetDryState` is
+  defined before `Model` (`src/wetting_drying_state.jl`);
+- the mixture density of the sediment coupling, read through the untyped `wd.sediment` (now asserted `Matrix{T}`), and
+  a closure allocated per cell in the sediment column (now a function);
+- the constituent mass of the fixed grid with a bed: `sum(rho[wet_cell])` copied the wet cells every step (now gathered
+  into a work array: the same pairwise sum, bit for bit);
+- the non-hydrostatic pressure of the wetting-drying step: assembled with `sparse` and factorized with a new symbolic
+  analysis in every step (12.2 ms of a 44 ms step on 200 x 56 cells, 11000 unknowns).
+
+**Reuse of the pressure factorization** (`_wd_pressure_matrix!`, `_wd_pressure_factor!`). The symbolic analysis
+(fill-reducing ordering, elimination tree) depends only on the pattern of the matrix, which changes only when a cell
+becomes a pressure unknown or stops being one (the surface cell of a column moves to another layer, a column falls dry or
+wets). While the triplet pattern equals that of the last step, the values are written into the stored matrix through the
+position of each triplet (no sort) and only the numeric factorization is repeated (`cholesky!`). The same pattern gives
+the same ordering and the same operations: the result is bit-identical to a new factorization. In the jet one analysis
+was needed in 305 steps; assembly 0.83 -> 0.22 ms, factorization 12.2 -> 7.0 ms.
+
+**Tried and not adopted** (the same matrices, captured from the jet):
+- CG with the tridiagonal blocks of the columns as preconditioner (line Jacobi), warm start from the last step: 230-280
+  iterations, 60-80 ms (the horizontal coupling over 200 columns needs a multigrid preconditioner);
+- CG preconditioned with the factor of an earlier step (refactorization only when the iterations grow): 5-7 iterations
+  of 1.3 ms, no faster than the numeric factorization plus one solve (7.9 ms);
+- the number of BLAS threads used by CHOLMOD (1, 2, 4, 6): within the scatter of the measurement.
+
+**Results** (warm steps, Windows, 6 BLAS threads, one Julia thread; the same set-ups with `main` before and with
+issue #10; the wetting-drying cases are the jet basin of section 31 at $\Delta x$ = 1 m with the 3 m/s inflow):
+
+| set-up | before (ms/step) | after (ms/step) | speed-up | after (us per cell and step) | allocated per step, before -> after |
+|---|---|---|---|---|---|
+| fixed grid 300 x 40, non-hydrostatic, spectral (lock exchange) | 2.82 | 1.25 | 2.3 | 0.104 | 1015 KiB -> 12 KiB |
+| fixed grid 300 x 40, hydrostatic, variable top layer | 2.17 | 0.84 | 2.6 | 0.070 | 1007 KiB -> 0.2 KiB |
+| fixed grid 300 x 40, non-hydrostatic, k-epsilon | 5.34 | 2.22 | 2.4 | 0.185 | 1015 KiB -> 13 KiB |
+| fixed grid 300 x 40, non-hydrostatic, bed step (sparse solver) | 3.68 | 2.26 | 1.6 | 0.19 | 1252 KiB -> 0.1 KiB |
+| wetting-drying 200 x 56, hydrostatic | 10.2 | 1.32 | 7.7 | 0.118 | 8027 KiB -> 1.4 KiB |
+| wetting-drying 200 x 56, hydrostatic, k-epsilon | 20.9 | 3.02 | 6.9 | 0.270 | 16572 KiB -> 1.4 KiB |
+| wetting-drying 200 x 56, non-hydrostatic | 25.3 | 11.4 | 2.2 | 1.015 | 18695 KiB -> 2950 KiB |
+| wetting-drying 200 x 56, non-hydrostatic, k-epsilon, sediment | 42.3 | 14.2 | 3.0 | 1.27 | 30547 KiB -> 2950 KiB |
+
+Line coverage of `src/` (julia --code-coverage, full suite): 96.8 % (4174 of 4314 lines; `visualization.jl` 89 %, the
+non-Windows branch of `process_cpu_time` is not reached on Windows).
+The machine load changed the absolute times by up to 40 % between runs; the ratios were stable. The full test suite
+went from 34.5 to 11.0 min. The results are unchanged bit for bit (against `main`: the jet, hydrostatic and
+non-hydrostatic with k-epsilon and sediment, 150 steps, and a non-hydrostatic dam break over a slope, 300 steps).
+
+**Comparison with the lock exchange.** The fixed grid costs 0.07-0.25 us per cell and step in every mode, and the
+hydrostatic wetting-drying step is now as cheap (0.12, with k-epsilon 0.27). The non-hydrostatic wetting-drying step
+remains about ten times dearer than the spectral lock exchange: the cut cells and the moving surface exclude the
+spectral solver, and the numeric Cholesky factorization of every step is half of its cost (7 of 14 ms on 11000
+unknowns; CHOLMOD also allocates 1.9 MiB for its copy of the matrix). The time step of these runs is set by the
+advective Courant number ($U\Delta t/\Delta x$ = 0.5 in the jet), not by the solver.
+
+**Ideas for further issues.**
+- Multigrid-preconditioned CG (e.g. algebraic multigrid) for the non-hydrostatic wetting-drying pressure: O(n) per
+  step instead of the factorization, decisive for grids well beyond 10^4 unknowns.
+- Multi-threading of the column kernels: the implicit vertical terms, k-epsilon, the sediment column solve and the face
+  loops of the predictor are independent per column or face (`Threads.@threads` over columns, work arrays per thread).
+- Parallel parameter studies: the experiments that scan resolutions or set-ups (bed cell, obstacles, splitter plate)
+  run independent models one after the other; one thread or process per case would use all cores.
+- GPU (KernelAbstractions) for the fixed grid: the explicit stencils and the spectral solver (cuFFT) map directly; the
+  wetting-drying step (Newton solve, sparse factorization) much less so.
+
 ## Test-by-test documentation
 
 ### test_verify_state_shapes
@@ -3146,6 +3222,26 @@ outflow.
   and deposition balance within 5 %.
 - `test_verify_sediment_argument_checks`: negative settling velocity, zero critical stress, negative concentration, wrong
   inflow length, particles lighter than the water, no wetting and drying, no bed roughness are rejected.
+
+### Performance tests (`test_performance.jl`, section 32)
+
+- `test_verify_performance_report`: a model built after `reset_performance!` is recorded; after 5 steps its record
+  counts 5 steps with a positive time and its label names grid and mode; the report lists wall-clock, CPU, compilation
+  and GC time, allocations, the model and the merged sections; a model without steps is not listed, models beyond the
+  table rows are summed in one row; `reset_performance!` empties the list.
+- `test_verify_performance_format_bytes`: bytes, KiB, MiB, GiB.
+- `test_verify_wd_pressure_factor_reuse`: non-hydrostatic dam break over a slope, 150 steps, with the reuse of the
+  factorization and with a new analysis in every step: u, eta and q identical bit for bit; the front changed the
+  pattern (more than one analysis), but not in every step.
+- `test_verify_wd_step_allocations`: hydrostatic wetting-drying step with k-epsilon, sediment and an inflow: below
+  16 KiB per step (measured 0.4 KiB; 300 KiB before issue #10, when the untyped fields boxed every cell).
+
+### Visualization tests (`test_visualization.jl`, section 32)
+
+- `test_verify_plots_fixed_grid`, `test_verify_plots_bed_with_solid_cells`, `test_verify_plots_wetting_drying_with_vegetation`:
+  the final-state plot, the animation (3 frames) and the pressure-buoyancy diagnostics are written for a small
+  non-hydrostatic fixed grid, a bed step with solid cells and a wetting-drying slope with a stem; every file exists and
+  is not empty. The other tests switch the plots off; these keep the plotting code covered.
 
 ## Additional validation scripts and literature basis
 

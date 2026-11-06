@@ -8,6 +8,9 @@ Each case folder can hold a `README.md` (description, settings, results) and a `
 subfolder with small images and animations for it (keep each file well below 1 MB). Full
 model output goes to `output_barotropic/`, which is not version controlled.
 
+Every script prints a performance overview when it ends (`common/performance.jl`, issue #10): wall-clock, CPU,
+compilation and GC time, allocations, the cost per cell and step of each model and the time per section of the step.
+
 Structure
 ---------
 - benchmarks/: profiling and speed benchmarks.

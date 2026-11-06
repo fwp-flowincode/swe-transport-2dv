@@ -360,24 +360,29 @@ mutable struct Model{T<:Real}
     x_boundary_u_left_profile::Any
     x_boundary_u_right_open::Bool
     x_boundary_u_right_profile::Any
-    x_boundary_eta_right::Any   # nothing, or the prescribed water level eta_R (m) at the right boundary face
+    # WHY typed (not Any) here and below: read in the kernels of every step; an untyped field made the values derived from
+    # it dynamic and boxed (issue #10)
+    x_boundary_eta_right::Union{Nothing,Float64}   # nothing, or the prescribed water level eta_R (m) at the right boundary face
     x_boundary_q_left::Any      # nothing, or the discharge q (m^2/s, or a function of t (s)) of the left boundary face (profile = shape)
-    x_boundary_eta_left::Any    # nothing, or the level eta_L (m) of the left boundary face (supercritical inflow, #46)
-    x_boundary_rho_left::Any    # nothing, or the density (kg/m^3, scalar or one per layer) of the inflow at the left boundary face (#47, #42)
+    x_boundary_eta_left::Union{Nothing,Float64}    # nothing, or the level eta_L (m) of the left boundary face (supercritical inflow, #46)
+    x_boundary_rho_left::Union{Nothing,Float64,Vector{Float64}}    # nothing, or the density (kg/m^3, scalar or one per layer) of the inflow at the left boundary face (#47, #42)
     x_boundary_right_free::Bool # free outflow at the right boundary face (issue #46)
     x_boundary_eta_free::Float64  # m, radiated level of the free outflow face (_update_free_outflow_level!)
     x_boundary_free_dirichlet::Tuple{Float64,Float64}   # (m, -), effective level and weight of the free outflow this step
     x_boundary_eta_target::Float64        # m, target level of a relaxed free outflow (issue #54)
     x_boundary_relaxation_time::Float64   # s, relaxation time of the free outflow to x_boundary_eta_target; Inf: none
     geometry::BedGeometry   # staircase bed masks (all cells wet for the flat bed)
-    turbulence::Any         # KEpsilonState with turbulence_closure = "k_epsilon", else nothing
-    wetdry::Any             # WetDryState with wetting_drying = true, else nothing
+    # WHY not Any: the kernels read it in their inner loops; an untyped field boxed every value computed from it
+    # (about 10 MiB per wetting-drying step with k-epsilon on 200 x 56 cells, issue #10)
+    turbulence::Union{Nothing,KEpsilonState{T}}   # KEpsilonState with turbulence_closure = "k_epsilon", else nothing
+    wetdry::Union{Nothing,WetDryState{T}}   # WetDryState with wetting_drying = true, else nothing
     max_surface_froude::Float64   # -, largest surface_froude_number after any step so far (issue #39)
     froude_warning_issued::Bool   # the theta Froude-bound warning has been given (once per model)
     boundary_froude_warned::Bool  # the boundary-type Froude warning has been given (once per model, issue #46)
     max_advective_courant::Float64   # -, largest |u| dt/dx after any step so far (issue #61)
     courant_warning_issued::Bool     # the advective Courant warning has been given (once per model)
     reach_mode_warned::Bool          # the warning of the growing reach mode has been given (once per model)
+    performance::ModelPerformance    # steps, their wall-clock time and allocations (print_performance_report, issue #10)
 end
 
 function _linspace(start::Real, stop::Real, n::Int)
@@ -407,7 +412,18 @@ function _constituent_mass(model::Model)
     model.wetdry === nothing || return _wd_constituent_mass(model)
     st = model.state
     if model.geometry.any_solid
-        mass = sum(st.rho[model.geometry.wet_cell]) * model.dx * model.dz
+        # PERF: the wet cells are gathered into a work array instead of sum(st.rho[wet_cell]), whose logical index
+        # allocated a copy every step (issue #10). WHY the same gather and sum: the same values in the same order give
+        # the same pairwise sum, bit for bit; this mass drives _correct_constituent_mass!.
+        wet, values = model.geometry.wet_cell, model.geometry.wet_values
+        j = 0
+        @inbounds for idx in eachindex(st.rho, wet)
+            if wet[idx]
+                j += 1
+                values[j] = st.rho[idx]
+            end
+        end
+        mass = sum(values) * model.dx * model.dz
         if use_variable_top_layer(model.config)
             nz = size(st.rho, 1)
             @inbounds for i in eachindex(st.eta)
@@ -833,6 +849,7 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
 
     ws = ModelWorkspace(cfg; T=T)
 
+    timers = TimerOutput()
     model = Model(
         cfg,
         dx,
@@ -851,7 +868,7 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
         rho_0_w,
         rho_0_w_2d,
         grad_p_z_reference,
-        TimerOutput(),
+        timers,
         ws,
         nothing,
         nothing,
@@ -875,6 +892,7 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
         0.0,
         false,
         false,
+        _register_performance!(_performance_label(cfg), cfg.nx * cfg.nz, timers, pressure_solver.timers),
     )
 
     initialize_lock_exchange!(model; rho_left=cfg.rho_left, rho_right=cfg.rho_right)
@@ -1877,7 +1895,28 @@ function _integrate_w_from_continuity!(w::AbstractMatrix{<:Real}, u::AbstractMat
     return w
 end
 
+# Grid and mode of a model for the performance overview, e.g. "200 x 56, wetting-drying, non-hydrostatic, k-epsilon".
+function _performance_label(cfg::ModelConfig)
+    mode = (cfg.use_hydrostatic || cfg.nz == 1) ? "hydrostatic" : "non-hydrostatic"
+    closure = turbulence_closure(cfg) == "k_epsilon" ? ", k-epsilon" : ""
+    return "$(cfg.nx) x $(cfg.nz), $(cfg.wetting_drying ? "wetting-drying" : "fixed grid"), $(mode)$(closure)"
+end
+
+"""
+    step_forward!(model)
+
+Advances the model by one time step dt. The wall-clock time and the allocations of the step are added to
+`model.performance` (print_performance_report).
+"""
 function step_forward!(model::Model)
+    t0 = time_ns()
+    b0 = Base.gc_bytes()
+    _step_forward!(model)
+    _record_step!(model.performance, time_ns() - t0, Base.gc_bytes() - b0)
+    return nothing
+end
+
+function _step_forward!(model::Model)
     cfg = model.config
     st = model.state
     ws = model.ws
