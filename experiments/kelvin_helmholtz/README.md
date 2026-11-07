@@ -1,6 +1,10 @@
 Kelvin-Helmholtz instability
 ============================
 
+Two parts: the showcase run below (roll-up, merging and mixing at one resolution; its shear layer is two cells thick, so
+its wavelength is set by the grid), and the growth rate of a resolved shear layer against stability theory on three
+grids (issue #22, [below](#growth-rate-of-a-resolved-shear-layer-issue-22)).
+
 Two layers of slightly different density slide past each other in opposite directions. The velocity jump
 across the interface is unstable: waves on the interface roll up into billows, the billows merge and break
 down, and the layers mix. For a thin shear layer the growth rate of a wave with wavenumber k is about
@@ -70,3 +74,65 @@ References
 - Helmholtz (1868), Monatsberichte der Königlichen Preussischen Akademie der Wissenschaften zu Berlin, 215-228
 - Kelvin (1871), Philosophical Magazine 42, 362-377
 - Chandrasekhar (1981), *Hydrodynamic and Hydromagnetic Stability*, Dover, ch. XI
+
+Growth rate of a resolved shear layer (issue #22)
+-------------------------------------------------
+
+The linear growth of a tanh shear layer of physical thickness against the Taylor-Goldstein mode
+(`kelvin_helmholtz_tanh_mode`), the case of `test/test_kelvin_helmholtz.jl`.
+
+| Grid (cells per δ) | Growth rate error, J = 0.05 | J = 0 |
+|---|---|---|
+| 8 (113 x 64) | -1.02 % | -0.87 % |
+| 16 (226 x 128) | -0.52 % | -0.46 % |
+| 32 (452 x 256) | -0.28 % | -0.27 % |
+
+    julia --project=. experiments/kelvin_helmholtz/plot_growth_rate.jl            # all parts, about 15 min
+    julia --project=. experiments/kelvin_helmholtz/plot_growth_rate.jl growth     # one part: growth, spectrum, mixing, seam
+
+Output in `output_barotropic/kelvin_helmholtz_growth/`; the figures here are copies.
+
+**Case.** Shear layer u = U tanh((z - z0)/δ) with δ = 0.1 m, U = 0.05 m/s, and a tanh density profile of the same
+thickness, Δρ = 0.255 kg/m³: bulk Richardson number J = g Δρ δ / (2 ρ0 U²) = 0.05 (and J = 0 as a control). Depth 0.8 m
+(8 δ), periodic box of one wavelength with k δ = 0.4446 (1.41 m, the most unstable wavelength of Michalke 1964).
+Non-hydrostatic, tvd2, no viscosity, damping or limiter, U dt/dx = 0.2. `initialize_shear_layer_mode!` adds the
+eigenfunction of the mode (1 mm interface displacement), so the mode grows at its rate from the start.
+
+**Reference.** The Taylor-Goldstein equation for these profiles between the same walls, solved by shooting: σ = 0.07382
+1/s at J = 0.05 and 0.08808 1/s at J = 0. Unbounded and unstratified it gives Michalke's 0.1897 U/δ.
+
+![Growth curves](figures/kh_growth_curves.png)
+
+![Convergence](figures/kh_growth_convergence.png)
+
+The rate converges at first order from below: the numerical diffusion widens the shear layer, and a thicker layer
+grows more slowly.
+
+**Wavelength.** A box of four wavelengths (16 cells per δ) is started with divergence-free noise in the modes 1-12. The
+rates of the modes 2-7 follow the theory within 3 %:
+
+![Spectrum](figures/kh_spectrum.png)
+
+Mode 1 has not left the transient of the noise start in the fit window; the modes 8, 11 and 12 are driven by harmonics
+of the dominant modes (mode 8 = 2 x mode 4; 11 and 12 lie above the neutral wavenumber k δ ≈ 0.95); 9 and 10 decay.
+The dominant mode is 5 and 4 (the fastest) until about 100 s, then 3 when the billows merge:
+
+![Noise run](figures/kh_noise.gif)
+
+**Roll-up and mixing** on the three grids (one wavelength, J = 0.05):
+
+![Roll-up](figures/kh_rollup_grids.png)
+
+![Mixing](figures/kh_mixing.png)
+
+The billow has the same shape on the three grids. The mixing is not: the mixed layer (heavy fraction 0.05-0.95) grows
+from 0.30 m to 0.445, 0.414 and 0.384 m at 150 s, the density variance falls to 0.67, 0.75 and 0.83 of its initial
+value. The model has no viscosity or diffusivity here, so the mixing is numerical and decreases with refinement; a
+converged mixing rate needs a physical diffusivity (or a turbulence closure) resolved by the grid.
+
+**Seam.** The same run with the initial state shifted by half a wavelength (the billow forms across the periodic seam)
+agrees with the interior run after shifting back to 5e-8, 1.4e-6, 1.4e-5 and 4.8e-5 of Δρ at 40, 70, 100 and 130 s: round-off,
+amplified by the roll-up.
+
+References: Michalke (1964), J. Fluid Mech. 19, 543-556; Hazel (1972), J. Fluid Mech. 51, 39-61; Miles (1961) and
+Howard (1961), J. Fluid Mech. 10, 496-508 and 509-512; Drazin & Reid (2004), Hydrodynamic Stability.

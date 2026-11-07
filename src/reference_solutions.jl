@@ -1,5 +1,5 @@
 # Analytical reference solutions: shallow-water equations with wetting and drying (issue #31; dam breaks #11, #12), uniform channel flow
-# with Chezy friction (issue #14), two-layer internal waves (issue #23).
+# with Chezy friction (issue #14), two-layer internal waves (issue #23), the Kelvin-Helmholtz mode of a tanh shear layer (issue #22).
 
 const CG_NEWTON_TOL = 1e-13          # -, Newton tolerance on the dimensionless hodograph equations
 const CG_NEWTON_MAXITER = 60         # -, Newton iterations before giving up
@@ -598,4 +598,87 @@ function two_layer_internal_wave(; k::Real, h_upper::Real, h_lower::Real, rho_up
     a, b, q = Cu * Cl + 1, g * k * (Cu + Cl) + gp * k * Cu, g * gp * k^2
     om2 = 2q / (b + sqrt(b^2 - 4a * q))   # smaller root of a om^4 - b om^2 + q = 0 (as above)
     return (sqrt(om2), -om2 / (g * k * sinh(k * h_upper) - om2 * cosh(k * h_upper)))
+end
+
+const TG_SHOOTING_STEPS = 4000      # -, RK4 steps of the Taylor-Goldstein shooting over the depth (rate converged to 1e-8)
+const TG_SECANT_MAXITER = 60        # -, secant iterations on the complex phase speed
+const TG_SECANT_RTOL = 1e-13        # -, secant stops when the phase-speed change is below this times U
+const TG_INITIAL_GUESS = 0.4        # -, initial phase speed i * TG_INITIAL_GUESS * U (Michalke 1964: 0.427 U at k delta = 0.4446)
+const TG_WALL_RESIDUAL = 1e-6       # -, |phi(depth)| / max |phi| of an accepted eigenfunction
+
+# RK4 integration of the Taylor-Goldstein equation from the bed (phi = 0, phi' = 1) to the top; returns phi at the n + 1
+# points z_j = j H / n (`store`) or only phi(H).
+function _tg_shoot(c::Complex, k::Real, U::Real, delta::Real, J::Real, H::Real, z0::Real, n::Int; store::Bool=false)
+    h = H / n
+    rhs(z, y) = begin
+        th = tanh((z - z0) / delta)
+        sech2 = 1 - th^2
+        Ubar = U * th
+        Upp = -2U / delta^2 * th * sech2
+        N2 = J * (U / delta)^2 * sech2
+        (y[2], (k^2 + Upp / (Ubar - c) - N2 / (Ubar - c)^2) * y[1])
+    end
+    y = (zero(c), one(c))
+    out = store ? [y[1]] : typeof(c)[]
+    for j in 0:(n - 1)
+        z = j * h
+        k1 = rhs(z, y)
+        k2 = rhs(z + h / 2, y .+ (h / 2) .* k1)
+        k3 = rhs(z + h / 2, y .+ (h / 2) .* k2)
+        k4 = rhs(z + h, y .+ h .* k3)
+        y = y .+ (h / 6) .* (k1 .+ 2 .* k2 .+ 2 .* k3 .+ k4)
+        store && push!(out, y[1])
+    end
+    return store ? out : y[1]
+end
+
+"""
+    kelvin_helmholtz_tanh_mode(; k, velocity, thickness, richardson=0.0, depth, z0=depth/2, steps=TG_SHOOTING_STEPS,
+        initial_guess=TG_INITIAL_GUESS * im) -> (growth_rate, phase_speed, z, phi)
+
+Most unstable temporal mode of the wavenumber `k` (1/m) of the shear layer u = U tanh((z - z0)/delta) with the
+stratification N^2 = J (U/delta)^2 sech^2((z - z0)/delta) (a tanh density profile of the same thickness), between walls
+at z = 0 and z = `depth` (m): growth rate sigma = k c_i (1/s), complex phase speed c (m/s), and the eigenfunction phi
+(stream function amplitude, psi = Re(phi(z) e^{i k (x - c t)}), normalised to max |phi| = 1) at the points z (m).
+`velocity` U (m/s), `thickness` delta (m), `richardson` J = N^2(z0) / U'(z0)^2 (-), 0 <= J < 1/4.
+
+Taylor-Goldstein equation (Taylor 1931, Goldstein 1931; Drazin & Reid 2004, Hydrodynamic Stability; equation numbers
+not checked):
+
+    phi'' = (k^2 + U'' / (U - c) - N^2 / (U - c)^2) phi,   phi(0) = phi(depth) = 0,
+
+solved by shooting: RK4 from the bed with phi = 0, phi' = 1, secant iteration on c for phi(depth) = 0, starting from
+c = `initial_guess` U (default 0.4 i; of a conjugate pair of roots the growing one is returned). A result whose
+eigenfunction does not meet the top wall (the secant stalled, as it can near or beyond the neutral wavenumber) is
+rejected with a DomainError; to follow the curve towards the neutral point, start from the root of a neighbouring k. For the antisymmetric profile c is imaginary. Checks (test_verify_kelvin_helmholtz_tanh_mode): unbounded and
+unstratified, the largest rate is 0.1897 U/delta at k delta = 0.4446 (Michalke 1964, J. Fluid Mech. 19, 543-556),
+the rate falls with J and vanishes as J -> 1/4 at k delta = 1/2 (Miles 1961 and Howard 1961: stable for
+J >= 1/4; Hazel 1972, J. Fluid Mech. 51, 39-61).
+"""
+function kelvin_helmholtz_tanh_mode(; k::Real, velocity::Real, thickness::Real, richardson::Real=0.0, depth::Real,
+        z0::Real=depth / 2, steps::Int=TG_SHOOTING_STEPS, initial_guess::Number=TG_INITIAL_GUESS * im)
+    (k > 0 && velocity > 0 && thickness > 0 && depth > 0) || throw(ArgumentError("k, velocity, thickness and depth must be > 0"))
+    0 <= richardson < 0.25 || throw(ArgumentError("richardson must be in [0, 1/4): the layer is stable for J >= 1/4"))
+    0 < z0 < depth || throw(ArgumentError("z0 must lie inside (0, depth)"))
+    U, delta, J, H = float(velocity), float(thickness), float(richardson), float(depth)
+    f(c) = _tg_shoot(c, k, U, delta, J, H, z0, steps)
+    c1 = complex(float(initial_guess)) * U
+    c2 = 1.05 * c1
+    f1, f2 = f(c1), f(c2)
+    for _ in 1:TG_SECANT_MAXITER
+        c3 = c2 - f2 * (c2 - c1) / (f2 - f1)
+        c1, f1 = c2, f2
+        c2, f2 = c3, f(c3)
+        abs(c2 - c1) <= TG_SECANT_RTOL * U && break
+    end
+    # WHY the conjugate: the equation has real coefficients, so c and conj(c) are both eigenvalues; near neutral
+    # stability the secant can converge to the decaying one
+    imag(c2) < 0 && (c2 = conj(c2))
+    imag(c2) > 0 || throw(DomainError(c2, "no unstable mode found for k = $(k), J = $(J)"))
+    phi = _tg_shoot(c2, k, U, delta, J, H, z0, steps; store=true)
+    # WHY: in the stable range the secant can stall (tiny steps) where phi(depth) is not zero; such a c is no eigenvalue
+    abs(phi[end]) <= TG_WALL_RESIDUAL * maximum(abs, phi) ||
+        throw(DomainError(c2, "no unstable mode found for k = $(k), J = $(J) (the wall condition is not met)"))
+    phi ./= phi[argmax(abs.(phi))]
+    return (k * imag(c2), c2, collect(range(0.0, H; length=steps + 1)), phi)
 end
