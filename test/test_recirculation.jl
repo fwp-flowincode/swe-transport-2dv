@@ -24,6 +24,7 @@ const ST1_XR_RTOL = 0.2         # -, the grid spread of section 28; this grid gi
 const ST1_SHIFT = 0.9           # -, bed shifted against the layers: lowest wet cell 0.1 dz (section 29)
 const ST1_SHIFT_RTOL = 0.1      # -, xR shifted against on the interface (measured 6.0 %; the local wall function: 38 %)
 const ST1_W_RATIO_MIN = 3.0     # -, largest w hydrostatic against non-hydrostatic (measured 3.6, and 10 at S/10)
+const ST1_MULTIGRID_RTOL = 1e-6 # -, reattachment length with the multigrid against the direct solver (issue #71; observed 4e-11)
 
 function rc_model(nx; nz=4, bed=nothing)
     cfg = ModelConfig(; length=RC_L, depth=RC_H, nx=nx, nz=nz, dt=RC_DT, nu=1e-6, turbulence_closure="k_epsilon",
@@ -41,7 +42,7 @@ function rc_model(nx; nz=4, bed=nothing)
 end
 
 # shift: the bed and the step are lifted by shift dz against the layers (one layer more), same geometry and dz
-function st1_mean(; hydro, shift=0.0)
+function st1_mean(; hydro, shift=0.0, solver="auto")
     dx = ST1_STEP / ST1_RESOLUTION
     dt = 0.4 * dx / 0.25
     length_m, x_step = 70 * ST1_STEP, 40 * ST1_STEP
@@ -51,7 +52,7 @@ function st1_mean(; hydro, shift=0.0)
     cfg = ModelConfig(; length=length_m, depth=nz * dx, nx=nx, nz=nz, dt=dt, use_hydrostatic=hydro, nu=1e-6,
         turbulence_closure="k_epsilon", bed_roughness_length=ST1_Z0, rayleigh_damping=0.0, apply_froude_limiter=false,
         momentum_advection_scheme="tvd2", wetting_drying=true, implicit_vertical_terms=true, theta=1.0,
-        bed_level=[(x < x_step ? ST1_STEP : 0.0) + lift for x in xc], write_plots=false)
+        bed_level=[(x < x_step ? ST1_STEP : 0.0) + lift for x in xc], write_plots=false, nonhydro_solver=solver)
     model = Model(cfg)
     fill!(model.state.rho, 1000.0)
     refresh_density_metadata!(model)
@@ -144,6 +145,13 @@ end
     xr_nh, w_nh = st1_mean(; hydro=false)
     @testset "test_validate_backward_step_reattachment_nonhydrostatic" begin
         @test abs(xr_nh - ST1_XR_LES) < ST1_XR_RTOL * ST1_XR_LES
+    end
+
+    @testset "test_validate_backward_step_reattachment_nonhydrostatic_multigrid" begin
+        # issue #71: the column-line multigrid instead of the direct solver
+        xr_mg, _ = st1_mean(; hydro=false, solver="multigrid")
+        @test abs(xr_mg - ST1_XR_LES) < ST1_XR_RTOL * ST1_XR_LES
+        @test xr_mg ≈ xr_nh rtol = ST1_MULTIGRID_RTOL
     end
 
     @testset "test_validate_backward_step_hydrostatic_vertical_velocity" begin

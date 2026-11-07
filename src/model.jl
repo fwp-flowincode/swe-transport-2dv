@@ -155,6 +155,19 @@ Base.@kwdef mutable struct ModelConfig
     # produce the depth-varying (dispersive) correction. Requires pressure_solver_method="sparse": the spectral (DCT)
     # method's fast transform represents only a Neumann-Neumann eigenbasis and cannot express this condition.
     nonhydro_surface_dirichlet::Bool = false
+    # Solver of the non-hydrostatic pressure of the wetting-drying step (issue #71): "direct" (sparse Cholesky),
+    # "multigrid" (CG with the column-line multigrid of src/multigrid.jl) or "auto" (multigrid from
+    # NH_MULTIGRID_MIN_UNKNOWNS unknowns on, below it the direct solver is faster). WHY auto: measured on the plane jet
+    # (issue #25), the multigrid takes 0.63, 0.54 and 0.38 of the direct time at 8.6e3, 7.7e4 and 7e5 unknowns, but 3 to 7
+    # times the (sub-millisecond) direct time below about 5e3.
+    nonhydro_solver::String = "auto"
+    # Relative residual |r| / |rhs| at which the multigrid CG stops (-). The pressure solve makes the theta fluxes of the
+    # cells below the surface divergence-free; the residual is a divergence error of this relative size. WHY 1e-8: the
+    # pressure then differs from the direct solution by about 1e-9 relative, well below the splitting error of the step
+    # (the repeated free-surface solve changes the fluxes by more).
+    nonhydro_solver_tolerance::Float64 = 1e-8
+    # CG iterations of the multigrid before the direct solver takes over for that step (normally 7-17).
+    nonhydro_solver_max_iterations::Int = NH_MULTIGRID_MAX_ITERATIONS
     # Bed level per column (m above the grid bottom, length nx; issue #3), a staircase on the z-level grid: each entry
     # must be a whole number of cells and leave at least two wet cells (the bed stays below the top layer; no dry
     # columns). nothing (default) = flat bed, legacy code paths. An explicit vector (also all zeros) uses the masked
@@ -1312,6 +1325,12 @@ function _check_model_config(cfg::ModelConfig)
 end
 
 function _check_wetting_drying_config(cfg::ModelConfig)
+    cfg.nonhydro_solver in ("auto", "direct", "multigrid") ||
+        throw(ArgumentError("nonhydro_solver must be \"auto\", \"direct\" or \"multigrid\", got \"$(cfg.nonhydro_solver)\""))
+    0.0 < cfg.nonhydro_solver_tolerance < NH_MULTIGRID_TOLERANCE_MAX ||
+        throw(ArgumentError("nonhydro_solver_tolerance must be in (0, $(NH_MULTIGRID_TOLERANCE_MAX)), got $(cfg.nonhydro_solver_tolerance)"))
+    cfg.nonhydro_solver_max_iterations >= 1 ||
+        throw(ArgumentError("nonhydro_solver_max_iterations must be >= 1, got $(cfg.nonhydro_solver_max_iterations)"))
     cfg.periodic_x && throw(ArgumentError("wetting_drying=true does not support periodic_x=true"))
     cfg.momentum_advection_scheme in ("upwind1", "tvd2") || throw(ArgumentError("momentum_advection_scheme must be \"upwind1\" or \"tvd2\", got \"$(cfg.momentum_advection_scheme)\""))
     turbulence_closure(cfg) in ("none", "k_epsilon") || throw(ArgumentError("wetting_drying=true supports turbulence_closure=\"none\" or \"k_epsilon\""))

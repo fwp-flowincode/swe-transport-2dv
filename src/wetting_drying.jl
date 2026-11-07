@@ -36,7 +36,7 @@ function WetDryState(cfg::ModelConfig; T::Type{<:Real}=Float64)
         zeros(T, nx), zeros(T, nx), zeros(T, nx), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz),
         zeros(T, nz, nx + 1), zeros(T, nz + 1, nx), zeros(T, nz, nx), zeros(T, nz, nx), zeros(T, nz + 1, nx), zeros(Int, nz, nx),
         Int[], Int[], T[], T[], fill(T(-1), nz, nx + 1), 0.0, 0.0, 0, 0, nothing, fill(T(Inf), nx + 1), ones(T, nx + 1), fill(false, nx + 1),
-        nothing, nothing, nothing, nothing, spzeros(T, 0, 0), Int[], Int[], Int[], 0, 0)
+        nothing, nothing, nothing, nothing, spzeros(T, 0, 0), Int[], Int[], Int[], 0, 0, nothing, 0, 0, 0, 0)
 end
 
 """
@@ -1023,6 +1023,20 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
     empty!(cols)
     empty!(vals)
     resize!(rhs, n)
+    # column-line multigrid (issue #71): its fine level gets the same coefficients as the triplets below
+    use_mg = cfg.nonhydro_solver == "multigrid" || (cfg.nonhydro_solver == "auto" && n >= NH_MULTIGRID_MIN_UNKNOWNS)
+    mg = nothing
+    if use_mg
+        wd.nh_multigrid === nothing && (wd.nh_multigrid = ColumnMultigrid(nz, nx))
+        mg = wd.nh_multigrid
+        L = mg.levels[1]
+        fill!(L.active, false)
+        fill!(L.dv, 0.0)
+        fill!(L.dh, 0.0)
+        fill!(L.cz, 0.0)
+        fill!(L.cx, 0.0)
+        fill!(mg.rhs, 0.0)
+    end
     @inbounds for i in 1:nx, k in 1:nz
         P = idx[k, i]
         P == 0 && continue
@@ -1041,6 +1055,10 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
             if N > 0
                 push!(rows, P); push!(cols, N); push!(vals, -a)
             end
+            if use_mg
+                mg.levels[1].dh[k, i] += a
+                (j == i + 1 && N > 0) && (mg.levels[1].cx[k, i] = a)
+            end
         end
         if k > 1 && wet(k - 1, i)   # interface k (below); w = 0 at the bed
             a = 1.0 / (0.5 * (h_nh[k - 1, i] + h_nh[k, i]))
@@ -1050,6 +1068,7 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
             if N > 0
                 push!(rows, P); push!(cols, N); push!(vals, -a)
             end
+            use_mg && (mg.levels[1].dv[k, i] += a)
         end
         # interface k+1 (above): always between wet cells, since k lies below the surface cell
         a = 1.0 / (0.5 * (h_nh[k, i] + h_nh[k + 1, i]))
@@ -1061,16 +1080,45 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
         end
         push!(rows, P); push!(cols, P); push!(vals, diag)
         rhs[P] = -rho0 / dt * div
+        if use_mg
+            L1 = mg.levels[1]
+            L1.dv[k, i] += a
+            N > 0 && (L1.cz[k, i] = a)
+            L1.active[k, i] = true
+            mg.rhs[k, i] = rhs[P]
+        end
     end
-    # PERF: the coefficients change every step (layer thicknesses), so the matrix is assembled and factorized every step
-    # (sparse, O(n) work and memory); a lake at rest has rhs = 0 and gives q = 0 exactly.
-    same_pattern = @timeit model.timers "sparse_assembly" _wd_pressure_matrix!(wd, rows, cols, vals, n)
-    F = @timeit model.timers "cholesky" _wd_pressure_factor!(wd, same_pattern)
-    sol = @timeit model.timers "solve" F \ rhs
-    # WHY 1/theta^2: the system makes the theta flux divergence-free with the correction -dt/rho0 grad(sol); the
-    # pressure enters u^{n+1} with theta dt and the theta flux with theta^2 dt, so q = sol / theta^2 (Pa)
-    @inbounds for i in 1:nx, k in 1:nz
-        idx[k, i] > 0 && (wd.q_nh[k, i] = sol[idx[k, i]] / (theta * theta))
+    # WHY 1/theta^2 below: the system makes the theta flux divergence-free with the correction -dt/rho0 grad(sol); the
+    # pressure enters u^{n+1} with theta dt and the theta flux with theta^2 dt, so q = sol / theta^2 (Pa).
+    # A lake at rest has rhs = 0 and gives q = 0 exactly with both solvers.
+    solved = false
+    if use_mg
+        iterations, solved = @timeit model.timers "multigrid" begin
+            _mg_setup!(mg)
+            _mg_pcg!(mg; rtol=cfg.nonhydro_solver_tolerance, itmax=cfg.nonhydro_solver_max_iterations)
+        end
+        wd.nh_iterations = iterations
+        wd.nh_iterations_max = max(wd.nh_iterations_max, iterations)
+        wd.nh_multigrid_solves += 1
+        if solved
+            @inbounds for i in 1:nx, k in 1:nz
+                idx[k, i] > 0 && (wd.q_nh[k, i] = mg.x[k, i] / (theta * theta))
+            end
+        else
+            wd.nh_fallbacks += 1
+            wd.nh_fallbacks == 1 && @warn @sprintf("non-hydrostatic multigrid: CG did not reach the relative residual %.1e in %d iterations; the direct solver takes over (warned once per model)",
+                cfg.nonhydro_solver_tolerance, cfg.nonhydro_solver_max_iterations)
+        end
+    end
+    if !solved
+        # PERF: the coefficients change every step (layer thicknesses), so the matrix is assembled and factorized every
+        # step (sparse, O(n) work and memory)
+        same_pattern = @timeit model.timers "sparse_assembly" _wd_pressure_matrix!(wd, rows, cols, vals, n)
+        F = @timeit model.timers "cholesky" _wd_pressure_factor!(wd, same_pattern)
+        sol = @timeit model.timers "solve" F \ rhs
+        @inbounds for i in 1:nx, k in 1:nz
+            idx[k, i] > 0 && (wd.q_nh[k, i] = sol[idx[k, i]] / (theta * theta))
+        end
     end
 
     # 4. the non-hydrostatic pressure gradient (weight theta) enters the predictor; the caller repeats the solve

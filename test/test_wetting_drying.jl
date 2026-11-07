@@ -644,6 +644,7 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
     NH_DISPERSION_REL_MAX = 0.02    # -, accepted relative period error on the finer grid
     NH_DISPERSION_GAP_MIN = 0.25    # -, relative difference of the two periods that the domain must resolve
     NH_WAVE_AMPLITUDE = 4e-5        # m, linear regime
+    NH_MULTIGRID_PERIOD_RTOL = 1e-6 # -, multigrid against direct solver (observed 3e-11)
 
     @testset "test_validate_wd_nonhydro_standing_wave_full_dispersion_$(scheme)" for scheme in ("upwind1", "tvd2")
         L, H, g = 8.0, 4.0, 9.81
@@ -652,9 +653,9 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         period_exact = 2pi / sqrt(g * k_wave * tanh(k_wave * H))
         @test (period_exact - period_shallow) / period_shallow > NH_DISPERSION_GAP_MIN
 
-        function wd_wave_period(nx, nz, dt)
+        function wd_wave_period(nx, nz, dt; solver="auto")
             cfg = wd_config(length=L, depth=H, nx=nx, nz=nz, dt=dt, use_hydrostatic=false,
-                momentum_advection_scheme=scheme, transport_advection_scheme=scheme)
+                momentum_advection_scheme=scheme, transport_advection_scheme=scheme, nonhydro_solver=solver)
             model = Model(cfg)
             x = wd_x_centres(cfg)
             initialize_water_level!(model, H .+ NH_WAVE_AMPLITUDE .* cos.(pi .* x ./ L); rho=1000.0)
@@ -679,6 +680,8 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         @test err_fine < err_coarse
         @test err_fine < NH_DISPERSION_REL_MAX
         @test abs(period_fine - period_exact) < abs(period_fine - period_shallow)
+        # issue #71: the column-line multigrid gives the same period (a linear wave: the solver difference does not grow)
+        @test wd_wave_period(80, 40, 0.002; solver="multigrid") ≈ period_fine rtol = NH_MULTIGRID_PERIOD_RTOL
     end
 
     # Deep water: k H = 3, where the shallow-water period is 42 % too short (measured: 1.9 % error on 40 x 40 cells).

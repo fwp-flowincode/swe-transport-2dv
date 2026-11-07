@@ -13,7 +13,8 @@ compilation and GC time, allocations, the cost per cell and step of each model a
 
 Structure
 ---------
-- benchmarks/: profiling and speed benchmarks.
+- benchmarks/: profiling and speed benchmarks; `bench_nonhydro_solver.jl`: direct against multigrid pressure solver of
+  the non-hydrostatic wetting-drying step, issue #71.
 - lock_exchange/: lock-exchange runs and density plots ([README](lock_exchange/README.md)).
 - lock_exchange_obstacle/: density-stratified dam break with obstacle over a variable bed ([README](lock_exchange_obstacle/README.md)).
 - rayleigh_taylor/: RTI reference and fast-growth runs, growth vs. linear theory ([README](rayleigh_taylor/README.md)).

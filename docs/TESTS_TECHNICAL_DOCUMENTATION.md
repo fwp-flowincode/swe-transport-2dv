@@ -21,6 +21,7 @@ every file includes, so each file also runs on its own (`julia --project=. test/
 | `test_internal_seiche.jl` | internal seiche period against the two-layer relation, density extrapolation of the baroclinic pressure (section 34) |
 | `test_kelvin_helmholtz.jl` | Kelvin-Helmholtz growth rate of a resolved tanh shear layer against the Taylor-Goldstein mode (section 35) |
 | `test_plane_jet.jl` | turbulent plane jet with k-epsilon against the thin-shear-layer reference, free-jet spreading rate (section 36) |
+| `test_nonhydro_multigrid.jl` | column-line multigrid for the non-hydrostatic wetting-drying pressure against the direct solver (section 37) |
 
 ## Governing model
 
@@ -2064,8 +2065,8 @@ unknowns; CHOLMOD also allocates 1.9 MiB for its copy of the matrix). The time s
 advective Courant number ($U\Delta t/\Delta x$ = 0.5 in the jet), not by the solver.
 
 **Ideas for further issues.**
-- Multigrid-preconditioned CG (e.g. algebraic multigrid) for the non-hydrostatic wetting-drying pressure: O(n) per
-  step instead of the factorization, decisive for grids well beyond 10^4 unknowns.
+- Multigrid-preconditioned CG for the non-hydrostatic wetting-drying pressure: done in issue #71 (section 37), a
+  column-line multigrid, from 5000 unknowns on the default.
 - Multi-threading of the column kernels: the implicit vertical terms, k-epsilon, the sediment column solve and the face
   loops of the predictor are independent per column or face (`Threads.@threads` over columns, work arrays per thread).
 - Parallel parameter studies: the experiments that scan resolutions or set-ups (bed cell, obstacles, splitter plate)
@@ -2287,6 +2288,63 @@ $S$ = 0.0649, exponent $-0.525$):
   decay exponent stays close to $-1/2$, as it does for a strong and for a weak jet in a co-flow.
 - Cost: the non-hydrostatic runs take 4.5 times the hydrostatic ones (3 cells 296 s, 6 cells 47 min), 70 % of it in the
   non-hydrostatic correction (a new Cholesky factorization every step; issue #71).
+
+### 37) Column-line multigrid for the non-hydrostatic pressure of the wetting-drying step (issue #71)
+
+**Why.** The non-hydrostatic pressure of the wetting-drying step was solved with a sparse Cholesky factorization in every
+step (section 32): the pattern changes whenever the surface or a shoreline moves, and the numeric factorization grows
+faster than the number of unknowns. In the plane jet of section 36 it was 70 % of a non-hydrostatic step (47 min for the
+fine run).
+
+**Tried first** (systems captured from the plane jet at 8.6e3, 7.7e4 and 7e5 unknowns, with AlgebraicMultigrid.jl and
+Krylov.jl in a separate environment):
+- algebraic multigrid (smoothed aggregation) preconditioned CG: 12-17 iterations independent of the size, but a V-cycle
+  costs 14 matrix-vector products and the setup a third of the solve: about 1.5 times the direct time; with the
+  hierarchy reused for 40 steps (it stays as good) and rtol 1e-6, 0.7 and about 0.5 of the direct time, but only with a
+  fixed numbering of the unknowns (the jet's unknowns already change on the fine grid);
+- CG preconditioned with the Cholesky factor of an earlier step: 7-12 iterations of a full solve, no faster (as in #10).
+
+**Method** (`src/multigrid.jl`). Conjugate gradients with a V-cycle built for the z-level grid: line relaxation along the
+strong and semi-coarsening along the weak direction (Trottenberg, Oosterlee & Schueller 2001, ch. 5; Dendy 1982):
+- the vertical coupling of the cells ($1/\Delta z$) is much stronger than the horizontal one ($h_f/\Delta x^2$);
+- smoother: block Gauss-Seidel over the columns, each column solved exactly (tridiagonal); a forward sweep before and a
+  backward sweep after the coarse-grid correction keep the V-cycle symmetric;
+- coarse levels: neighbouring columns merged in pairs, the layers kept, down to a single column (solved exactly);
+- coarse operators: Galerkin products with piecewise-constant prolongation, the horizontal part halved. Merging two
+  columns doubles the spacing, and the plain Galerkin product keeps the fine face coupling where the doubled spacing has
+  half of it: with it the iterations grew with the grid (20, 34, 54 on 8.6e3, 7.7e4, 7e5 unknowns; over-correction made
+  it worse), with the factor 1/2 they stay at 12-13;
+- every level is a 5-point stencil on its (layers x columns) grid, stored as arrays; inactive cells (surface cell, dry
+  and empty cells) have the diagonal 1 and no couplings and keep 0. The fine level takes its coefficients from the same
+  loop that assembles the sparse matrix. The setup is a few sums per cell (8 ms on 7.7e4 unknowns), so the hierarchy is
+  rebuilt every step and a changing pattern costs nothing.
+
+**Options** (`ModelConfig`): `nonhydro_solver` = "auto" (default; the multigrid from `NH_MULTIGRID_MIN_UNKNOWNS` = 5000
+unknowns on, below it the direct solver, which is faster there), "direct" or "multigrid"; `nonhydro_solver_tolerance`
+= 1e-8 (relative residual of CG; the pressure then differs from the direct solution by about 1e-9 relative); and
+`nonhydro_solver_max_iterations` = 200 (normally 7-17 are needed). CG starts from zero: a step does not depend on the
+pressure of the last one (a re-initialised model takes the same step as a fresh one). If CG does not converge, the step
+is solved directly (warned once per model; `wd.nh_fallbacks`). The residual of the pressure system is a divergence error
+of the cells below the surface of the same relative size, far below the splitting error of the step (the repeated
+free-surface solve changes the fluxes by more); volume conservation is not affected (the free-surface solve keeps it).
+
+**Results** (`experiments/benchmarks/bench_nonhydro_solver.jl`; time per whole step, warm, Windows, one Julia thread):
+
+| case | unknowns | direct (ms/step) | multigrid (ms/step) | ratio | CG iterations |
+|---|---|---|---|---|---|
+| jet basin 200 x 56 (section 31, the benchmark of #10) | 11000 | 20.2 | 18.0 | 0.89 | 13 |
+| plane jet, 2 cells across the half slot | 8550 | 14.9 | 13.1 | 0.88 | 13 |
+| plane jet, 6 cells | 77490 | 200 | 133 | 0.67 | 15 |
+| plane jet, 18 cells | 699024 | 3237 | 1091 | 0.34 | 15 |
+
+The solver alone (captured systems, rtol 1e-8): 0.63, 0.54 and 0.38 of the direct time at 8.6e3, 7.7e4 and 7e5
+unknowns; below about 5e3 unknowns the direct solve takes well under a millisecond and the multigrid 3-7 times as long.
+
+**Accuracy.** Per solve the multigrid solution is the direct one within 1e-9 (relative). In the plane jet the two
+solvers differ by 1 % of the velocity after 50 steps: the start-up of the jet amplifies any perturbation (a perturbation
+of 1e-9 of the initial velocity grows the same way with the direct solver), so whole runs are compared on linear or
+steady flows: the standing-wave period (section 18) and the reattachment length behind the backward step (section 29)
+agree within 3e-11 and 4e-11.
 
 ## Test-by-test documentation
 
@@ -3582,6 +3640,23 @@ outflow.
 - `test_validate_plane_jet_hydrostatic_equals_nonhydrostatic`: 2 cells: centreline excess and $J$ within 3 % (1.8 %,
   2.4 %).
 - The file takes about 3.5 min (three model runs of 150 s).
+
+### Multigrid tests (`test_nonhydro_multigrid.jl`, section 37)
+
+- `test_verify_multigrid_operator_and_solution_{jet,stoker,beach}`: after 20 steps with the multigrid (a plane jet, a
+  Stoker dam break with its moving surface, a wave on a beach with columns falling dry): the fine-level operator is the
+  assembled matrix to round-off, the solution the direct one within 1e-7 (observed 1e-9), the true residual within the
+  tolerance, at most 20 iterations, no fallback.
+- `test_verify_multigrid_iterations_independent_of_grid`: the jet on two grids: the finer one needs at most 4 iterations
+  more (observed 13 and 14).
+- `test_verify_multigrid_lake_at_rest`: a lake over a wavy bed with the multigrid: q = 0 and u = 0 exactly.
+- `test_verify_multigrid_fallback_to_direct`: with 2 iterations allowed the direct solver takes over: the step equals
+  the direct one bit for bit.
+- `test_verify_nonhydro_solver_options`: invalid options are rejected; "auto" uses the direct solver below 5000 unknowns
+  and the multigrid above.
+- With the multigrid forced: `test_validate_wd_nonhydro_standing_wave_full_dispersion_*` (period within 1e-6 of the
+  direct run) and `test_validate_backward_step_reattachment_nonhydrostatic_multigrid` (reattachment length within 1e-6
+  of the direct run and within the bound of the LES).
 
 ## Additional validation scripts and literature basis
 
