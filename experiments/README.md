@@ -22,7 +22,8 @@ Structure
 - internal_seiche/: two-layer standing wave, period against the two-layer relation on three grids, hydrostatic and
   non-hydrostatic; stability of hydrostatic internal waves with the theta scheme, issue #23 ([README](internal_seiche/README.md)).
 - surface_dam_break/: barotropic dam-break test.
-- kelvin_helmholtz/: stratified shear-layer instability, periodic in x ([README](kelvin_helmholtz/README.md)).
+- kelvin_helmholtz/: stratified shear-layer instability, periodic in x: a showcase run, and the growth rate of a
+  resolved shear layer against the Taylor-Goldstein mode on three grids, issue #22 ([README](kelvin_helmholtz/README.md)).
 - wind_shear/: wind-driven double gyre in a closed two-layer basin ([README](wind_shear/README.md)).
 - vegetation/: rigid and flexible canopies and stems ([README](vegetation/README.md)).
 - theta_scheme/: stability and accuracy of the theta time integration ([README](theta_scheme/README.md)).

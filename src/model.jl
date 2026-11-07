@@ -885,6 +885,66 @@ function initialize_kelvin_helmholtz!(
     return nothing
 end
 
+"""
+    initialize_shear_layer_mode!(model; velocity, thickness, density_difference=0.0, amplitude, wavenumber_count=1,
+        z0=depth/2) -> (growth_rate, phase_speed)
+
+Periodic tanh shear layer seeded with its unstable Kelvin-Helmholtz mode (issue #22): mean flow
+u = U tanh((z - z0)/delta), density rho0 - (drho/2) tanh((z - z0)/delta) (the light fluid on top), plus the
+Taylor-Goldstein eigenfunction of the wavenumber k = 2 pi `wavenumber_count` / length (`kelvin_helmholtz_tanh_mode`,
+walls at the bed and the top) with the interface displacement `amplitude` (m) at z0. `velocity` U (m/s), `thickness`
+delta (m), `density_difference` drho (kg/m^3, >= 0); the bulk Richardson number is J = g drho delta / (2 rho0 U^2) < 1/4.
+Returns the growth rate (1/s) and the complex phase speed (m/s) of the mode.
+
+The perturbation velocities come from the stream function psi = A Re(phi(z) e^{i k x}) at the cell corners,
+u = d psi / dz on the u-faces and w = -d psi / dx on the w-interfaces, so the discrete divergence is zero; the density
+perturbation is rho' = A Re(phi drho_bar/dz / (U - c) e^{i k x}) (linearised density equation). WHY the eigenfunction:
+the mode grows at its rate from the first step, without the transient of an interface displacement alone. Requires
+`periodic_x` and a flat bed.
+"""
+function initialize_shear_layer_mode!(model::Model; velocity::Real, thickness::Real, density_difference::Real=0.0,
+        amplitude::Real, wavenumber_count::Int=1, z0::Real=model.config.depth / 2)
+    cfg = model.config
+    st = model.state
+    cfg.periodic_x || throw(ArgumentError("initialize_shear_layer_mode! needs periodic_x = true"))
+    model.geometry.has_bed && throw(ArgumentError("initialize_shear_layer_mode! needs a flat bed"))
+    density_difference >= 0 || throw(ArgumentError("density_difference must be >= 0 (light fluid on top)"))
+    wavenumber_count >= 1 || throw(ArgumentError("wavenumber_count must be >= 1"))
+    U, delta, drho = float(velocity), float(thickness), float(density_difference)
+    k = 2pi * wavenumber_count / cfg.length                      # 1/m
+    J = cfg.g * drho * delta / (2 * cfg.rho0 * U^2)              # -, bulk Richardson number
+    sigma, c, zs, phis = kelvin_helmholtz_tanh_mode(; k=k, velocity=U, thickness=delta, richardson=J, depth=cfg.depth, z0=z0)
+    dzs = zs[2] - zs[1]
+    phi(z) = begin   # linear interpolation of the eigenfunction (m^2/s per unit A)
+        t = clamp(z / dzs, 0.0, length(phis) - 1.0)
+        j = min(floor(Int, t), length(phis) - 2)
+        (1 - (t - j)) * phis[j + 1] + (t - j) * phis[j + 2]
+    end
+    A = amplitude / abs(phi(z0) / (0.0 - c))                     # m/s, interface displacement amplitude at z0
+    psi(x, z) = A * real(phi(z) * cis(k * x))
+    dx, dz = model.dx, model.dz
+    rho_bar(z) = cfg.rho0 - drho / 2 * tanh((z - z0) / delta)
+    rho_bar_z(z) = -drho / (2delta) * (1 - tanh((z - z0) / delta)^2)
+    @inbounds for i in 1:(cfg.nx + 1), kk in 1:cfg.nz
+        zc = (kk - 0.5) * dz
+        st.u[kk, i] = U * tanh((zc - z0) / delta) + (psi((i - 1) * dx, kk * dz) - psi((i - 1) * dx, (kk - 1) * dz)) / dz
+    end
+    @views st.u[:, end] .= st.u[:, 1]   # WHY: the periodic seam face, exactly (cis(k L) = 1 only to round-off)
+    @inbounds for i in 1:cfg.nx, kk in 1:(cfg.nz + 1)
+        st.w[kk, i] = -(psi(i * dx, (kk - 1) * dz) - psi((i - 1) * dx, (kk - 1) * dz)) / dx
+    end
+    @inbounds for i in 1:cfg.nx, kk in 1:cfg.nz
+        zc = (kk - 0.5) * dz
+        Ubar = U * tanh((zc - z0) / delta)
+        st.rho[kk, i] = rho_bar(zc) + A * real(phi(zc) * rho_bar_z(zc) / (Ubar - c) * cis(k * (i - 0.5) * dx))
+    end
+    fill!(st.eta, 0.0)
+    fill!(st.p, 0.0)
+    _reset_nonhydrostatic_history!(model)
+    _refresh_density_metadata!(model)
+    return (sigma, c)
+end
+
 function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
     _check_model_config(cfg)
     dx = T(cfg.length / cfg.nx)

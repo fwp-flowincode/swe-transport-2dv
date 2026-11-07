@@ -19,6 +19,7 @@ every file includes, so each file also runs on its own (`julia --project=. test/
 | `test_wetting_drying.jl` | wetting and drying, reference solutions (section 18) |
 | `test_dam_break.jl` | Stoker (wet bed) and Ritter (dry bed) dam breaks in layers, passive constituent (section 33) |
 | `test_internal_seiche.jl` | internal seiche period against the two-layer relation, density extrapolation of the baroclinic pressure (section 34) |
+| `test_kelvin_helmholtz.jl` | Kelvin-Helmholtz growth rate of a resolved tanh shear layer against the Taylor-Goldstein mode (section 35) |
 
 ## Governing model
 
@@ -2182,6 +2183,54 @@ The full suite is unchanged within its bounds; the Rayleigh-Taylor growth rate (
 front (4.838 m at 20 s, hydrostatic and non-hydrostatic) are identical to four digits, since the extrapolation changes a
 resolved wave by $O((1-\theta)s^2)$ per step.
 
+### 35) Kelvin-Helmholtz instability: growth rate of a resolved shear layer (issue #22)
+
+**Reference** (`kelvin_helmholtz_tanh_mode`, `src/reference_solutions.jl`). Shear layer $\bar u=U\tanh((z-z_0)/\delta)$
+with $N^2=J(U/\delta)^2\,\mathrm{sech}^2((z-z_0)/\delta)$ (a tanh density profile of the same thickness), walls at the bed
+and the top. Taylor-Goldstein equation
+
+$$\phi''=\left(k^2+\frac{\bar u''}{\bar u-c}-\frac{N^2}{(\bar u-c)^2}\right)\phi,\qquad \phi(0)=\phi(H)=0,$$
+
+solved by shooting (RK4 from the bed, secant iteration on the complex phase speed $c$); the growth rate is
+$\sigma=k\,c_i$. A result whose eigenfunction does not meet the top wall ($|\phi(H)|>10^{-6}\max|\phi|$) is rejected:
+beyond the neutral wavenumber the secant can stall at a non-root. Checks: unbounded and unstratified, the largest rate
+is 0.1897 $U/\delta$ at $k\delta=0.4446$ (Michalke 1964; computed 0.18970 with walls 20 $\delta$ away); $c_r=0$; the rate
+falls with $J$ and goes to zero towards $J=1/4$ (Miles 1961, Howard 1961).
+
+**Case** (`test/test_kelvin_helmholtz.jl`, `experiments/kelvin_helmholtz/plot_growth_rate.jl`). $\delta$ = 0.1 m,
+$U$ = 0.05 m/s, depth 0.8 m (8 $\delta$), $J$ = 0.05 ($\Delta\rho$ = 0.255 kg/m³) and $J$ = 0 as a control; periodic box
+of one wavelength $2\pi/k$ with $k\delta=0.4446$ (1.413 m); non-hydrostatic, `tvd2`, no viscosity, damping or limiter;
+$U\Delta t/\Delta x$ = 0.2 on every grid. `initialize_shear_layer_mode!` sets the mean flow and density plus the
+Taylor-Goldstein eigenfunction (velocity from a stream function at the cell corners, so the discrete divergence is zero;
+density from the linearised density equation) with an interface displacement of 1 mm: the mode grows at its rate
+from the first step. The rate is the slope of $\log|\hat w|$ (the $e^{ikx}$ component of $w$ at $z_0$) over 5-35 s;
+saturation begins after about 45 s. Theory: $\sigma$ = 0.07382 1/s ($J$ = 0.05), 0.08808 1/s ($J$ = 0).
+
+**Results** (relative error of the growth rate):
+
+| cells per $\delta$ ($\Delta x=\Delta z$) | $J$ = 0.05 | $J$ = 0 |
+|---|---|---|
+| 8 (12.5 mm, 113 x 64) | -1.02 % | -0.87 % |
+| 16 (6.25 mm, 226 x 128) | -0.52 % | -0.46 % |
+| 32 (3.125 mm, 452 x 256) | -0.28 % | -0.27 % |
+
+- First-order convergence from below (orders 0.98, 0.89 and 0.90, 0.76): the numerical diffusion widens the shear layer
+  and lowers the rate.
+- Wavelength: in a box of four wavelengths (16 cells per $\delta$) seeded with divergence-free noise in the modes 1-12,
+  the rates of the modes 2-7 ($k\delta$ = 0.22-0.78) follow the Taylor-Goldstein curve within 3 % (fit 20-50 s). Mode 1
+  (the longest) has not left the transient of the non-eigenfunction start, and the modes 8, 11, 12 are fed by the
+  harmonics of the dominant modes (mode 8 = 2 x mode 4, modes 11, 12 above the neutral wavenumber $k\delta\approx0.95$);
+  9 and 10 decay. The dominant mode of $w$ moves from 7 to 5 during the transient, is 5 and 4 (the fastest) up to
+  100 s and 3 after the billows merge. The wavelength is therefore set by the shear layer, not by the grid, unlike the
+  showcase run of `plot_kelvin_helmholtz.jl` (shear layer two cells thick).
+- Roll-up and mixing: the billows have the same shape on the three grids; the mixed layer (heavy fraction 0.05-0.95)
+  grows from 0.30 m to 0.445, 0.414, 0.384 m at 150 s and the density variance falls to 0.67, 0.75, 0.83 of its initial
+  value (8, 16, 32 cells per $\delta$): without viscosity the mixing is numerical and decreases with refinement.
+- Periodic seam: the same run shifted by half a wavelength (the billow forms across the seam) agrees with the interior
+  run after shifting back to $5\cdot10^{-8}$, $1.4\cdot10^{-6}$, $1.4\cdot10^{-5}$, $4.8\cdot10^{-5}\,\Delta\rho$ at 40, 70, 100, 130 s (round-off
+  amplified by the roll-up).
+- Salt mass and water volume are conserved to round-off.
+
 ## Test-by-test documentation
 
 ### test_verify_state_shapes
@@ -3446,6 +3495,19 @@ outflow.
   finest grid the surface/interface ratio of the hydrostatic relation within 1 % (both modes, Neumann top condition).
 - `test_validate_internal_seiche_surface_ratio_nonhydrostatic_dirichlet`: with the Dirichlet top condition the
   non-hydrostatic ratio within 15 % of the relation on 80 x 80 (observed 8 %).
+
+### Kelvin-Helmholtz tests (`test_kelvin_helmholtz.jl`, section 35)
+
+- `test_verify_kelvin_helmholtz_tanh_mode`: Michalke's 0.1897 $U/\delta$ at $k\delta=0.4446$ (walls at 20 $\delta$), a
+  maximum there, $c_r=0$, step convergence ($10^{-8}$), the $U/\delta$ scaling, the rate falling with $J$ and below
+  0.03 of the unstratified one at $J=0.249$, $k\delta=1/2$; the eigenfunction meets the walls; no unstable mode beyond
+  the neutral wavenumber; invalid arguments are rejected.
+- `test_verify_shear_layer_mode_initial_state`: the seeded velocity is discretely divergence-free ($10^{-14}$ 1/s), the
+  periodic seam face equal to the first face, $w=0$ at the bed and the top, the density within its layer values; the
+  initializer returns the rate of the reference and rejects a non-periodic model.
+- `test_validate_kelvin_helmholtz_growth_rate`: $J$ = 0.05 on 8 and 16 cells per $\delta$: rate error $\le$ 1.5 % and
+  0.8 % (observed 1.02 %, 0.52 %), dropping by at least 0.7 (0.51); salt mass and volume to $10^{-12}$; $J$ = 0 on 16
+  cells: within 0.8 % (0.46 %) and faster than the stratified run.
 
 ## Additional validation scripts and literature basis
 
