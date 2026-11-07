@@ -67,4 +67,11 @@ mutable struct WetDryState{T<:Real}
     nh_pattern_cols::Vector{Int}
     nh_symbolic_analyses::Int      # symbolic analyses (ordering and elimination tree) so far
     nh_factorizations::Int         # numeric factorizations so far
+    # column-line multigrid (issue #71, ModelConfig.nonhydro_solver): workspace, CG iterations of the last solve and the
+    # largest so far, multigrid solves and direct fallbacks (CG not converged)
+    nh_multigrid::Union{Nothing,ColumnMultigrid}
+    nh_iterations::Int
+    nh_iterations_max::Int
+    nh_multigrid_solves::Int
+    nh_fallbacks::Int
 end
