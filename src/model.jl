@@ -39,6 +39,24 @@ function theta_for_froude(Fr::Real)
     return isinf(Fr) ? 1.0 : (1 + 2 * Fr) / (2 * (1 + Fr))
 end
 
+"""
+    baroclinic_extrapolation_weight(theta)
+
+Weight beta (-) of the density extrapolation rho^n + beta (rho^n - rho^{n-1}) in the baroclinic pressure (and the
+non-hydrostatic buoyancy) of the momentum predictor (issue #23): beta = 2 (1 - theta), 0 at theta = 1.
+
+WHY: the momentum step takes the density of time n, the transport moves it with u^{n+theta} = theta u^{n+1} +
+(1 - theta) u^n (issue #34). For an internal wave of frequency omega, s = omega dt, the oscillator model
+(lambda - 1) u = -s r, (lambda - 1) r = s (theta lambda + 1 - theta) u gives |lambda|^2 = 1 + (1 - theta) s^2: weakly
+unstable for every theta < 1, fastest for the short hydrostatic internal waves (an internal seiche on 160 x 80 cells
+grew at theta = 0.7). With the extrapolated density lambda (lambda - 1)^2 + s^2 ((1 + beta) lambda - beta) (theta lambda
++ 1 - theta) = 0, and the growth term of order s^2 becomes (1 - theta) - beta: beta = 1 - theta leaves a growth of order
+s^4, beta = 2 (1 - theta) damps every wave up to s_max = 0.82 (theta = 1/2), 0.86 (0.55), 1.13 (0.7), 1.89 (0.9), i.e. an
+internal Courant number c dt / dx up to about s_max / pi. The damping of a resolved wave is about pi (1 - theta) omega dt
+per period (first order in dt, like the theta scheme itself). theta = 1 keeps the former scheme, bit for bit.
+"""
+baroclinic_extrapolation_weight(theta::Real) = 2 * (1 - theta)
+
 
 Base.@kwdef mutable struct ModelConfig
     nz::Int = 20
@@ -382,6 +400,10 @@ mutable struct Model{T<:Real}
     max_advective_courant::Float64   # -, largest |u| dt/dx after any step so far (issue #61)
     courant_warning_issued::Bool     # the advective Courant warning has been given (once per model)
     reach_mode_warned::Bool          # the warning of the growing reach mode has been given (once per model)
+    # Density extrapolation of the momentum predictor (baroclinic_extrapolation_weight, issue #23)
+    rho_previous::Matrix{T}     # kg/m^3, nz x nx: (buoyant) density at the start of the last step; NaN in cells dry then
+    rho_baroclinic::Matrix{T}   # kg/m^3, nz x nx: extrapolated density of this step's predictor (work array)
+    rho_previous_valid::Bool    # false after a (re)initialisation: the next step does not extrapolate
     performance::ModelPerformance    # steps, their wall-clock time and allocations (print_performance_report, issue #10)
 end
 
@@ -451,6 +473,8 @@ end
 function _refresh_density_metadata!(model::Model)
     st = model.state
     cfg = model.config
+    # WHY: a new or changed density field has no history; extrapolating against the old one would add a spurious force
+    model.rho_previous_valid = false
 
     model.rho_min_init = minimum(st.rho)
     model.rho_max_init = maximum(st.rho)
@@ -482,10 +506,33 @@ function refresh_density_metadata!(model::Model)
     return _refresh_density_metadata!(model)
 end
 
+# Density (kg/m^3) for the baroclinic pressure and buoyancy of this step's momentum predictor: rho^n + beta (rho^n -
+# rho^{n-1}) with beta = baroclinic_extrapolation_weight(theta) (issue #23); stores rho^n for the next step. `rho` is the
+# density of time n (st.rho, or the buoyant mixture density with wetting and drying). With `wet` (cell thicknesses of time
+# n, m) cells thinner than `min_thickness` are stored as NaN, and a cell that was dry at the last step is not
+# extrapolated. WHY: its stored density is that of an empty cell, not of the water now in it.
+# theta = 1 returns `rho` itself (the former scheme, bit for bit); the first step after a (re)initialisation does not
+# extrapolate.
+function _baroclinic_density(model::Model, rho::AbstractMatrix; wet::Union{Nothing,AbstractMatrix}=nothing,
+        min_thickness::Real=0.0)
+    beta = baroclinic_extrapolation_weight(model.config.theta)
+    prev, out = model.rho_previous, model.rho_baroclinic
+    valid = model.rho_previous_valid
+    model.rho_previous_valid = true
+    @inbounds for idx in eachindex(out, rho, prev)
+        r = rho[idx]
+        p = prev[idx]
+        out[idx] = (valid && !isnan(p)) ? r + beta * (r - p) : r
+        prev[idx] = (wet === nothing || wet[idx] > min_thickness) ? r : oftype(r, NaN)
+    end
+    return beta == 0 ? rho : out
+end
+
 # Clears the non-hydrostatic pressure of the previous step (ws.p_corr, Pa; wetting-drying q_nh, Pa, and w_nh, m/s), called
 # by every initialize_*!. WHY: the incremental projection (van Kan 1986) carries q^n into the next predictor, so a model
 # re-initialised after a run would otherwise feel the stale pressure gradient of the old flow.
 function _reset_nonhydrostatic_history!(model::Model)
+    model.rho_previous_valid = false   # the density history of the baroclinic extrapolation (issue #23) as well
     fill!(model.ws.p_corr, 0.0)
     if model.wetdry !== nothing
         fill!(model.wetdry.q_nh, 0.0)
@@ -687,12 +734,24 @@ function initialize_jet_impulse!(
     return nothing
 end
 
+"""
+    initialize_internal_seiche!(model; rho_top, rho_bottom, interface_height_fraction=0.5,
+        interface_tilt_amplitude_fraction=0.05, cell_average=false)
+
+Two layers at rest, densities `rho_top` above `rho_bottom` (kg/m^3), the interface at
+z = depth (interface_height_fraction + interface_tilt_amplitude_fraction cos(2 pi x / length)) (m above the grid bottom;
+one full wavelength in the basin, mode 2 of a closed basin). With `cell_average` each cell takes the volume-weighted
+density of the part of the cell below and above the interface. WHY: the default step profile puts the interface on the
+cell faces, so a displacement smaller than dz is lost or rounded to a whole cell; the cell average keeps the displaced
+volume exactly (internal seiche period, issue #23).
+"""
 function initialize_internal_seiche!(
     model::Model;
     rho_top::Real,
     rho_bottom::Real,
     interface_height_fraction::Real=0.5,
     interface_tilt_amplitude_fraction::Real=0.05,
+    cell_average::Bool=false,
 )
     cfg = model.config
     st = model.state
@@ -712,7 +771,12 @@ function initialize_internal_seiche!(
     @inbounds for i in 1:cfg.nx
         z_interface = interface_height + amp * cos(2.0 * pi * x_centers[i] / cfg.length)
         for k in 1:cfg.nz
-            st.rho[k, i] = z_centers[k] >= z_interface ? rho_top : rho_bottom
+            if cell_average
+                below = clamp((z_interface - (k - 1) * model.dz) / model.dz, 0.0, 1.0)   # -, fraction below the interface
+                st.rho[k, i] = below * rho_bottom + (1.0 - below) * rho_top
+            else
+                st.rho[k, i] = z_centers[k] >= z_interface ? rho_top : rho_bottom
+            end
         end
     end
 
@@ -891,6 +955,9 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
         false,
         0.0,
         false,
+        false,
+        zeros(T, cfg.nz, cfg.nx),
+        zeros(T, cfg.nz, cfg.nx),
         false,
         _register_performance!(_performance_label(cfg), cfg.nx * cfg.nz, timers, pressure_solver.timers),
     )
@@ -1988,8 +2055,11 @@ function _step_forward!(model::Model)
     @timeit model.timers "step/advection_u" advection_term_u!(ws.adv_u, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_u_ws, ws.interpolation_ws; top_row_advective_form=true, periodic_x=cfg.periodic_x, active=masked ? geo.u_active : nothing, dt=cfg.dt, vertical=!implicit, open_right=open_bc, h_top_vertical=(implicit && variable_top) ? ws.h_top_face : nothing)
     @timeit model.timers "step/advection_w" advection_term_w!(ws.adv_w, st.u, st.w, model.dx, model.dz, cfg.momentum_advection_scheme, ws.advection_w_ws, ws.interpolation_ws, cfg.periodic_x; active=masked ? geo.w_active : nothing, dt=cfg.dt)
 
+    # density of the predictor's baroclinic pressure and buoyancy, extrapolated for theta < 1 (issue #23)
+    # WHY outside @timeit: its try block would make rho_b local to it
+    rho_b = _baroclinic_density(model, st.rho)
     @timeit model.timers "step/hydrostatic_predictor" begin
-        solve_hydrostatic_pressure!(ws.p_internal, st.rho, cfg.g, model.dz; top_half_layer=variable_top)
+        solve_hydrostatic_pressure!(ws.p_internal, rho_b, cfg.g, model.dz; top_half_layer=variable_top)
         copyto!(model.last_p_hydro, ws.p_internal)
     end
 
@@ -2118,7 +2188,7 @@ function _step_forward!(model::Model)
     end
 
     @timeit model.timers "step/buoyancy_predictor" begin
-        @views @. ws.rho_w = 0.5 * (st.rho[2:end, :] + st.rho[1:end-1, :])
+        @views @. ws.rho_w = 0.5 * (rho_b[2:end, :] + rho_b[1:end-1, :])
         buoyancy!(ws.buoy, ws.rho_w, model.rho_0_w_2d)
         copyto!(model.last_buoy_w, ws.buoy)
         grad_z_c!(ws.grad_p_z, ws.p_internal, model.dz)

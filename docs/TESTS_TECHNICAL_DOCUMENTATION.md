@@ -18,6 +18,7 @@ every file includes, so each file also runs on its own (`julia --project=. test/
 | `test_bed_geometry.jl` | variable bed (staircase, issue #3) |
 | `test_wetting_drying.jl` | wetting and drying, reference solutions (section 18) |
 | `test_dam_break.jl` | Stoker (wet bed) and Ritter (dry bed) dam breaks in layers, passive constituent (section 33) |
+| `test_internal_seiche.jl` | internal seiche period against the two-layer relation, density extrapolation of the baroclinic pressure (section 34) |
 
 ## Governing model
 
@@ -1023,6 +1024,11 @@ round-off ($\Delta t$ = 0.01 s or 0.010000000000000002 s), and on the finest gri
 stays at 0.045 m/s. The cause is not determined (a candidate is the explicit advection of $w$ in the non-hydrostatic
 predictor, which the hydrostatic mode does not have); $\theta\ge0.55$ is the usable range of the non-hydrostatic wet/dry
 step, the default 0.7 is unaffected. Figures: `experiments/wetting_drying/`, mode `theta`.
+
+**Baroclinic coupling (issue #23).** With the density transported by $u^{n+\theta}$ and the baroclinic pressure taken
+at time $n$, internal waves grow as $|\lambda|^2=1+(1-\theta)(\omega\Delta t)^2$ for every $\theta<1$ (hydrostatic
+internal seiche on 160 x 160 cells). The predictor now extrapolates the density to $n+2(1-\theta)$
+(`baroclinic_extrapolation_weight`); analysis, stability limit and results in section 34.
 
 The issue also asked whether the shoreline needs local damping, since $|U|/\sqrt{gh}$ exceeds
 $\mathrm{Fr}_{\max}(\theta)$ there for every $\theta<1$. The shoreline errors are the same for all $\theta$ (8.3-9.4 % of
@@ -2112,6 +2118,69 @@ travelled):
 - Ritter is unchanged with 2, 3, 5 or 10 layers in both modes (the falling surface opens no layers).
 - Water volume and constituent mass are conserved to $10^{-15}$ (relative) in all runs; the tracer stays within its
   initial bounds and does not change the flow (bit for bit).
+
+### 34) Internal seiche: period against the two-layer relation, and the density extrapolation (issue #23)
+
+**Reference** (`two_layer_internal_wave`, `src/reference_solutions.jl`). Two homogeneous layers with a free surface,
+linear, Boussinesq, $g'=g\Delta\rho/\rho_0$. Kinematic conditions at the surface $\eta$ and the interface $\zeta$,
+$\phi_t+g\eta=0$ at the surface and $[\phi_t]=-g'\zeta$ across the interface give, with $C_{u,l}=\coth(kh_{u,l})$,
+
+$$(C_uC_l+1)\,\omega^4-\left(gk(C_u+C_l)+g'kC_u\right)\omega^2+gg'k^2=0,\qquad
+\frac{\eta}{\zeta}=-\frac{\omega^2}{gk\sinh(kh_u)-\omega^2\cosh(kh_u)}$$
+
+(smaller root: the internal mode), and hydrostatic $c^4-(gH+g'h_l)c^2+gg'h_uh_l=0$, $\eta/\zeta=(c^2-g'h_l)/(gh_l)$. The
+rigid-lid limits are $\omega^2=g'k/(C_u+C_l)$ (Gill 1982, ch. 6) and $c^2=g'h_uh_l/H$; the free surface lengthens the
+periods by $O(g'/g)$.
+
+**Case** (`test/test_internal_seiche.jl`, `experiments/internal_seiche/`). The 8 m x 4 m closed basin of the issue,
+998.5 over 1001.5 kg/m³, interface at mid-depth displaced by 0.12 m as $\cos(2\pi x/L)$ (one wavelength, $kh=1.57$),
+`tvd2`, no damping or limiter, $\theta=0.7$, $\Delta t$ = 0.05 s on all grids ($\omega\Delta t\le0.007$). The initial
+interface is cell-averaged (`initialize_internal_seiche!(...; cell_average=true)`): the step profile would put it on the
+cell faces and round the 0.12 m displacement to whole cells. The interface height of a column is the depth of the heavy
+fluid, $\sum\Delta z\,(\rho-\rho_u)/(\rho_l-\rho_u)$, projected on $\cos kx$; the period follows from its zero crossings
+over three periods. References: $T$ = 61.03 s non-hydrostatic, 46.65 s hydrostatic (rigid lid 61.0 s and 46.6 s, the
+values of the issue).
+
+**Results** (period error; amplitude kept per period):
+
+| grid ($\Delta x=\Delta z$) | hydrostatic | non-hydrostatic |
+|---|---|---|
+| 40 x 40 (0.2 m) | +3.06 %; 0.984 | +5.09 %; 0.981 |
+| 80 x 80 (0.1 m) | +1.74 %; 0.989 | +3.06 %; 0.988 |
+| 160 x 160 (0.05 m) | +1.00 %; 0.991 | +1.86 %; 0.991 |
+| observed order | 0.82, 0.80 | 0.73, 0.72 |
+
+- The periods converge at about first order and from above: the interface spreads over about one cell, a continuous
+  stratification that lowers the frequency. The non-hydrostatic period is the full relation, 31 % longer than the
+  long-wave one.
+- The surface moves in counter-phase. Hydrostatic: $\eta/\zeta=-0.00150$ as the relation. Non-hydrostatic with the
+  default Neumann top condition also $-0.00150$, the hydrostatic response (docs section 15: that condition leaves the
+  surface part hydrostatic); with `nonhydro_surface_dirichlet=true` $-0.00070$ and $-0.00065$ on 40 x 40 and 80 x 80,
+  converging to the relation's $-0.00060$. The period is the same with both conditions.
+- Water volume and salt mass are conserved to round-off (the salt mass is enforced by `_correct_constituent_mass!`).
+
+**Hydrostatic internal waves were unstable for $\theta<1$.** On 160 x 160 cells the hydrostatic run at $\theta=0.7$ grew
+from about 45 s and stopped at 58 s (max $|u|$ 0.06 m/s, the seiche itself 0.01 m/s); 160 x 80 grew as well, 80 x 160
+did not, `upwind1` grew too, half the time step slowed the growth, $\theta=1$ and the non-hydrostatic mode were stable.
+Cause: the momentum predictor takes the density of time $n$ (explicit baroclinic pressure), the transport moves it with
+$u^{n+\theta}=\theta u^{n+1}+(1-\theta)u^n$ (section 19). For an internal wave of frequency $\omega$, $s=\omega\Delta t$,
+the oscillator model $(\lambda-1)u=-s\,r$, $(\lambda-1)r=s(\theta\lambda+1-\theta)u$ gives
+$\lambda^2-(2-\theta s^2)\lambda+1+(1-\theta)s^2=0$, so $|\lambda|^2=1+(1-\theta)s^2>1$ for every $\theta<1$; $\theta=1$ is
+the neutral forward-backward scheme. The growth is fastest for the short hydrostatic internal waves (their frequency
+grows with $k$; the non-hydrostatic pressure bounds it), and shows once $\Delta x$ is fine enough that numerical
+diffusion no longer damps them.
+
+**Fix** (`baroclinic_extrapolation_weight`, `_baroclinic_density`). The baroclinic pressure and the non-hydrostatic
+buoyancy of the predictor take the extrapolated density $\rho^n+\beta(\rho^n-\rho^{n-1})$ with $\beta=2(1-\theta)$; the
+characteristic equation becomes $\lambda(\lambda-1)^2+s^2((1+\beta)\lambda-\beta)(\theta\lambda+1-\theta)=0$ with the
+growth term $(1-\theta)-\beta$ at order $s^2$. $\beta=1-\theta$ leaves a growth of order $s^4$; $\beta=2(1-\theta)$ damps
+every wave up to $s_{\max}$ = 0.82 ($\theta=1/2$), 0.86 (0.55), 1.13 (0.7), 1.89 (0.9), an internal Courant number up to
+about $s_{\max}/\pi$. A resolved wave loses about $\pi(1-\theta)\omega\Delta t$ of its amplitude per period (0.6 % in the
+seiche above); $\theta=1$ is unchanged, bit for bit. The first step after a (re)initialisation does not extrapolate;
+with wetting and drying the buoyant (mixture) density is extrapolated, except in cells that were dry at the last step.
+The full suite is unchanged within its bounds; the Rayleigh-Taylor growth rate (0.8409 of the theory) and a lock-exchange
+front (4.838 m at 20 s, hydrostatic and non-hydrostatic) are identical to four digits, since the extrapolation changes a
+resolved wave by $O((1-\theta)s^2)$ per step.
 
 ## Test-by-test documentation
 
@@ -3360,12 +3429,29 @@ outflow.
   mass conserved to $10^{-12}$, depth and velocity identical to the run without tracer, $0\le c\le1$ kg/m³.
 - Every run checks the water volume ($10^{-12}$) and finite velocities.
 
+### Internal-seiche tests (`test_internal_seiche.jl`, section 34)
+
+- `test_verify_two_layer_internal_wave_relation`: the root satisfies the linear two-layer system (interface kinematics
+  and pressure continuity, residuals below $10^{-10}$) for three geometries, lies within $2g'/g$ of the rigid-lid relation,
+  is negative (counter-phase); the hydrostatic root satisfies its quartic and the upper-layer mass balance, is the
+  long-wave limit of the non-hydrostatic one ($kH=10^{-3}$, $10^{-6}$); the rigid-lid formulas give the 61.0 s and 46.6 s
+  of the issue, the free surface changes them by less than $g'/g$; invalid arguments are rejected.
+- `test_verify_baroclinic_extrapolation_oscillator`: without the extrapolation the oscillator model grows for
+  $\theta$ = 0.5, 0.55, 0.7, 0.9 at $s$ = 0.05 to 0.8; with $\beta=2(1-\theta)$ it does not; $\theta=1$ needs none.
+- `test_verify_baroclinic_extrapolation_history`: at $\theta=1$ the predictor uses $\rho^n$ itself; a re-initialised
+  model takes the same next step as a fresh one.
+- `test_validate_internal_seiche_period_{hydrostatic,nonhydrostatic}`: three grids: period error on the finest grid
+  $\le$ 1.5 % / 2.5 % (observed 1.00 % / 1.86 %), dropping by at least 0.7 per refinement (0.57-0.61), amplitude kept per
+  period $\ge0.98$, $|u|\le$ 0.02 m/s (stable on 160 x 160), volume to $10^{-12}$ m², salt mass to $10^{-12}$; on the
+  finest grid the surface/interface ratio of the hydrostatic relation within 1 % (both modes, Neumann top condition).
+- `test_validate_internal_seiche_surface_ratio_nonhydrostatic_dirichlet`: with the Dirichlet top condition the
+  non-hydrostatic ratio within 15 % of the relation on 80 x 80 (observed 8 %).
+
 ## Additional validation scripts and literature basis
 
 The repository includes standalone validation scripts under `experiments/validation`:
 
 - `validate_surface_dam_break_front_speed.jl`: compares gravity-wave front speed with $c=\sqrt{gH}$ before reflection.
-- `validate_internal_seiche_period.jl`: compares dominant period with two-layer long-wave estimate.
 - `validate_lock_exchange_front_speed.jl`: checks fitted lock-exchange front-speed coefficient against literature-informed range.
 - `validate_wind_shear_transport_mixing.jl`: checks stress-velocity scaling and density-variance reduction.
 

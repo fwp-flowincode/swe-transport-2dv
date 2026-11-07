@@ -19,7 +19,8 @@ Structure
 - rayleigh_taylor/: RTI reference and fast-growth runs, growth vs. linear theory ([README](rayleigh_taylor/README.md)).
 - plumes/: rising/sinking buoyant plume tests.
 - jet/: impulse jet shear test.
-- internal_seiche/: two-layer standing-wave test.
+- internal_seiche/: two-layer standing wave, period against the two-layer relation on three grids, hydrostatic and
+  non-hydrostatic; stability of hydrostatic internal waves with the theta scheme, issue #23 ([README](internal_seiche/README.md)).
 - surface_dam_break/: barotropic dam-break test.
 - kelvin_helmholtz/: stratified shear-layer instability, periodic in x ([README](kelvin_helmholtz/README.md)).
 - wind_shear/: wind-driven double gyre in a closed two-layer basin ([README](wind_shear/README.md)).
@@ -45,7 +46,6 @@ Structure
 Validation scripts currently available
 --------------------------------------
 - validation/validate_surface_dam_break_front_speed.jl
-- validation/validate_internal_seiche_period.jl
 - validation/validate_lock_exchange_front_speed.jl
 - validation/validate_wind_shear_transport_mixing.jl
 - validation/audit_hydrostatic_continuity_free_surface.jl
