@@ -18,7 +18,8 @@ Structure
 - lock_exchange_obstacle/: density-stratified dam break with obstacle over a variable bed ([README](lock_exchange_obstacle/README.md)).
 - rayleigh_taylor/: RTI reference and fast-growth runs, growth vs. linear theory ([README](rayleigh_taylor/README.md)).
 - plumes/: rising/sinking buoyant plume tests.
-- jet/: impulse jet shear test.
+- jet/: turbulent plane jet with k-epsilon on two grids, hydrostatic and non-hydrostatic, against the thin-shear-layer
+  reference, issue #25 ([README](jet/README.md)); the impulse jet run as a demonstration.
 - internal_seiche/: two-layer standing wave, period against the two-layer relation on three grids, hydrostatic and
   non-hydrostatic; stability of hydrostatic internal waves with the theta scheme, issue #23 ([README](internal_seiche/README.md)).
 - surface_dam_break/: barotropic dam-break test.

@@ -48,7 +48,7 @@ export attach_vegetation!, clear_vegetation!, vegetation_source!, copy_vegetatio
 export WetDryState, layer_thicknesses!, water_depth, initialize_water_level!, set_sluice_gate!, clear_sluice_gates!
 export SedimentState, attach_sediment!, suspended_sediment_mass
 export ModelPerformance, reset_performance!, performance_models, print_performance_report, process_cpu_time
-export ritter_dam_break, stoker_dam_break, stoker_middle_state, two_layer_internal_wave, kelvin_helmholtz_tanh_mode, CarrierGreenspanWave, carrier_greenspan_time_scale, carrier_greenspan_rest_time
+export ritter_dam_break, stoker_dam_break, stoker_middle_state, two_layer_internal_wave, kelvin_helmholtz_tanh_mode, plane_jet_thin_shear_layer, CarrierGreenspanWave, carrier_greenspan_time_scale, carrier_greenspan_rest_time
 export carrier_greenspan_shoreline, carrier_greenspan_solution
 export chezy_equilibrium_velocity, chezy_spinup_velocity, chezy_viscous_profile, chezy_roughness_length, chezy_backwater_depth
 export critical_depth, bernoulli_depth, conjugate_depth, swashes_bump_bed, bump_flow_depth, hydraulic_jump_position

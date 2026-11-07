@@ -20,6 +20,7 @@ every file includes, so each file also runs on its own (`julia --project=. test/
 | `test_dam_break.jl` | Stoker (wet bed) and Ritter (dry bed) dam breaks in layers, passive constituent (section 33) |
 | `test_internal_seiche.jl` | internal seiche period against the two-layer relation, density extrapolation of the baroclinic pressure (section 34) |
 | `test_kelvin_helmholtz.jl` | Kelvin-Helmholtz growth rate of a resolved tanh shear layer against the Taylor-Goldstein mode (section 35) |
+| `test_plane_jet.jl` | turbulent plane jet with k-epsilon against the thin-shear-layer reference, free-jet spreading rate (section 36) |
 
 ## Governing model
 
@@ -2231,6 +2232,62 @@ saturation begins after about 45 s. Theory: $\sigma$ = 0.07382 1/s ($J$ = 0.05),
   amplified by the roll-up).
 - Salt mass and water volume are conserved to round-off.
 
+### 36) Turbulent plane jet with k-epsilon (issue #25)
+
+**Why a half-jet in a co-flow.** The issue asks for a plane jet from a slot at mid-depth into still water. In the 2DV
+channel (bed and free surface, no lateral boundaries) the jet has nowhere to entrain from except the open outflow:
+- a symmetric jet at mid-depth attached to the bed within a few seconds (Coanda effect);
+- a half-jet on the frictionless bed (the symmetry plane of the jet, z = 0) with zero inflow outside the slot drives a
+  recirculation cell the size of the channel (the confined jet of Craya and Curtet): the whole lower half moves forward,
+  the upper half returns through the outflow, and the excess momentum flux grew by a factor 3.7 along the jet;
+- a weak co-flow (5 % of $U_0$) needs a channel 48 $b_0$ deep and five flow-throughs to lose the start-up circulation,
+  and the finer grid still recirculated.
+
+The case is therefore a half-jet in a co-flow strong enough to supply the entrainment on every grid (15 % of $U_0$), and
+the reference is the same jet in the same channel: the thin-shear-layer k-epsilon solution. Its free-jet limit (weak
+co-flow, deep channel) carries the comparison with the measured spreading rate of the issue.
+
+**Reference** (`plane_jet_thin_shear_layer`, `src/reference_solutions.jl`). The boundary-layer equations of the half-jet
+with the k-epsilon model of `KEpsilonState` (the same constants, the Durbin (1996) time-scale bound, the $\varepsilon$
+sources $C_1P/T$ and $C_2\varepsilon/T$), marched downstream (implicit in z, first order in x). A uniform pressure
+gradient keeps the volume flux of the channel: it decelerates the free stream $U_e$ as the jet entrains (from 0.073 to
+0.061 m/s here), and the excess momentum flux $J=2\int u(u-U_e)\,dz$ then follows the momentum integral
+$dJ/dx=-(dU_e/dx)\int(u-U_e)\,dz$ (it rises by 2.6 % between 10 and 30 $b_0$). The march stops with an error if the free
+stream comes to rest.
+
+Free-jet limit (co-flow 4 % of $U_0$, depth 160 $b_0$, momentum length $J/U_a^2$ = 31 m): standard k-epsilon spreads at
+$S=dy_{1/2}/dx$ = 0.0973 (15-40 $b_0$; 0.1009 over 10-30 $b_0$) with the centreline excess decaying as
+$(x-x_0)^{-0.509}$: the measured 0.10-0.11 and $-1/2$ of plane jets (Pope 2000, ch. 5). With the time-scale bound, the
+model default, $S$ = 0.0922 and $-0.513$: in a plane jet $(k/\varepsilon)|\partial u/\partial z|\approx3.3$ exceeds the
+bound 2.72, which lowers $\nu_t$ and delays the development of the jet by about 10 $b_0$.
+
+**Case** (`test/test_plane_jet.jl`, `experiments/jet/plane_jet.jl`). Slot $b_0$ = 0.05 m (half slot 0.025 m on the bed),
+$U_0$ = 0.5 m/s ($U_0b_0/\nu$ = 25000), co-flow $U_a$ = 0.075 m/s, depth 1.2 m (24 $b_0$), length 2.25 m (45 $b_0$);
+inflow turbulence intensity 5 %, length scale 0.1 $b_0$ (per-layer inlet k and $\varepsilon$, issue #42, so the
+wetting-drying step); relaxed free outflow; tvd2; $U_0\Delta t/\Delta x$ = 0.5, $\Delta x=2\Delta z$; 150 s, the mean over
+the last 30 s (the flow is steady from about 40 s). The free stream of a model profile is the velocity at the edge of the
+jet, $z=3y_{1/2}$ (iterated), and $J$ is integrated up to that edge. WHY: the non-hydrostatic outer flow is not uniform
+(the entrainment sink at the bed curves it: at 30 $b_0$, 0.069 m/s at 0.3 m against 0.056 m/s at the surface); with the
+surface velocity as free stream the non-hydrostatic $J$ came out 15 % too high. The hydrostatic outer flow is uniform.
+
+**Results** (relative to the reference at 10, 20, 30 $b_0$; $S$ and the decay exponent fitted over 10-30 $b_0$; reference
+$S$ = 0.0649, exponent $-0.525$):
+
+| run | $U_c$ | $y_{1/2}$ | $J$ | $S$ | exponent |
+|---|---|---|---|---|---|
+| hydrostatic, 3 cells across the half slot | -4.0, -2.5, -0.9 % | +7.5, +4.7, +1.8 % | +0.3 % | 0.0633 | -0.522 |
+| non-hydrostatic, 3 cells | -4.1, -2.7, -1.1 % | +7.6, +4.8, +1.9 % | -0.1 to +0.1 % | 0.0633 | -0.522 |
+| hydrostatic, 6 cells | -1.5, -1.2, -0.4 % | +3.6, +2.4, +1.0 % | +0.3 % | 0.0641 | -0.526 |
+| non-hydrostatic, 6 cells | -1.6, -1.4, -0.6 % | +3.6, +2.5, +1.0 % | -0.1 to +0.1 % | 0.0641 | -0.527 |
+
+- The model converges to the reference (the errors halve with the grid); hydrostatic and non-hydrostatic agree within
+  0.2 % (a slender jet).
+- The profiles collapse in similarity coordinates close to $\exp(-\ln2\,\eta^2)$.
+- The co-flow lowers the spreading rate (0.065 against 0.092 in the free limit, both with the time-scale bound); the
+  decay exponent stays close to $-1/2$, as it does for a strong and for a weak jet in a co-flow.
+- Cost: the non-hydrostatic runs take 4.5 times the hydrostatic ones (3 cells 296 s, 6 cells 47 min), 70 % of it in the
+  non-hydrostatic correction (a new Cholesky factorization every step; issue #71).
+
 ## Test-by-test documentation
 
 ### test_verify_state_shapes
@@ -3508,6 +3565,23 @@ outflow.
 - `test_validate_kelvin_helmholtz_growth_rate`: $J$ = 0.05 on 8 and 16 cells per $\delta$: rate error $\le$ 1.5 % and
   0.8 % (observed 1.02 %, 0.52 %), dropping by at least 0.7 (0.51); salt mass and volume to $10^{-12}$; $J$ = 0 on 16
   cells: within 0.8 % (0.46 %) and faster than the stratified run.
+
+### Plane-jet tests (`test_plane_jet.jl`, section 36)
+
+- `test_verify_plane_jet_thin_shear_layer`: the change of $J$ over 10-30 $b_0$ follows the momentum integral within 5 %
+  (2.9 %; the change is 2.6 % of $J$), the volume flux of the channel is kept to round-off, half the cells change the
+  centreline excess and the half-width by less than 2 % (1.3 %), a co-flow that cannot feed the jet and invalid arguments
+  are rejected.
+- `test_validate_plane_jet_spreading_rate`: free-jet limit of the reference: standard k-epsilon $S$ in 0.095-0.115
+  (0.0973), with the time-scale bound below it (0.0922), decay exponent within 0.03 of $-1/2$ ($-0.509$, $-0.513$).
+- `test_validate_plane_jet_against_thin_shear_layer_hydrostatic`: 3 cells across the half slot: centreline excess within
+  5 %, half-width within 10 %, $J$ within 3 % of the reference at 10, 20, 30 $b_0$, no backflow, exponent within 0.03 of
+  $-1/2$.
+- `test_validate_plane_jet_against_thin_shear_layer_nonhydrostatic`: 2 cells (3 cells take 5 min): 8 %, 15 %, 3 %
+  (observed $-6.8$, $-4.8$, $-3.8$ %; $+11.1$, $+7.7$, $+2.4$ %; within 2 %), exponent within 0.05 ($-0.535$).
+- `test_validate_plane_jet_hydrostatic_equals_nonhydrostatic`: 2 cells: centreline excess and $J$ within 3 % (1.8 %,
+  2.4 %).
+- The file takes about 3.5 min (three model runs of 150 s).
 
 ## Additional validation scripts and literature basis
 

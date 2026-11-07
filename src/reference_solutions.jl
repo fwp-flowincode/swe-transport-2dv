@@ -1,5 +1,6 @@
 # Analytical reference solutions: shallow-water equations with wetting and drying (issue #31; dam breaks #11, #12), uniform channel flow
-# with Chezy friction (issue #14), two-layer internal waves (issue #23), the Kelvin-Helmholtz mode of a tanh shear layer (issue #22).
+# with Chezy friction (issue #14), two-layer internal waves (issue #23), the Kelvin-Helmholtz mode of a tanh shear layer (issue #22),
+# the thin-shear-layer k-epsilon plane jet (issue #25).
 
 const CG_NEWTON_TOL = 1e-13          # -, Newton tolerance on the dimensionless hodograph equations
 const CG_NEWTON_MAXITER = 60         # -, Newton iterations before giving up
@@ -681,4 +682,112 @@ function kelvin_helmholtz_tanh_mode(; k::Real, velocity::Real, thickness::Real, 
         throw(DomainError(c2, "no unstable mode found for k = $(k), J = $(J) (the wall condition is not met)"))
     phi ./= phi[argmax(abs.(phi))]
     return (k * imag(c2), c2, collect(range(0.0, H; length=steps + 1)), phi)
+end
+
+const TSL_CELLS_PER_HALF_SLOT = 20   # -, cells of the thin-shear-layer reference across the half slot
+const TSL_STEP_RATIO = 1.0           # -, marching step dx / dy of the thin-shear-layer reference
+
+# Implicit marching step of  u (f - f0)/dx + v df/dy = d/dy(D df/dy) + S0 - S1 f  on cell centres with zero gradient at both
+# ends and upwind v df/dy (`u`, `v`, `D`, `S0`, `S1` per cell): the new f.
+function _tsl_step(f0, u, v, D, S0, S1, dx, dy)
+    n = length(f0)
+    a, b, c, d = zeros(n), zeros(n), zeros(n), zeros(n)
+    @inbounds for j in 1:n
+        Dm = j > 1 ? 0.5 * (D[j] + D[j - 1]) : 0.0
+        Dp = j < n ? 0.5 * (D[j] + D[j + 1]) : 0.0
+        a[j], c[j] = -Dm / dy^2, -Dp / dy^2
+        b[j] = u[j] / dx + (Dm + Dp) / dy^2 + S1[j]
+        if v[j] > 0 && j > 1
+            b[j] += v[j] / dy
+            a[j] -= v[j] / dy
+        elseif v[j] < 0 && j < n
+            b[j] -= v[j] / dy
+            c[j] += v[j] / dy
+        end
+        d[j] = u[j] / dx * f0[j] + S0[j]
+    end
+    return Vector(Tridiagonal(a[2:end], b, c[1:(end - 1)]) \ d)
+end
+
+# centred derivative with one-sided ends (1/m times the field unit)
+_tsl_derivative(f, dy) = [j == 1 ? (f[2] - f[1]) / dy : j == length(f) ? (f[end] - f[end - 1]) / dy :
+                          (f[j + 1] - f[j - 1]) / (2dy) for j in eachindex(f)]
+
+"""
+    plane_jet_thin_shear_layer(; velocity, half_slot, coflow, depth, nu, k_slot, eps_slot, k_ambient, eps_ambient,
+        x_end, realizability=true, cells_per_half_slot=TSL_CELLS_PER_HALF_SLOT, step_ratio=TSL_STEP_RATIO)
+        -> (; x, centreline_excess, half_width, free_stream, momentum_flux, excess_flux, z, u, k, eps)
+
+Plane turbulent half-jet (the symmetry plane z = 0 of a plane jet) in a co-flowing channel of height `depth` (m), with
+the k-epsilon model of `KEpsilonState` (Launder & Spalding 1974 constants, Durbin 1996 time-scale bound with
+`realizability`), in the thin-shear-layer (boundary-layer) approximation, marched downstream from the inlet (issue #25).
+Inlet: `velocity` U0 (m/s), `k_slot` (m^2/s^2) and `eps_slot` (m^2/s^3) for z < `half_slot` (m, half the slot height
+b0/2), `coflow` Ua, `k_ambient`, `eps_ambient` above; molecular viscosity `nu` (m^2/s). Equations (Pope 2000, Turbulent
+Flows, ch. 5 and 10; equation numbers not checked):
+
+    u u_x + w u_z = (nu_e u_z)_z + G,   u_x + w_z = 0,   nu_e = nu + C_mu k T,   T = min(k/eps, Durbin bound),
+    u k_x + w k_z = ((nu + nu_t/sigma_k) k_z)_z + P - eps,   P = nu_t u_z^2,
+    u eps_x + w eps_z = ((nu + nu_t/sigma_eps) eps_z)_z + (C1 P - C2 eps) / T,
+
+with zero gradients at z = 0 (symmetry) and at the top. G = -dp/dx / rho is uniform across the channel and chosen in
+every step so that the volume flux of the channel stays that of the inlet: it decelerates the free stream as the jet
+entrains (the confined jet); the march stops with a DomainError if the free stream comes to rest (the co-flow times the
+depth must exceed the entrainment up to x_end). Implicit in z (tridiagonal), first order in x (step `step_ratio` dz),
+lagged coefficients.
+
+Returned along x (m): the excess centreline velocity u(0) - Ue (m/s) over the free stream Ue = u(depth) (m/s), the
+half-width (m, where the excess is half its centreline value), the excess momentum flux J = 2 int u (u - Ue) dz (m^3/s^2)
+and the excess volume flux 2 int (u - Ue) dz (m^2/s) of the full jet; the final profiles u, k, eps at the cell centres z.
+With the free stream decelerating, dJ/dx = -(dUe/dx) * excess_flux (momentum integral; checked in
+test_verify_plane_jet_thin_shear_layer). Measured plane jets spread at d(half-width)/dx = 0.10-0.11 with the centreline
+velocity decaying as x^(-1/2) (Pope 2000, ch. 5); test_validate_plane_jet_spreading_rate checks this limit of the
+reference (weak co-flow, deep channel).
+"""
+function plane_jet_thin_shear_layer(; velocity::Real, half_slot::Real, coflow::Real, depth::Real, nu::Real,
+        k_slot::Real, eps_slot::Real, k_ambient::Real, eps_ambient::Real, x_end::Real, realizability::Bool=true,
+        cells_per_half_slot::Int=TSL_CELLS_PER_HALF_SLOT, step_ratio::Real=TSL_STEP_RATIO)
+    (velocity > coflow > 0 && 0 < half_slot < depth && x_end > 0) ||
+        throw(ArgumentError("needs velocity > coflow > 0, 0 < half_slot < depth and x_end > 0"))
+    dz = half_slot / cells_per_half_slot                  # m
+    n = round(Int, depth / dz)
+    z = ((1:n) .- 0.5) .* dz
+    u = [zj < half_slot ? float(velocity) : float(coflow) for zj in z]
+    k = [zj < half_slot ? float(k_slot) : float(k_ambient) for zj in z]
+    eps = [zj < half_slot ? float(eps_slot) : float(eps_ambient) for zj in z]
+    Q = sum(u) * dz                                       # m^2/s, volume flux of the half channel
+    dx = step_ratio * dz
+    w = zeros(n)
+    xs, uc, yh, ue, J, Qe = Float64[], Float64[], Float64[], Float64[], Float64[], Float64[]
+    x = 0.0
+    while x < x_end
+        uz = _tsl_derivative(u, dz)
+        T = [realizability ? ke_time_scale(k[j], eps[j], uz[j]^2) : k[j] / eps[j] for j in 1:n]   # s
+        nu_t = KE_C_MU .* k .* T
+        # momentum: u = u_a + G u_b with the uniform G that keeps the flux Q
+        u_a = _tsl_step(u, u, w, nu .+ nu_t, zeros(n), zeros(n), dx, dz)
+        u_b = _tsl_step(zeros(n), u, w, nu .+ nu_t, ones(n), zeros(n), dx, dz)
+        G = (Q - sum(u_a) * dz) / (sum(u_b) * dz)        # m/s^2
+        u_new = u_a .+ G .* u_b
+        # WHY: the march needs u > 0 everywhere (u is the "time" coefficient); a free stream that stops cannot supply the
+        # entrainment of the jet (co-flow times depth too small for x_end)
+        minimum(u_new) > 0 || throw(DomainError(x, "the free stream stops at x = $(x) m: the co-flow cannot supply the entrainment"))
+        # w from continuity, zero at the symmetry plane
+        wf = zeros(n + 1)
+        for j in 1:n
+            wf[j + 1] = wf[j] - dz * (u_new[j] - u[j]) / dx
+        end
+        w_new = 0.5 .* (wf[1:n] .+ wf[2:(n + 1)])
+        P = nu_t .* _tsl_derivative(u_new, dz) .^ 2      # m^2/s^3
+        k_new = _tsl_step(k, u_new, w_new, nu .+ nu_t ./ KE_SIGMA_K, P, eps ./ k, dx, dz)
+        eps_new = _tsl_step(eps, u_new, w_new, nu .+ nu_t ./ KE_SIGMA_EPS, KE_C1 .* P ./ T, KE_C2 ./ T, dx, dz)
+        u, w = u_new, w_new
+        k, eps = max.(k_new, KE_K_MIN), max.(eps_new, KE_EPS_MIN)
+        x += dx
+        excess = u .- u[end]
+        j = findfirst(<(excess[1] / 2), excess)
+        half = (j === nothing || j == 1) ? NaN : z[j - 1] + (excess[j - 1] - excess[1] / 2) / (excess[j - 1] - excess[j]) * dz
+        push!(xs, x); push!(uc, excess[1]); push!(yh, half); push!(ue, u[end])
+        push!(J, 2 * sum(u .* excess) * dz); push!(Qe, 2 * sum(excess) * dz)
+    end
+    return (; x=xs, centreline_excess=uc, half_width=yh, free_stream=ue, momentum_flux=J, excess_flux=Qe, z, u, k, eps)
 end
