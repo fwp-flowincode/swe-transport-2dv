@@ -497,12 +497,13 @@ function _wd_remap_flat_neighbourhood(wd::WetDryState, f::Int)
     nf = length(wd.bed_face)
     lo, hi = max(f - 2, 1), min(f + 2, nf)
     b = wd.bed_face[f]
+    bed_tol = eps(eltype(wd.bed_face))
     @inbounds for g in lo:hi
-        wd.bed_face[g] == b || return false
+        isapprox(wd.bed_face[g], b; atol=bed_tol, rtol=sqrt(bed_tol)) || return false
         wd.gate_active[g] && return false
     end
     @inbounds for c in max(lo, 1):min(hi - 1, length(wd.bed))
-        wd.bed[c] == b || return false
+        isapprox(wd.bed[c], b; atol=bed_tol, rtol=sqrt(bed_tol)) || return false
     end
     return true
 end
@@ -528,24 +529,33 @@ function _wd_remap_face!(R::RemapWork, j::Int, wd::WetDryState, u::AbstractMatri
 end
 
 # Integral of u over [0, s H_g] of face j (m^2/s); piecewise linear in the layers
-@inline function _wd_remap_cumulative(R::RemapWork, j::Int, s::Real)
+@inline function _wd_remap_cumulative(R::RemapWork{T}, j::Int, s::Real) where T
     n = R.count[j]
-    n == 0 && return 0.0
-    z = s * R.depth[j]
+    n == 0 && return zero(T)
+    z = T(s) * R.depth[j]
     i = 1
     @inbounds while i < n && R.zc[i + 1, j] < z
         i += 1
     end
     @inbounds begin
         dzl = R.zc[i + 1, j] - R.zc[i, j]
-        return R.qc[i, j] + (dzl > 0.0 ? (z - R.zc[i, j]) / dzl * (R.qc[i + 1, j] - R.qc[i, j]) : 0.0)
+        return R.qc[i, j] + (dzl > zero(T) ? (z - R.zc[i, j]) / dzl * (R.qc[i + 1, j] - R.qc[i, j]) : zero(T))
     end
 end
 
 # Mean velocity of face j over the sigma interval [s0, s1] (m/s); NaN if the face is closed
-@inline function _wd_remap_velocity(R::RemapWork, j::Int, s0::Real, s1::Real)
-    R.count[j] == 0 && return NaN
-    return (_wd_remap_cumulative(R, j, s1) - _wd_remap_cumulative(R, j, s0)) / ((s1 - s0) * R.depth[j])
+@inline function _wd_remap_velocity(R::RemapWork{T}, j::Int, s0::Real, s1::Real) where T
+    R.count[j] == 0 && return T(NaN)
+    lo, hi = T(s0), T(s1)
+    return (_wd_remap_cumulative(R, j, hi) - _wd_remap_cumulative(R, j, lo)) / ((hi - lo) * R.depth[j])
+end
+
+@inline function _wd_remap_omega(R::RemapWork{T}, s::Real, Q2::T, Q3::T, Q4::T, dx::Real) where T
+    sT = T(s)
+    q2 = _wd_remap_cumulative(R, 2, sT)
+    q3 = _wd_remap_cumulative(R, 3, sT)
+    q4 = _wd_remap_cumulative(R, 4, sT)
+    return -T(0.5) * ((q3 - q2 - sT * (Q3 - Q2)) + (q4 - q3 - sT * (Q4 - Q3))) / T(dx)
 end
 
 # Advection tendencies (m/s^2) of the open layers of face f (2 <= f <= nx) into R.tend, and the sigma-layer fluxes and
@@ -566,21 +576,19 @@ function _wd_remapped_tendencies!(model::Model, wd::WetDryState, f::Int, second:
         Hbar += 0.5 * (wd.h[k, f - 1] + wd.h[k, f])
         R.tend[k] = 0.0
         R.omega[k, f] = 0.0
-        R.hadv[k, f] = floatmax(Float64)
+        R.hadv[k, f] = floatmax(eltype(R.hadv))
     end
-    R.active[f] = true
     Hf > 0.0 || return R
+    R.active[f] = true
     Q2, Q3, Q4 = R.qc[R.count[2] + 1, 2], R.qc[R.count[3] + 1, 3], R.qc[R.count[4] + 1, 4]
     # sigma-layer flux through the level s of the face control volume: mean of cells L (faces f-1, f) and R (f, f+1)
-    omega(s) = -0.5 * ((_wd_remap_cumulative(R, 3, s) - _wd_remap_cumulative(R, 2, s) - s * (Q3 - Q2)) +
-                       (_wd_remap_cumulative(R, 4, s) - _wd_remap_cumulative(R, 3, s) - s * (Q4 - Q3))) / dx
     h2 = second && all(j -> R.count[j] > 0, 1:5)   # second order horizontally: all five faces open
     s_lo = 0.0
     @inbounds for k in 1:nz
         wd.hf[k, f] > 0.0 || continue
         s_hi = min(s_lo + wd.hf[k, f] / Hf, 1.0)
         hk = (s_hi - s_lo) * Hbar   # m, advection thickness of the sub-layer
-        R.omega[k, f] = s_lo > 0.0 ? omega(s_lo) : 0.0
+        R.omega[k, f] = s_lo > 0.0 ? _wd_remap_omega(R, s_lo, Q2, Q3, Q4, dx) : 0.0
         if hk <= WD_EMPTY_CELL_THICKNESS
             s_lo = s_hi
             continue
@@ -624,7 +632,7 @@ function _wd_remapped_tendencies!(model::Model, wd::WetDryState, f::Int, second:
                 end
             end
             if open_v(k + 1)
-                wt = omega(s_hi)
+                wt = _wd_remap_omega(R, s_hi, Q2, Q3, Q4, dx)
                 if wt < 0.0
                     c = -wt / hk
                     csum += c

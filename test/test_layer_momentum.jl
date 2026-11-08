@@ -35,6 +35,7 @@ function lm_bore(x, h)
     hm, _, _ = stoker_middle_state(; h0=LM_H0, h1=LM_H1)
     level = 0.5 * (hm + LM_H1)
     i = findlast(>(level), h)
+    @assert i !== nothing && i < length(h) "water-depth profile does not cross the bore level"
     return x[i] + (h[i] - level) / (h[i] - h[i + 1]) * (x[i + 1] - x[i])
 end
 
@@ -114,6 +115,11 @@ end
             rayleigh_damping=0.0, apply_froude_limiter=false, write_plots=false, write_animation=false,
             write_pressure_buoyancy_diagnostics=false, layer_momentum_advection="remapped", implicit_vertical_terms=true, kw...)
         step_bed = [i <= 20 ? 0.2 : 0.0 for i in 1:40]
+        flat = Model(cfg(; use_hydrostatic=true))
+        flat.wetdry.bed_face[11] = eps(Float64) / 2
+        @test SweTransport2DV._wd_remap_flat_neighbourhood(flat.wetdry, 10)
+        flat.wetdry.bed_face[11] = 1e-6
+        @test !SweTransport2DV._wd_remap_flat_neighbourhood(flat.wetdry, 10)
         m = Model(cfg(; use_hydrostatic=true, bed_level=step_bed))
         initialize_water_level!(m, 1.0; rho=1000.0)
         set_x_inflow_outflow!(m, ones(6); left_discharge=0.2, right_level=0.0, right_free=true, right_relaxation_time=5.0)
@@ -126,6 +132,13 @@ end
         initialize_water_level!(mn, 1.0; rho=1000.0)
         step_forward!(mn)
         @test !any(mn.wetdry.remap.active)
+        dry = Model(cfg(; use_hydrostatic=true); T=Float32)
+        initialize_water_level!(dry, 1.0; rho=1000.0)
+        f = 10
+        dry.wetdry.hf[:, f] .= 0
+        SweTransport2DV._wd_remapped_tendencies!(dry, dry.wetdry, f, false, false)
+        @test !dry.wetdry.remap.active[f]
+        @test all(==(floatmax(Float32)), dry.wetdry.remap.hadv[:, f])
         @test_throws ArgumentError Model(ModelConfig(wetting_drying=true, layer_momentum_advection="sigma"))
     end
 end

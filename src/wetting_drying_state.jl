@@ -18,7 +18,7 @@ Bed, layer geometry, fluxes and work arrays of the wetting-drying time step (siz
 # discharge of the open layers of the five faces f-2..f+2 (from the face bed upwards), their depths and layer counts, the
 # tendencies of the layers of face f, and per face the vertical sigma-layer fluxes (interface below layer k) and the
 # advection thicknesses that the implicit vertical solve uses on remapped faces.
-struct RemapWork{T<:Real}
+struct RemapWork{T<:AbstractFloat}
     zc::Matrix{T}         # m, (nz+1) x 5
     qc::Matrix{T}         # m^2/s, (nz+1) x 5
     depth::Vector{T}      # m, 5
@@ -29,7 +29,7 @@ struct RemapWork{T<:Real}
     active::Vector{Bool}  # nx+1: the face was advected with the remapped form in this step
 end
 
-RemapWork(nz::Int, nx::Int; T::Type{<:Real}=Float64) = RemapWork{T}(zeros(T, nz + 1, 5), zeros(T, nz + 1, 5), zeros(T, 5),
+RemapWork(nz::Int, nx::Int; T::Type{<:AbstractFloat}=Float64) = RemapWork{T}(zeros(T, nz + 1, 5), zeros(T, nz + 1, 5), zeros(T, 5),
     zeros(Int, 5), zeros(T, nz), zeros(T, nz, nx + 1), zeros(T, nz, nx + 1), fill(false, nx + 1))
 
 mutable struct WetDryState{T<:Real}
