@@ -14,6 +14,24 @@ Bed, layer geometry, fluxes and work arrays of the wetting-drying time step (siz
 - `time` (s): model time, advanced by every step (used by a time-dependent boundary velocity).
 - `gate_edge` (m, nx+1), `gate_contraction` (-, nx+1): sluice gates at the u-faces (`set_sluice_gate!`).
 """
+# Work arrays of the remapped momentum advection (issue #80, `_wd_remapped_tendencies!`): cumulative thickness and
+# discharge of the open layers of the five faces f-2..f+2 (from the face bed upwards), their depths and layer counts, the
+# tendencies of the layers of face f, and per face the vertical sigma-layer fluxes (interface below layer k) and the
+# advection thicknesses that the implicit vertical solve uses on remapped faces.
+struct RemapWork{T<:AbstractFloat}
+    zc::Matrix{T}         # m, (nz+1) x 5
+    qc::Matrix{T}         # m^2/s, (nz+1) x 5
+    depth::Vector{T}      # m, 5
+    count::Vector{Int}    # 5
+    tend::Vector{T}       # m/s^2, nz
+    omega::Matrix{T}      # m/s, nz x (nx+1): sigma-layer flux through the interface below layer k
+    hadv::Matrix{T}       # m, nz x (nx+1): advection thickness phi_k Hbar_f of layer k
+    active::Vector{Bool}  # nx+1: the face was advected with the remapped form in this step
+end
+
+RemapWork(nz::Int, nx::Int; T::Type{<:AbstractFloat}=Float64) = RemapWork{T}(zeros(T, nz + 1, 5), zeros(T, nz + 1, 5), zeros(T, 5),
+    zeros(Int, 5), zeros(T, nz), zeros(T, nz, nx + 1), zeros(T, nz, nx + 1), fill(false, nx + 1))
+
 mutable struct WetDryState{T<:Real}
     bed::Vector{T}
     bed_face::Vector{T}
@@ -74,4 +92,5 @@ mutable struct WetDryState{T<:Real}
     nh_iterations_max::Int
     nh_multigrid_solves::Int
     nh_fallbacks::Int
+    remap::RemapWork{T}   # remapped momentum advection (issue #80)
 end

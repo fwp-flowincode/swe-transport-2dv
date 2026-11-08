@@ -36,7 +36,8 @@ function WetDryState(cfg::ModelConfig; T::Type{<:Real}=Float64)
         zeros(T, nx), zeros(T, nx), zeros(T, nx), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz),
         zeros(T, nz, nx + 1), zeros(T, nz + 1, nx), zeros(T, nz, nx), zeros(T, nz, nx), zeros(T, nz + 1, nx), zeros(Int, nz, nx),
         Int[], Int[], T[], T[], fill(T(-1), nz, nx + 1), 0.0, 0.0, 0, 0, nothing, fill(T(Inf), nx + 1), ones(T, nx + 1), fill(false, nx + 1),
-        nothing, nothing, nothing, nothing, spzeros(T, 0, 0), Int[], Int[], Int[], 0, 0, nothing, 0, 0, 0, 0)
+        nothing, nothing, nothing, nothing, spzeros(T, 0, 0), Int[], Int[], Int[], 0, 0, nothing, 0, 0, 0, 0,
+        RemapWork(nz, nx; T=T))
 end
 
 """
@@ -472,6 +473,188 @@ end
 _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, second::Bool) =
     _wd_advection_tendency(model, wd, k, f, second, _wd_advection_depth_totals(wd, f))
 
+# ---- Remapped momentum advection (issue #80) ----------------------------------------------------------------------------
+# Kleptsova, Stelling & Pietrzak (2010), Ocean Dyn. 60, 1447-1461, sec. 6.1, eqs. 29-33: a flow without vertical structure
+# must be advected as in 1D in every layer, which needs h_{f,k} / h_{c,k} = h_f / h_c for every face f and neighbouring
+# cell c (their eq. 29). The z-layers do not have it where the depth changes (a bore, a slope of the surface across an
+# interface), and the column-scaled advective velocity of `_wd_advection_tendency` repairs it only for the advective
+# velocity, not for the momentum fluxes: it lost 0.9 % of the momentum of a Stoker bore in 10 layers. Here the momentum
+# equation of face f, layer k, is discretised on sub-layers with the layer shares of face f, phi_k = hf_k / H_f (the
+# sigma interval [s_lo, s_hi] of the face depth): in the cells L and R of the face and at the neighbouring faces g the
+# sub-layer k is the same interval of their own depth, its discharge q'_{g,k} the integral of u over that interval
+# (piecewise linear in the layers of g, their eq. 33), the advection thickness phi_k Hbar_f (Hbar_f the cell depths
+# averaged to the face), and the vertical fluxes between the sub-layers follow from their continuity,
+#   omega_C(s) = -[(Qc_b(s) - Qc_a(s)) - s (Q_b - Q_a)] / dx      (Qc_g(s) = integral of u over [0, s H_g] of face g),
+# zero for a flow without vertical structure. The tendency is the upwind form of `_wd_advection_tendency` (Stelling &
+# Duinmeijer 2003) on these sub-layers, with the same tvd2 extension and cap. For a single layer it is that 1D scheme.
+
+# Faces f-2..f+2 over a flat bed (the face beds and the beds of the cells between them equal) and without an active sluice
+# gate: there the remapped form applies. WHY: the sub-layers follow the depth of each column (sigma-like); where the depth
+# changes with the bed (a step, an obstacle, a gate) that transports momentum along tilted surfaces instead of
+# horizontally, and behind a backward step the recirculation vanished (reattachment length 0 instead of 6 step heights).
+# Over a flat bed the depth changes only with the surface, where the remapping is right (a bore, a surge).
+# Tolerances of the flat-bed test, for beds of type T: absolute eps(T) (m) and relative sqrt(eps(T)) (-). WHY: bed levels
+# that differ only by the round-off of their computation (a bed given by a formula) count as flat, a real step does not
+# (1e-6 m at a bed level of 0 m is a step in Float64).
+_wd_remap_flat_bed_atol(::Type{T}) where {T<:AbstractFloat} = eps(T)
+_wd_remap_flat_bed_rtol(::Type{T}) where {T<:AbstractFloat} = sqrt(eps(T))
+
+function _wd_remap_flat_neighbourhood(wd::WetDryState, f::Int)
+    nf = length(wd.bed_face)
+    lo, hi = max(f - 2, 1), min(f + 2, nf)
+    b = wd.bed_face[f]
+    T = eltype(wd.bed_face)
+    atol, rtol = _wd_remap_flat_bed_atol(T), _wd_remap_flat_bed_rtol(T)
+    @inbounds for g in lo:hi
+        isapprox(wd.bed_face[g], b; atol=atol, rtol=rtol) || return false
+        wd.gate_active[g] && return false
+    end
+    @inbounds for c in max(lo, 1):min(hi - 1, length(wd.bed))
+        isapprox(wd.bed[c], b; atol=atol, rtol=rtol) || return false
+    end
+    return true
+end
+
+# Cumulative thickness and discharge of the open layers of face g (index j of the five faces f-2..f+2; a face outside
+# the domain is closed).
+function _wd_remap_face!(R::RemapWork, j::Int, wd::WetDryState, u::AbstractMatrix, g::Int)
+    R.zc[1, j] = 0.0
+    R.qc[1, j] = 0.0
+    n = 0
+    if 1 <= g <= size(wd.hf, 2)
+        @inbounds for k in axes(wd.hf, 1)
+            h = wd.hf[k, g]
+            h > 0.0 || continue
+            n += 1
+            R.zc[n + 1, j] = R.zc[n, j] + h
+            R.qc[n + 1, j] = R.qc[n, j] + h * u[k, g]
+        end
+    end
+    R.count[j] = n
+    R.depth[j] = n > 0 ? R.zc[n + 1, j] : 0.0
+    return nothing
+end
+
+# Integral of u over [0, s H_g] of face j (m^2/s); piecewise linear in the layers
+@inline function _wd_remap_cumulative(R::RemapWork{T}, j::Int, s::Real) where T
+    n = R.count[j]
+    n == 0 && return zero(T)
+    z = T(s) * R.depth[j]
+    i = 1
+    @inbounds while i < n && R.zc[i + 1, j] < z
+        i += 1
+    end
+    @inbounds begin
+        dzl = R.zc[i + 1, j] - R.zc[i, j]
+        return R.qc[i, j] + (dzl > zero(T) ? (z - R.zc[i, j]) / dzl * (R.qc[i + 1, j] - R.qc[i, j]) : zero(T))
+    end
+end
+
+# Mean velocity of face j over the sigma interval [s0, s1] (m/s); NaN if the face is closed
+@inline function _wd_remap_velocity(R::RemapWork{T}, j::Int, s0::Real, s1::Real) where T
+    R.count[j] == 0 && return T(NaN)
+    lo, hi = T(s0), T(s1)
+    return (_wd_remap_cumulative(R, j, hi) - _wd_remap_cumulative(R, j, lo)) / ((hi - lo) * R.depth[j])
+end
+
+@inline function _wd_remap_omega(R::RemapWork{T}, s::Real, Q2::T, Q3::T, Q4::T, dx::Real) where T
+    sT = T(s)
+    q2 = _wd_remap_cumulative(R, 2, sT)
+    q3 = _wd_remap_cumulative(R, 3, sT)
+    q4 = _wd_remap_cumulative(R, 4, sT)
+    return -T(0.5) * ((q3 - q2 - sT * (Q3 - Q2)) + (q4 - q3 - sT * (Q4 - Q3))) / T(dx)
+end
+
+# Advection tendencies (m/s^2) of the open layers of face f (2 <= f <= nx) into R.tend, and the sigma-layer fluxes and
+# advection thicknesses of the face into R.omega[:, f], R.hadv[:, f] (for the implicit vertical solve). `second`: tvd2,
+# `vertical`: explicit vertical advection (otherwise the implicit vertical solve takes R.omega, R.hadv).
+function _wd_remapped_tendencies!(model::Model, wd::WetDryState, f::Int, second::Bool, vertical::Bool)
+    R = wd.remap
+    u = model.state.u
+    nz = model.config.nz
+    dx, dt = model.dx, model.config.dt
+    for j in 1:5
+        _wd_remap_face!(R, j, wd, u, f - 3 + j)
+    end
+    # faces: 1 = f-2, 2 = f-1, 3 = f, 4 = f+1, 5 = f+2
+    Hf = R.depth[3]
+    Hbar = 0.0
+    @inbounds for k in 1:nz
+        Hbar += 0.5 * (wd.h[k, f - 1] + wd.h[k, f])
+        R.tend[k] = 0.0
+        R.omega[k, f] = 0.0
+        R.hadv[k, f] = floatmax(eltype(R.hadv))
+    end
+    Hf > 0.0 || return R
+    R.active[f] = true
+    Q2, Q3, Q4 = R.qc[R.count[2] + 1, 2], R.qc[R.count[3] + 1, 3], R.qc[R.count[4] + 1, 4]
+    # sigma-layer flux through the level s of the face control volume: mean of cells L (faces f-1, f) and R (f, f+1)
+    h2 = second && all(j -> R.count[j] > 0, 1:5)   # second order horizontally: all five faces open
+    s_lo = 0.0
+    @inbounds for k in 1:nz
+        wd.hf[k, f] > 0.0 || continue
+        s_hi = min(s_lo + wd.hf[k, f] / Hf, 1.0)
+        hk = (s_hi - s_lo) * Hbar   # m, advection thickness of the sub-layer
+        R.omega[k, f] = s_lo > 0.0 ? _wd_remap_omega(R, s_lo, Q2, Q3, Q4, dx) : 0.0
+        if hk <= WD_EMPTY_CELL_THICKNESS
+            s_lo = s_hi
+            continue
+        end
+        R.hadv[k, f] = hk
+        uf = u[k, f]
+        um1, up1 = _wd_remap_velocity(R, 2, s_lo, s_hi), _wd_remap_velocity(R, 4, s_lo, s_hi)
+        um2 = h2 ? _wd_remap_velocity(R, 1, s_lo, s_hi) : 0.0
+        up2 = h2 ? _wd_remap_velocity(R, 5, s_lo, s_hi) : 0.0
+        q_m1 = isnan(um1) ? 0.0 : um1 * (s_hi - s_lo) * R.depth[2]
+        q_p1 = isnan(up1) ? 0.0 : up1 * (s_hi - s_lo) * R.depth[4]
+        q_f = uf * wd.hf[k, f]
+        QL, QR = 0.5 * (q_m1 + q_f), 0.5 * (q_f + q_p1)   # m^2/s, sub-layer discharges of cells L and R
+        aL, aR = QL / hk, QR / hk                          # m/s, advective velocities
+        csum, tend = 0.0, 0.0
+        if aL > 0.0 && !isnan(um1)                         # inflow from cell L
+            c = aL / dx
+            csum += c
+            tend += c * (_wd_upwind_value(um1, um2, uf, h2, true, c * dt) - uf)
+        elseif aL < 0.0 && h2                              # outflow into cell L (tvd2 correction)
+            tend += aL / dx * (_wd_upwind_value(uf, up1, um1, true, true, -aL * dt / dx) - uf)
+        end
+        if aR < 0.0 && !isnan(up1)                         # inflow from cell R
+            c = -aR / dx
+            csum += c
+            tend += c * (_wd_upwind_value(up1, up2, uf, h2, true, c * dt) - uf)
+        elseif aR > 0.0 && h2                              # outflow into cell R (tvd2 correction)
+            tend -= aR / dx * (_wd_upwind_value(uf, um1, up1, true, true, aR * dt / dx) - uf)
+        end
+        if vertical
+            open_v(kk) = 1 <= kk <= nz && wd.hf[kk, f] > 0.0
+            v2 = second && open_v(k - 2) && open_v(k - 1) && open_v(k + 1) && open_v(k + 2)
+            if open_v(k - 1)
+                wb = R.omega[k, f]
+                if wb > 0.0
+                    c = wb / hk
+                    csum += c
+                    tend += c * (_wd_upwind_value(u[k - 1, f], v2 ? u[k - 2, f] : 0.0, uf, v2, true, c * dt) - uf)
+                elseif wb < 0.0 && v2
+                    tend += wb / hk * (_wd_upwind_value(uf, u[k + 1, f], u[k - 1, f], true, true, -wb * dt / hk) - uf)
+                end
+            end
+            if open_v(k + 1)
+                wt = _wd_remap_omega(R, s_hi, Q2, Q3, Q4, dx)
+                if wt < 0.0
+                    c = -wt / hk
+                    csum += c
+                    tend += c * (_wd_upwind_value(u[k + 1, f], v2 ? u[k + 2, f] : 0.0, uf, v2, true, c * dt) - uf)
+                elseif wt > 0.0 && v2
+                    tend -= wt / hk * (_wd_upwind_value(uf, u[k - 1, f], u[k + 1, f], true, true, wt * dt / hk) - uf)
+                end
+            end
+        end
+        R.tend[k] = dt * csum > 1.0 ? tend / (dt * csum) : tend
+        s_lo = s_hi
+    end
+    return R
+end
+
 # Largest explicit horizontal diffusion number dt * (sum of the coefficients of a node or cell), -: 1/2 keeps the update a
 # convex combination of the neighbours in the arbitrarily thin cut layers
 const WD_HORIZONTAL_DIFFUSION_MAX = 0.5
@@ -556,13 +739,15 @@ function _wd_implicit_vertical!(model::Model, wd::WetDryState, f::Int)
         k = klo + j - 1
         col[j, 3] = ws.u_hat[k, f]
         col[j, 4] = wd.hf[k, f]
-        col[j, 5] = 0.5 * (W[k, L] + W[k, R])   # interface below layer k
+        # interface below layer k; remapped faces (issue #80): the sigma-layer flux of `_wd_remapped_tendencies!`
+        col[j, 5] = wd.remap.active[f] ? (j == 1 ? 0.0 : wd.remap.omega[k, f]) : 0.5 * (W[k, L] + W[k, R])
         # interface below layer k: molecular plus eddy viscosity (k-epsilon, issue #30), face values of the cells L, R
         col[j, 6] = cfg.nu + (ke === nothing || j == 1 ? 0.0 : 0.5 * (_wd_face_eddy_viscosity(ke, wd, k - 1, L, R) +
                                                                        _wd_face_eddy_viscosity(ke, wd, k, L, R)))
         hbar = 0.5 * (wd.h[k, L] + wd.h[k, R])
         # WHY floatmax: an empty cell pair has no advection in the explicit scheme either (dZ/h_adv = 0)
-        col[j, 10] = hbar > WD_EMPTY_CELL_THICKNESS ? hbar : floatmax(Float64)   # m, advection thickness
+        col[j, 10] = wd.remap.active[f] ? wd.remap.hadv[k, f] :
+            (hbar > WD_EMPTY_CELL_THICKNESS ? hbar : floatmax(Float64))   # m, advection thickness
     end
     # WHY: no bed friction on an active gate face (issue #57). Its control volume straddles the vena contracta, and
     # friction there acts with the jet velocity on the face opening: a head loss i_f dx (first order in dx, 2.5 % of the
@@ -1234,15 +1419,24 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     fhi = open_bc ? nx + 1 : nx
     ke = model.turbulence
     eddy_diffusion = ke !== nothing && ke.horizontal_diffusion
+    # WHY hydrostatic only: the remapped form conserves momentum exactly for a flow without vertical structure; in the
+    # non-hydrostatic mode the bore front has strong vertical structure and the remapped form gained 4.5 % momentum in
+    # 10 layers (the column form lost 1.4 %), so there the column form stays (docs section 38)
+    remap = cfg.layer_momentum_advection == "remapped" && cfg.use_hydrostatic && nz > 1
+    fill!(wd.remap.active, false)
     @timeit model.timers "wd/momentum_predictor" @inbounds for f in 2:fhi
         depth_totals = _wd_advection_depth_totals(wd, f)
+        # remapped advection (issue #80) on interior faces over a flat bed without an active gate; elsewhere the column form
+        remapped = remap && f <= nx && _wd_remap_flat_neighbourhood(wd, f)
+        remapped && _wd_remapped_tendencies!(model, wd, f, second_order_momentum, !implicit)
         boundary = f == nx + 1
         surface_slope = boundary ? _right_boundary_slope(ws.eta_old, model, dx; old=true) : (ws.eta_old[f] - ws.eta_old[f - 1]) / dx
         explicit_surface = explicit_weight * g * surface_slope   # m/s^2
         fp = boundary ? nx : f   # face of the baroclinic pressure gradient (zero gradient at the boundary)
         for k in 1:nz
             if wd.hf[k, f] > 0.0
-                tend = _wd_advection_tendency(model, wd, k, f, second_order_momentum, depth_totals; vertical=!implicit) - (wd.p_anom[k, fp] - wd.p_anom[k, fp - 1]) / (cfg.rho0 * dx) + cfg.body_force_x
+                adv = remapped ? wd.remap.tend[k] : _wd_advection_tendency(model, wd, k, f, second_order_momentum, depth_totals; vertical=!implicit)
+                tend = adv - (wd.p_anom[k, fp] - wd.p_anom[k, fp - 1]) / (cfg.rho0 * dx) + cfg.body_force_x
                 eddy_diffusion && (tend += _wd_horizontal_eddy_diffusion(model, wd, ke, k, f))
                 if theta != 1.0
                     tend -= explicit_surface

@@ -111,6 +111,16 @@ Base.@kwdef mutable struct ModelConfig
     # default ADVECTIVE_COURANT_WARNING = 0.8 keeps a margin to the stability limit 1 of the explicit advection.
     advective_courant_warning::Float64 = ADVECTIVE_COURANT_WARNING
     momentum_advection_scheme::String = "tvd2"
+    # Momentum advection of the layers in the wetting-drying step (issue #80): "column" (the column-scaled advective
+    # velocity of `_wd_advection_tendency`) or "remapped" (Kleptsova, Stelling & Pietrzak 2010, sec. 6.1: at each face
+    # the neighbouring columns are divided into sub-layers with the layer shares of the face, so that a flow without
+    # vertical structure is advected as in 1D in every layer; applied in the hydrostatic mode on faces over a flat bed
+    # without an active sluice gate, elsewhere the column form). The column form loses momentum where a bore lifts the
+    # surface through layer interfaces (0.9 % in 10 layers, the Stoker bore 1.7 % behind); "remapped" gives the 1D
+    # result there. WHY "column" by default: the remapped form is exact only for flows without vertical structure; with
+    # structure (a gate jet and its jump, a non-hydrostatic bore front) it gains momentum or lets a jump oscillate.
+    # See docs/TESTS_TECHNICAL_DOCUMENTATION.md, section 38.
+    layer_momentum_advection::String = "column"
     # Density advection: "upwind1" (first-order donor cell, monotone for CFL_x + CFL_z <= 1) or "tvd2" (flux-limited
     # Lax-Wendroff with the MC limiter of the momentum tvd2 scheme, monotone for CFL_x + CFL_z <= 1/2).
     # WHY "upwind1" default: keeps the results of the validated cases unchanged.
@@ -1325,6 +1335,8 @@ function _check_model_config(cfg::ModelConfig)
 end
 
 function _check_wetting_drying_config(cfg::ModelConfig)
+    cfg.layer_momentum_advection in ("remapped", "column") ||
+        throw(ArgumentError("layer_momentum_advection must be \"remapped\" or \"column\", got \"$(cfg.layer_momentum_advection)\""))
     cfg.nonhydro_solver in ("auto", "direct", "multigrid") ||
         throw(ArgumentError("nonhydro_solver must be \"auto\", \"direct\" or \"multigrid\", got \"$(cfg.nonhydro_solver)\""))
     0.0 < cfg.nonhydro_solver_tolerance < NH_MULTIGRID_TOLERANCE_MAX ||

@@ -98,14 +98,18 @@ dx = 0.25 m. With 10 hydrostatic layers the depth error is about the same (0.52 
 as soon as the bore lifts the surface through a layer interface (from nz = 3: dz = 0.4 m; with nz = 2 both depths lie in
 the lowest layer). Copying the velocity of a newly opened face layer from upstream instead of from below was tried: it
 moved the bore by 0.1 % and increased the layer spread six-fold, so the lag is not a matter of the start velocity of
-new layers; it is open.
+new layers. Issue #80 found the cause: the column-form momentum advection loses momentum where the depth changes (0.9 %
+in 10 layers, docs section 38). With `ModelConfig(layer_momentum_advection="remapped")` (Kleptsova et al. 2010) the
+layered bore is the 1D bore in every number of layers; it is an option, not the default, because it is exact only for
+flows without vertical structure.
 
 ![Stoker convergence](figures/stoker_convergence.png)
 
 Both dam breaks against the number of layers (issue #12 asks for 2, 3, 5 and 10), hydrostatic and non-hydrostatic, at
 dx = 0.25 m. Ritter is the same for every number of layers. The non-hydrostatic Stoker bore has a front of the width of
 the depth and lags the shallow-water bore by about 0.5 m (3.6 % with 10 layers), independent of dx (3.7 % at
-dx = 0.125 m): the shallow-water solution is not its limit.
+dx = 0.125 m). This lag is a momentum loss of the layered advection (issue #80), not physics: a momentum-conserving
+non-hydrostatic model should place the bore at the shallow-water position.
 
 ![Dam breaks and layers](figures/dam_break_layers.png)
 
