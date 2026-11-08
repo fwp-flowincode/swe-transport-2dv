@@ -18,6 +18,7 @@ every file includes, so each file also runs on its own (`julia --project=. test/
 | `test_bed_geometry.jl` | variable bed (staircase, issue #3) |
 | `test_wetting_drying.jl` | wetting and drying, reference solutions (section 18) |
 | `test_dam_break.jl` | Stoker (wet bed) and Ritter (dry bed) dam breaks in layers, passive constituent (section 33) |
+| `test_layer_momentum.jl` | momentum budget of layered bores, the remapped advection against 1D (section 38) |
 | `test_internal_seiche.jl` | internal seiche period against the two-layer relation, density extrapolation of the baroclinic pressure (section 34) |
 | `test_kelvin_helmholtz.jl` | Kelvin-Helmholtz growth rate of a resolved tanh shear layer against the Taylor-Goldstein mode (section 35) |
 | `test_plane_jet.jl` | turbulent plane jet with k-epsilon against the thin-shear-layer reference, free-jet spreading rate (section 36) |
@@ -2114,10 +2115,12 @@ travelled):
   across a shock the split of the momentum between the layers depends on the scheme (the layers below $h_1$ start at
   rest, those above are filled through the bore), and without viscosity nothing evens it out. Initialising a newly opened
   face layer with the velocity of the same layer upstream instead of the layer below moved the bore by 0.1 % and raised
-  the spread to 0.44 m/s; the source of the lag is open.
+  the spread to 0.44 m/s. Cause (issue #80, section 38): the column-form advection loses momentum where the depth changes
+  (0.9 % in 10 layers); `layer_momentum_advection="remapped"` gives the 1D bore in every number of layers.
 - Non-hydrostatic: the bore front has the width of the depth and lags the shallow-water bore by about 0.5 m at
-  $\Delta x$ = 0.25 m and 0.125 m alike (3.6 %, 3.7 % with 10 layers); the middle state is 1.6 % deeper. The shallow-water
-  solution is not the limit of the non-hydrostatic equations at a bore; the tests bound the difference.
+  $\Delta x$ = 0.25 m and 0.125 m alike (3.6 %, 3.7 % with 10 layers); the middle state is 1.6 % deeper. Correction (issue
+  #80, section 38): the lag is a momentum loss of the layered advection (1.4 % in 10 layers), not a property of the
+  non-hydrostatic equations, whose bore should travel at the shallow-water speed; the tests bound the difference.
 - Ritter is unchanged with 2, 3, 5 or 10 layers in both modes (the falling surface opens no layers).
 - Water volume and constituent mass are conserved to $10^{-15}$ (relative) in all runs; the tracer stays within its
   initial bounds and does not change the flow (bit for bit).
@@ -2345,6 +2348,75 @@ solvers differ by 1 % of the velocity after 50 steps: the start-up of the jet am
 of 1e-9 of the initial velocity grows the same way with the direct solver), so whole runs are compared on linear or
 steady flows: the standing-wave period (section 18) and the reattachment length behind the backward step (section 29)
 agree within 3e-11 and 4e-11.
+
+### 38) Momentum of layered bores: the column form and the remapped advection (issue #80)
+
+**Diagnosis.** The hydrostatic Stoker bore of section 33 lagged by 1.5-2 % from 3 layers on. The momentum of the channel
+$M=\sum h_f u\,\Delta x$ must grow by the pressure-force impulse $\tfrac12 g(h_0^2-h_1^2)\,t$ while the waves are away
+from the walls. At $t$ = 5 s ($\Delta x$ = 0.25 m, upwind1):
+
+| layers | 1 | 2 | 3 | 5 | 10 |
+|---|---|---|---|---|---|
+| $M$ / exact | 1.0045 | 1.0041 | 1.0006 | 0.9960 | 0.9955 |
+| bore error | -0.34 % | -0.39 % | -0.83 % | -1.54 % | -1.65 % |
+
+The layered runs lose up to 0.9 % of the momentum, and the bore lags by as much. The loss does not depend on $\Delta t$
+(a quarter of it: the same) or on $\theta$ (0.7 or 1), and it is larger with tvd2 (1.5 %). It occurs along the path of
+the bore (accumulated per face, 40 to 56 m) and is not in the pressure force (the same in 1D and 10 layers, 23.52
+m$^3$/s). The budget of the momentum the Stelling & Duinmeijer form conserves, $\bar M=\sum\bar h u\,\Delta x$ with
+$\bar h$ the cell thicknesses averaged to the face, splits it: advection plus the volume change $u\,\Delta\bar h$ sum to
++0.039 m$^3$/s in 1D (conservative to first order) and -0.197 m$^3$/s in 10 layers (horizontal advection -0.187,
+vertical -0.070 against 1D).
+
+**Cause.** The column form of `_wd_advection_tendency` uses the advective velocity
+$a_{k,C}=(\bar q_{k,C}/\tilde h_{k,C})\,\tilde H_C/\bar H_f$ (section 18): a flow without vertical structure then has the
+1D advective velocity in every layer. Its momentum flux through the centre of cell $C$, $\bar h_{k,f}a_{k,C}u^*$, carries
+the factor $(\bar h_{k,f}/\bar H_f)(\tilde H_C/\tilde h_{k,C})$: the share of the layer in the face depth over its share in
+the cell. In 1D both shares are 1; in layers the share differs between the faces $f$ and $f+1$ of a cell wherever the depth
+changes, so the flux leaving one face control volume is not the flux entering the next. A flow with vertical structure
+(behind the bore the layer velocities differed by 0.07 m/s) then does not conserve momentum.
+Tried and not adopted:
+- the per-layer form $a=\bar q_k/\bar h_k$ (flux consistent per layer): 1.7 % loss, the layers drift apart by 1.7 m/s
+  (the cut surface layer has different face and cell thicknesses);
+- the same with the thickness predicted by the fluxes of the step as divisor: the same result;
+- the column form with its depth-integrated tendency corrected to that of the remapped form: 0.9 % gain;
+- the cap of the tendency in thin layers: never active.
+
+**Remapped advection** (`ModelConfig(layer_momentum_advection="remapped")`, `_wd_remapped_tendencies!`). Kleptsova,
+Stelling & Pietrzak (2010, Ocean Dyn. 60, 1447-1461, sec. 6.1) show that a z-layer model creates a vertical structure of
+its own (the staircase problem) unless $h_{f,k}/h_{c,k}=h_f/h_c$ for every face and cell (their eq. 29), and remap the
+columns at each face (eqs. 30-33). Here: for face $f$ and layer $k$ with the share $\phi_k=h_{f,k}/H_f$ (the
+$\sigma$-interval $[s_{lo},s_{hi}]$ of the face depth), the neighbouring faces $g$ and cells are divided into sub-layers with
+the same shares; the sub-layer discharge $q'_{g,k}$ is the integral of $u$ over that interval of face $g$ (piecewise linear
+in its layers), the advection thickness $\phi_k\bar H_f$, and the vertical fluxes between the sub-layers follow from their
+continuity, $\omega_C(s)=-[(Q_b(s)-Q_a(s))-s(Q_b-Q_a)]/\Delta x$ with $Q_g(s)$ the integral of $u$ over $[0,sH_g]$ of face
+$g$ (zero for a flow without vertical structure). The tendency is the upwind form of section 18 on these sub-layers, with
+the tvd2 extension and the cap; with implicit vertical terms the implicit solve takes the sub-layer fluxes and
+thicknesses. A face uses it in the hydrostatic mode when its neighbourhood (faces $f-2..f+2$ and the cells between them)
+has a flat bed and no active sluice gate.
+
+**Results.** Stoker in 2, 3, 5 and 10 layers, upwind1 and tvd2, and Ritter in 12 layers are the 1D runs to round-off
+(largest depth difference $2\cdot10^{-14}$ m), without layer spread; momentum 1.0045 as in 1D, bore -0.34 % (tvd2
+-0.10 %). One layer: the column form, bit for bit. Cost: the advection takes about 1.7 times as long.
+
+**Limits and the default.** The remapped form is exact for flows without vertical structure. With structure:
+- at a bed step its sub-layers follow the depth of each column and transport momentum along tilted surfaces: behind the
+  backward step of section 29 the recirculation vanished (hence the flat-bed criterion);
+- non-hydrostatic, the bore front has strong vertical structure: with the remapped form the momentum grew by 2.0 % and
+  4.5 % in 3 and 10 layers and the bore ran 1.3 % and 5.6 % ahead, so the non-hydrostatic mode keeps the column form;
+- the hydraulic jump behind a sluice gate (the gate jet in the lower layers) did not settle (discharge spread 0.4-1.3 %
+  against 0-0.15 % with the column form) when the jump stood close to the gate; with jet and jump in a column-form zone
+  it was steady again.
+
+The flat-bed criterion cannot detect a structure created by the flow, so `"column"` stays the default and `"remapped"`
+is an option for surges and bores without vertical structure (hydrostatic).
+
+**Non-hydrostatic bores** (correction of section 33). The bore speed follows from the jump conditions of mass and momentum
+between the hydrostatic states before and behind the bore, so a momentum-conserving non-hydrostatic model should place
+the bore where the shallow-water solution has it (up to a fixed offset of the front shape). The non-hydrostatic lag of
+section 33 (3.6 % with 10 layers) is a momentum loss of the column form (momentum 0.9856 of the exact value; 1 layer
+1.0045), not a property of the non-hydrostatic equations. A layered advection that conserves momentum for flows with
+vertical structure is open (follow-up issue).
 
 ## Test-by-test documentation
 
@@ -3657,6 +3729,18 @@ outflow.
 - With the multigrid forced: `test_validate_wd_nonhydro_standing_wave_full_dispersion_*` (period within 1e-6 of the
   direct run) and `test_validate_backward_step_reattachment_nonhydrostatic_multigrid` (reattachment length within 1e-6
   of the direct run and within the bound of the LES).
+
+### Layer-momentum tests (`test_layer_momentum.jl`, section 38)
+
+- `test_verify_layer_momentum_budget_1d`: the 1D momentum gain equals the pressure-force impulse within 1 % (+0.45 %).
+- `test_validate_remapped_layers_reproduce_1d_stoker_{upwind1,tvd2}`: 2, 3, 5 and 10 layers with the remapped form: bore
+  ($10^{-10}$ m), depth ($10^{-12}$ m) and momentum ($10^{-10}$) of the 1D run, layer spread below $10^{-9}$ m/s.
+- `test_validate_column_form_momentum_deficit`: the column form loses 0.3-1.5 % of the momentum in 10 layers (0.90 %)
+  and its bore lags the 1D bore (documents the limitation; a conservative scheme would fail this test).
+- `test_validate_remapped_layers_reproduce_1d_ritter`: 12 layers equal the 1D Ritter run.
+- `test_verify_remapped_single_layer_is_column_form`: one layer: bit for bit.
+- `test_verify_remapped_selection`: a bed step keeps the column form on the faces whose neighbourhood reaches over it,
+  the flat parts use the remapped form; the non-hydrostatic mode uses the column form; an invalid option is rejected.
 
 ## Additional validation scripts and literature basis
 
