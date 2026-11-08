@@ -493,17 +493,24 @@ _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, second::Bo
 # changes with the bed (a step, an obstacle, a gate) that transports momentum along tilted surfaces instead of
 # horizontally, and behind a backward step the recirculation vanished (reattachment length 0 instead of 6 step heights).
 # Over a flat bed the depth changes only with the surface, where the remapping is right (a bore, a surge).
+# Tolerances of the flat-bed test, for beds of type T: absolute eps(T) (m) and relative sqrt(eps(T)) (-). WHY: bed levels
+# that differ only by the round-off of their computation (a bed given by a formula) count as flat, a real step does not
+# (1e-6 m at a bed level of 0 m is a step in Float64).
+_wd_remap_flat_bed_atol(::Type{T}) where {T<:AbstractFloat} = eps(T)
+_wd_remap_flat_bed_rtol(::Type{T}) where {T<:AbstractFloat} = sqrt(eps(T))
+
 function _wd_remap_flat_neighbourhood(wd::WetDryState, f::Int)
     nf = length(wd.bed_face)
     lo, hi = max(f - 2, 1), min(f + 2, nf)
     b = wd.bed_face[f]
-    bed_tol = eps(eltype(wd.bed_face))
+    T = eltype(wd.bed_face)
+    atol, rtol = _wd_remap_flat_bed_atol(T), _wd_remap_flat_bed_rtol(T)
     @inbounds for g in lo:hi
-        isapprox(wd.bed_face[g], b; atol=bed_tol, rtol=sqrt(bed_tol)) || return false
+        isapprox(wd.bed_face[g], b; atol=atol, rtol=rtol) || return false
         wd.gate_active[g] && return false
     end
     @inbounds for c in max(lo, 1):min(hi - 1, length(wd.bed))
-        isapprox(wd.bed[c], b; atol=bed_tol, rtol=sqrt(bed_tol)) || return false
+        isapprox(wd.bed[c], b; atol=atol, rtol=rtol) || return false
     end
     return true
 end
