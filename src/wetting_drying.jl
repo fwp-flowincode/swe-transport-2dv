@@ -37,7 +37,7 @@ function WetDryState(cfg::ModelConfig; T::Type{<:Real}=Float64)
         zeros(T, nz, nx + 1), zeros(T, nz + 1, nx), zeros(T, nz, nx), zeros(T, nz, nx), zeros(T, nz + 1, nx), zeros(Int, nz, nx),
         Int[], Int[], T[], T[], fill(T(-1), nz, nx + 1), 0.0, 0.0, 0, 0, nothing, fill(T(Inf), nx + 1), ones(T, nx + 1), fill(false, nx + 1),
         nothing, nothing, nothing, nothing, spzeros(T, 0, 0), Int[], Int[], Int[], 0, 0, nothing, 0, 0, 0, 0,
-        RemapWork(nz, nx; T=T))
+        RemapWork(nz, nx; T=T), zeros(T, nz), zeros(T, nz), NaN, nothing, zeros(T, nz), zeros(T, nz))
 end
 
 """
@@ -154,7 +154,7 @@ function _wd_face_bed(model::Model, wd::WetDryState, f::Int)
     nx >= 2 || return wd.bed_face[f]
     if f == nx + 1 && _right_face_computed(model)
         return max(1.5 * wd.bed[nx] - 0.5 * wd.bed[nx - 1], 0.0)
-    elseif f == 1 && model.x_boundary_eta_left !== nothing
+    elseif f == 1 && (model.x_boundary_eta_left !== nothing || wd.left_open !== nothing)
         return max(1.5 * wd.bed[1] - 0.5 * wd.bed[2], 0.0)
     end
     return wd.bed_face[f]
@@ -183,6 +183,8 @@ function _wd_face_thicknesses!(model::Model, wd::WetDryState)
             zeta_f = cfg.depth + _right_boundary_level(model)   # water level or free outflow: the face level is known
         elseif f == 1 && model.x_boundary_eta_left !== nothing
             zeta_f = cfg.depth + model.x_boundary_eta_left    # inlet level prescribed (supercritical inflow, #46)
+        elseif f == 1 && wd.left_open !== nothing
+            zeta_f = cfg.depth + wd.left_open.eta_b           # free left face (issue #86): the face level is known
         elseif f == 1 || f == nx + 1
             zeta_f = _wd_level(model, f == 1 ? 1 : nx)
         else
@@ -337,13 +339,15 @@ end
 function _wd_advection_depth_totals(wd::WetDryState, f::Int)
     nx = size(wd.h, 2)
     R = min(f, nx)                  # right boundary face (water-level boundary): ghost cell = last cell
+    L = max(f - 1, 1)               # free left face (issue #86): ghost cell = first cell
     fR = min(f + 1, size(wd.hf, 2))
+    fL = max(f - 1, 1)
     Hbar = 0.0
     HtL = 0.0
     HtR = 0.0
     @inbounds for kk in axes(wd.h, 1)
-        Hbar += 0.5 * (wd.h[kk, f - 1] + wd.h[kk, R])
-        HtL += 0.5 * (wd.hf[kk, f - 1] + wd.hf[kk, f])
+        Hbar += 0.5 * (wd.h[kk, L] + wd.h[kk, R])
+        HtL += 0.5 * (wd.hf[kk, fL] + wd.hf[kk, f])
         HtR += 0.5 * (wd.hf[kk, f] + wd.hf[kk, fR])
     end
     return Hbar, HtL, HtR
@@ -396,7 +400,8 @@ function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, s
     dx = model.dx
     # right boundary face (f = nx + 1, water-level boundary): the ghost cell beyond it has the thicknesses and w of the
     # last cell and the velocity of the boundary face (zero gradient), so the cell R terms vanish (aR = 0 below)
-    L, R = f - 1, min(f, nxp1 - 1)
+    # free left face (f = 1, issue #86): the mirror, ghost cell = first cell, aL = 0
+    L, R = max(f - 1, 1), min(f, nxp1 - 1)
     hbar = 0.5 * (wd.h[k, L] + wd.h[k, R])
     hbar > WD_EMPTY_CELL_THICKNESS || return 0.0
     uf = u[k, f]
@@ -408,8 +413,11 @@ function _wd_advection_tendency(model::Model, wd::WetDryState, k::Int, f::Int, s
     @inbounds begin
         # advective velocities of cells L and R (m/s)
         Hbar, HtL, HtR = depth_totals
-        htL = 0.5 * (wd.hf[k, f - 1] + wd.hf[k, f])
-        aL = htL > 0.0 ? 0.5 * (wd.q[k, f - 1] + wd.q[k, f]) / htL * HtL / Hbar : 0.0
+        aL = 0.0
+        if f > 1
+            htL = 0.5 * (wd.hf[k, f - 1] + wd.hf[k, f])
+            aL = htL > 0.0 ? 0.5 * (wd.q[k, f - 1] + wd.q[k, f]) / htL * HtL / Hbar : 0.0
+        end
         aR = 0.0
         if f < nxp1
             htR = 0.5 * (wd.hf[k, f] + wd.hf[k, f + 1])
@@ -667,7 +675,7 @@ const WD_HORIZONTAL_DIFFUSION_MAX = 0.5
     u, dx, nxp1 = model.state.u, model.dx, model.config.nx + 1
     hf = wd.hf[k, f]
     @inbounds begin
-        cL = wd.hf[k, f - 1] > 0.0 ? ke.nu_t[k, f - 1] * wd.h[k, f - 1] / (hf * dx^2) : 0.0   # 1/s
+        cL = f > 1 && wd.hf[k, f - 1] > 0.0 ? ke.nu_t[k, f - 1] * wd.h[k, f - 1] / (hf * dx^2) : 0.0   # 1/s
         cR = f < nxp1 && wd.hf[k, f + 1] > 0.0 ? ke.nu_t[k, f] * wd.h[k, f] / (hf * dx^2) : 0.0
         csum = cL + cR
         csum > 0.0 || return 0.0
@@ -733,7 +741,8 @@ function _wd_implicit_vertical!(model::Model, wd::WetDryState, f::Int)
         return nothing
     end
     m = khi - klo + 1
-    L, R = f - 1, min(f, cfg.nx)   # right boundary face of a water-level boundary: w and h of the last cell
+    # open boundary faces (water level or free outflow at the right, free left face): w and h of the adjacent cell
+    L, R = max(f - 1, 1), min(f, cfg.nx)
     ke = model.turbulence
     @inbounds for j in 1:m
         k = klo + j - 1
@@ -806,11 +815,14 @@ function _wd_boundary_velocities!(model::Model, wd::WetDryState, u::AbstractMatr
     end
     right_profile = model.x_boundary_u_right_profile
     right_profile === nothing || length(right_profile) == nz || throw(ArgumentError("right outflow profile length must match nz"))
+    # free left face (issue #86): u of the boundary face comes from its own momentum equation
+    left_free = wd.left_open !== nothing
     @inbounds for k in 1:nz
+        left_free && break
         wet_left = wd.hf[k, 1] > 0.0
         u[k, 1] = (left === nothing || !wet_left) ? 0.0 : (left isa Real ? left : left[k])
     end
-    if model.x_boundary_q_left !== nothing
+    if model.x_boundary_q_left !== nothing && !left_free
         # discharge boundary: the shape scaled with the face layer thicknesses of time n (dry layers carry no flow)
         transport = 0.0
         @inbounds for k in 1:nz
@@ -955,6 +967,10 @@ function _wd_free_surface_solve!(model::Model, wd::WetDryState)
     open_bc = _right_face_computed(model)
     eta_beyond, weight = open_bc ? _right_boundary_dirichlet(model) : (0.0, 1.0)   # m, level beyond column nx; -
     open_bc && (a[nx + 1] = weight * 2.0 * coeff * ws.H_face[nx + 1])
+    # free left face (issue #86): the mirror, column 1 coupled to the level eta_eff half a cell to its left
+    left_open = wd.left_open !== nothing
+    eta_before = left_open ? wd.left_open.eta_eff : 0.0   # m, level before column 1
+    left_open && (a[1] = wd.left_open.weight * 2.0 * coeff * ws.H_face[1])
     @inbounds for i in 1:nx
         b[i] = max(H + ws.eta_old[i] - wd.bed[i], 0.0) - dt * (wd.U_hat[i + 1] - wd.U_hat[i]) / dx
         eta[i] = ws.eta_old[i]
@@ -965,7 +981,7 @@ function _wd_free_surface_solve!(model::Model, wd::WetDryState)
         converged = true
         @inbounds for i in 1:nx
             V = max(H + eta[i] - wd.bed[i], 0.0)
-            Tl = a[i] * (eta[i] - (i > 1 ? eta[i - 1] : 0.0))
+            Tl = a[i] * (eta[i] - (i > 1 ? eta[i - 1] : eta_before))
             Tr = a[i + 1] * (eta[i] - (i < nx ? eta[i + 1] : eta_beyond))
             F[i] = V + Tl + Tr - b[i]
             scale = H + V + abs(b[i]) + abs(Tl) + abs(Tr)   # m, magnitudes that enter F_i (round-off scale)
@@ -1010,7 +1026,14 @@ function _wd_free_surface_solve!(model::Model, wd::WetDryState)
             st.u[k, f] = wd.hf[k, f] > 0.0 ? ws.u_hat[k, f] - g * dt * theta * grad * r : 0.0
         end
     end
-    @views st.u[:, 1] .= ws.u_hat[:, 1]
+    if left_open
+        grad = _left_boundary_slope(eta, model, dx)
+        @inbounds for k in 1:nz
+            st.u[k, 1] = wd.hf[k, 1] > 0.0 ? ws.u_hat[k, 1] - g * dt * theta * grad * ws.r_vert[k, 1] : 0.0
+        end
+    else
+        @views st.u[:, 1] .= ws.u_hat[:, 1]
+    end
     if !_right_face_computed(model)
         @views st.u[:, nx + 1] .= ws.u_hat[:, nx + 1]
     else
@@ -1198,9 +1221,51 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
             idx[k, i] = n
         end
     end
+    # Pressure radiation at the open right face (nonhydro_open_face = "radiation", issue #86): the face pressure q_b of each
+    # wet face layer obeys dq_b/dt + c (q_b - q_nx)/(dx/2) = 0 with the weight th of the level radiation (theta with
+    # radiation_theta, else 1 = backward Euler):
+    #     q_b^{n+1} (1 + th mu) = E + th mu q_nx^{n+1},   E = q_b^n - (1 - th) mu (q_b^n - q_nx^n),   mu = c dt/(dx/2),
+    # c from _radiation_speed. The face then carries the correction flux -dt/rho0 (q_b - q_nx)/(dx/2) like an
+    # interior face; in the system (unknown sol = theta^2 q) it adds a_b/(1 + th mu), a_b = 2 hf/dx^2, to the diagonal of
+    # cell (k, nx) and a_b theta^2 E/(1 + th mu) to its right-hand side.
+    if cfg.nonhydro_open_face == "radiation"
+        @inbounds for k in 1:nz
+            wd.q_right_explicit[k] = wd.q_nh[k, nx]   # Pa, q_nx^n (wd.q_nh still holds q^n here)
+            wd.q_left_explicit[k] = wd.q_nh[k, 1]     # Pa, q_1^n (free left face)
+        end
+    end
     fill!(wd.q_nh, 0.0)
+    # WHY: with dq/dx = 0 the open face is a wall for the non-hydrostatic pressure, which reflects the non-hydrostatic
+    # part of an outgoing dispersive wave (docs/numerics_open_boundaries.md, section 7). Only the diagonal changes, so the
+    # matrix stays symmetric positive definite (Cholesky and the column-line multigrid apply unchanged).
+    radiate = cfg.nonhydro_open_face == "radiation" && _right_face_computed(model)
+    mu_q = 0.0
+    th_q = cfg.radiation_theta ? theta : 1.0   # -, time weight of the pressure radiation
+    if radiate
+        U_b, depth_b = _face_velocity_depth(model, nx + 1)
+        # the current of this step's level radiation (_update_free_outflow_level!), so that both radiate together
+        isnan(wd.u_right_mean) || cfg.radiation_period == 0.0 || (U_b = wd.u_right_mean)
+        mu_q = max(_radiation_speed(cfg, U_b, depth_b), 0.0) * dt / (0.5 * dx)
+        @inbounds for k in 1:nz
+            # E: explicit part of q_b^{n+1} (1 + th mu), stored in q_right_explicit
+            wd.q_right_explicit[k] = wd.q_right[k] - (1.0 - th_q) * mu_q * (wd.q_right[k] - wd.q_right_explicit[k])
+        end
+    end
+    # free left face (issue #86): the same radiation towards -x, speed of the outgoing wave on the current -U
+    radiate_left = cfg.nonhydro_open_face == "radiation" && wd.left_open !== nothing
+    mu_q_left = 0.0
+    if radiate_left
+        U_l, depth_l = _face_velocity_depth(model, 1)
+        U_out = (cfg.radiation_period > 0.0 && !isnan(wd.left_open.u_mean)) ? wd.left_open.u_mean : -U_l
+        mu_q_left = max(_radiation_speed(cfg, U_out, depth_l), 0.0) * dt / (0.5 * dx)
+        @inbounds for k in 1:nz
+            wd.q_left_explicit[k] = wd.q_left[k] - (1.0 - th_q) * mu_q_left * (wd.q_left[k] - wd.q_left_explicit[k])
+        end
+    end
     if n == 0
         model.last_nonhydro_pcorr_max = 0.0
+        fill!(wd.q_right, 0.0)
+        fill!(wd.q_left, 0.0)
         return nothing
     end
     rows, cols, vals, rhs = wd.nh_rows, wd.nh_cols, wd.nh_vals, wd.nh_rhs
@@ -1226,11 +1291,26 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
         P = idx[k, i]
         P == 0 && continue
         diag = 0.0
+        rhs_radiation = 0.0   # known part of the pressure radiation at the open face (units of rhs[P])
         div = (h_nh[k, i] - wd.h[k, i]) / dt   # m/s
         for (f, j, sgn) in ((i, i - 1, -1.0), (i + 1, i + 1, 1.0))   # left and right face, neighbour column
             hf = wd.hf[k, f]
             hf > 0.0 || continue
             div += sgn * hf * (theta * st.u[k, f] + (1.0 - theta) * ws.u_old[k, f]) / dx
+            if radiate && f == nx + 1
+                a = 2.0 * hf / dx^2 / (1.0 + th_q * mu_q)
+                diag += a
+                rhs_radiation += a * theta * theta * wd.q_right_explicit[k]
+                use_mg && (mg.levels[1].dh[k, i] += a)
+                continue
+            end
+            if radiate_left && f == 1
+                a = 2.0 * hf / dx^2 / (1.0 + th_q * mu_q_left)
+                diag += a
+                rhs_radiation += a * theta * theta * wd.q_left_explicit[k]
+                use_mg && (mg.levels[1].dh[k, i] += a)
+                continue
+            end
             # boundary faces: no correction; at an open right boundary (water level or free outflow, issue #49) a
             # Neumann condition dq/dx = 0 (see _wd_nonhydrostatic_correction! docstring for why not q = 0)
             (1 < f <= nx) || continue
@@ -1264,7 +1344,7 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
             push!(rows, P); push!(cols, N); push!(vals, -a)
         end
         push!(rows, P); push!(cols, P); push!(vals, diag)
-        rhs[P] = -rho0 / dt * div
+        rhs[P] = -rho0 / dt * div + rhs_radiation
         if use_mg
             L1 = mg.levels[1]
             L1.dv[k, i] += a
@@ -1311,6 +1391,30 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
         wd.hf[k, f] > 0.0 || continue
         dq = wd.q_nh[k, f] - wd.q_nh[k, f - 1]
         dq == 0.0 || (ws.u_hat[k, f] -= theta * dt / rho0 * dq / dx)
+    end
+    if radiate
+        @inbounds for k in 1:nz
+            if wd.hf[k, nx + 1] > 0.0 && idx[k, nx] > 0
+                wd.q_right[k] = (wd.q_right_explicit[k] + th_q * mu_q * wd.q_nh[k, nx]) / (1.0 + th_q * mu_q)
+                ws.u_hat[k, nx + 1] -= theta * dt / rho0 * (wd.q_right[k] - wd.q_nh[k, nx]) / (0.5 * dx)
+            else
+                wd.q_right[k] = 0.0   # surface, empty or dry cell: q = 0 there
+            end
+        end
+    else
+        fill!(wd.q_right, 0.0)
+    end
+    if radiate_left
+        @inbounds for k in 1:nz
+            if wd.hf[k, 1] > 0.0 && idx[k, 1] > 0
+                wd.q_left[k] = (wd.q_left_explicit[k] + th_q * mu_q_left * wd.q_nh[k, 1]) / (1.0 + th_q * mu_q_left)
+                ws.u_hat[k, 1] -= theta * dt / rho0 * (wd.q_nh[k, 1] - wd.q_left[k]) / (0.5 * dx)
+            else
+                wd.q_left[k] = 0.0   # surface, empty or dry cell: q = 0 there
+            end
+        end
+    else
+        fill!(wd.q_left, 0.0)
     end
     model.last_nonhydro_pcorr_max = maximum(abs, wd.q_nh)
     return nothing
@@ -1417,6 +1521,12 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     open_bc && _check_right_level_config(cfg)
     model.x_boundary_eta_left === nothing || _check_left_level_config(cfg)
     fhi = open_bc ? nx + 1 : nx
+    radiate_q = open_bc && cfg.nonhydro_open_face == "radiation"   # pressure radiation at the open face (issue #86)
+    # free left face (issue #86): face 1 has its own momentum equation, the mirror of the right one (surface slope
+    # (eta_1 - eta_b)/(dx/2), _left_boundary_slope; baroclinic pressure gradient of face 2; ghost cell = first cell)
+    left_open = wd.left_open !== nothing
+    flo = left_open ? 1 : 2
+    radiate_q_left = left_open && cfg.nonhydro_open_face == "radiation"
     ke = model.turbulence
     eddy_diffusion = ke !== nothing && ke.horizontal_diffusion
     # WHY hydrostatic only: the remapped form conserves momentum exactly for a flow without vertical structure; in the
@@ -1424,15 +1534,17 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     # 10 layers (the column form lost 1.4 %), so there the column form stays (docs section 38)
     remap = cfg.layer_momentum_advection == "remapped" && cfg.use_hydrostatic && nz > 1
     fill!(wd.remap.active, false)
-    @timeit model.timers "wd/momentum_predictor" @inbounds for f in 2:fhi
+    @timeit model.timers "wd/momentum_predictor" @inbounds for f in flo:fhi
         depth_totals = _wd_advection_depth_totals(wd, f)
         # remapped advection (issue #80) on interior faces over a flat bed without an active gate; elsewhere the column form
-        remapped = remap && f <= nx && _wd_remap_flat_neighbourhood(wd, f)
+        remapped = remap && 2 <= f <= nx && _wd_remap_flat_neighbourhood(wd, f)
         remapped && _wd_remapped_tendencies!(model, wd, f, second_order_momentum, !implicit)
         boundary = f == nx + 1
-        surface_slope = boundary ? _right_boundary_slope(ws.eta_old, model, dx; old=true) : (ws.eta_old[f] - ws.eta_old[f - 1]) / dx
+        left_boundary = f == 1
+        surface_slope = boundary ? _right_boundary_slope(ws.eta_old, model, dx; old=true) :
+            left_boundary ? _left_boundary_slope(ws.eta_old, model, dx; old=true) : (ws.eta_old[f] - ws.eta_old[f - 1]) / dx
         explicit_surface = explicit_weight * g * surface_slope   # m/s^2
-        fp = boundary ? nx : f   # face of the baroclinic pressure gradient (zero gradient at the boundary)
+        fp = boundary ? nx : (left_boundary ? 2 : f)   # face of the baroclinic pressure gradient (zero gradient at the boundary)
         for k in 1:nz
             if wd.hf[k, f] > 0.0
                 adv = remapped ? wd.remap.tend[k] : _wd_advection_tendency(model, wd, k, f, second_order_momentum, depth_totals; vertical=!implicit)
@@ -1441,7 +1553,10 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
                 if theta != 1.0
                     tend -= explicit_surface
                     # open right boundary face: dq/dx = 0 there (issue #49, _wd_nonhydrostatic_correction!)
-                    nonhydro && !boundary && (tend -= explicit_weight * (wd.q_nh[k, f] - wd.q_nh[k, f - 1]) / (cfg.rho0 * dx))
+                    nonhydro && !boundary && !left_boundary && (tend -= explicit_weight * (wd.q_nh[k, f] - wd.q_nh[k, f - 1]) / (cfg.rho0 * dx))
+                    # pressure radiation (issue #86): the face pressure q_b of time n, half a cell from the adjacent centre
+                    nonhydro && boundary && radiate_q && (tend -= explicit_weight * (wd.q_right[k] - wd.q_nh[k, nx]) / (cfg.rho0 * 0.5 * dx))
+                    nonhydro && left_boundary && radiate_q_left && (tend -= explicit_weight * (wd.q_nh[k, 1] - wd.q_left[k]) / (cfg.rho0 * 0.5 * dx))
                 end
                 ws.u_hat[k, f] = damp * (st.u[k, f] + dt * tend)
             else

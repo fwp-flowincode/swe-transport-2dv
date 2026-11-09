@@ -32,6 +32,25 @@ end
 RemapWork(nz::Int, nx::Int; T::Type{<:AbstractFloat}=Float64) = RemapWork{T}(zeros(T, nz + 1, 5), zeros(T, nz + 1, 5), zeros(T, 5),
     zeros(Int, 5), zeros(T, nz), zeros(T, nz, nx + 1), zeros(T, nz, nx + 1), fill(false, nx + 1))
 
+"""
+    OpenFaceState
+
+Free (radiating) boundary face of the wetting-drying step whose state is not held by `Model` (the left face, issue #86;
+the right face keeps its fields in `Model` for compatibility):
+- `eta_b` (m): level of the face at time n (radiation condition, `_update_left_free_level!`);
+- `eta_eff` (m), `weight` (-): its Dirichlet form for the free-surface solve of the step;
+- `eta_target` (m), `relaxation_time` (s; Inf: none): relaxation of the level (relaxed free face);
+- `u_mean` (m/s): depth-mean face velocity filtered over `radiation_period` (NaN until the first step).
+"""
+mutable struct OpenFaceState
+    eta_b::Float64
+    eta_eff::Float64
+    weight::Float64
+    eta_target::Float64
+    relaxation_time::Float64
+    u_mean::Float64
+end
+
 mutable struct WetDryState{T<:Real}
     bed::Vector{T}
     bed_face::Vector{T}
@@ -93,4 +112,15 @@ mutable struct WetDryState{T<:Real}
     nh_multigrid_solves::Int
     nh_fallbacks::Int
     remap::RemapWork{T}   # remapped momentum advection (issue #80)
+    # Pa, nz: non-hydrostatic pressure of the open right boundary face (nonhydro_open_face = "radiation", issue #86)
+    q_right::Vector{T}
+    q_right_explicit::Vector{T}   # Pa, nz: work array (q_nx^n, then the explicit part of the theta-weighted radiation)
+    # m/s: depth-mean velocity of the open right face, low-pass filtered over radiation_period (the current that
+    # Doppler-shifts the radiation speed; NaN until the first step)
+    u_right_mean::Float64
+    # free (radiating) left boundary face (set_x_inflow_outflow!(...; left_free=true), issue #86): nothing, or its state
+    left_open::Union{Nothing,OpenFaceState}
+    q_left::Vector{T}            # Pa, nz: non-hydrostatic pressure of the open left face (pressure radiation)
+    q_left_explicit::Vector{T}   # Pa, nz: work array (q_1^n, then the explicit part of the radiation)
 end
+
