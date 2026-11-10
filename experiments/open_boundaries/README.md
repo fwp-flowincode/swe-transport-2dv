@@ -68,3 +68,18 @@ On the open face, the first version had q = 0 on the fixed grid. These figures s
 with the Neumann top, where the wave is not dispersive. With the Dirichlet top, q = 0 reflected 4.4 % of the dispersive
 wave, against 1.3 % with dq/dx = 0. Both grids now use dq/dx = 0; on the fixed grid this also lets the spectral
 pressure solver be used.
+
+Radiation of dispersive waves (issue #86)
+-----------------------------------------
+
+`dispersive_radiation.jl` (about 3 min): regular waves of k H = 0.3 to 3 (amplitude 2 mm, depth 0.5 m, 10 layers,
+40 cells per wavelength, 100 steps per period, theta = 0.7, wetting-drying step) from a velocity wave maker leave through
+the free outflow. |R| is fitted from the complex amplitude over the last 3.5 wavelengths before the face. Compared: the
+former condition (long-wave speed, dq/dx = 0) and the new options (`radiation_theta=true`,
+`nonhydro_open_face="radiation"`, `radiation_period` = the wave period, or the fixed period of k H = 1.2). The
+set-up is that of `test/test_open_boundary_radiation.jl`; theory and table in `docs/numerics_open_boundaries.md`,
+section 7.2.
+
+- `open_boundaries_dispersive_radiation.png`: |R| against k H. The new condition follows half the relative phase-speed
+  error of the interior (dashed), 0.03 % at k H = 0.3 and 1.5 % at k H = 1.2 (former: 0.93 % and 6.9 %); with a fixed
+  design period it is exact only near that period.

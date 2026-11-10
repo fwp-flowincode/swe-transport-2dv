@@ -143,6 +143,39 @@ Base.@kwdef mutable struct ModelConfig
     # with the rate sponge_rate * s^2 (1/s), s = 0 ... 1 the relative position in the layer (quadratic ramp, implicit).
     sponge_length::Float64 = 0.0
     sponge_rate::Float64 = 0.0
+    # Radiation condition of the free (and relaxed) open faces: the right outflow (right_free) and, in the wetting-drying
+    # step, the free left face (left_free) (issue #86, docs/numerics_open_boundaries.md sections 5 and 7):
+    # - radiation_theta: weight the radiation condition with the theta of the interior (true) instead of backward
+    #   Euler (false). WHY an option: false keeps the validated results of issues #46/#49/#54 bit for bit.
+    # - radiation_period (s): 0 = long-wave speed U + sqrt(g h); > 0 = phase speed of a wave of this absolute period
+    #   on the current U (in the direction of the outgoing wave), from (omega - k U)^2 = g k tanh(k h); requires the
+    #   pressure radiation below.
+    # - nonhydro_open_face: "neumann" (dq/dx = 0 at the open face, issue #49) or "radiation" (the non-hydrostatic pressure
+    #   of the face radiates, implicit in the pressure problem; wetting-drying step only).
+    radiation_theta::Bool = false
+    radiation_period::Float64 = 0.0
+    nonhydro_open_face::String = "neumann"
+    # Scheme of the free open faces (issue #86, docs/numerics_open_boundaries.md section 8): "radiation" (the radiation
+    # condition above, the default) or "characteristic" (wetting-drying step: natural condition, the face momentum plus
+    # open_face_beta c_beta d(eta_b - eta_N)/dt, and the essential condition on the incoming characteristic variable,
+    # with the drift correction of a relaxed face on that variable instead of the level).
+    # - open_face_beta (-): weight of the natural condition; -1/2 (box form) reflects (k dx)^3/64 instead of (k dx)^2/16.
+    # - open_face_wet_depth (m): below this depth of the boundary column (time n) beta is limited to -phi/c_beta, so
+    #   that the face keeps the free-surface matrix an M-matrix even if the column falls dry (section 8.4).
+    # - radiation_speed_factor (-): factor on the intrinsic phase speed of all radiation speeds (level, non-hydrostatic
+    #   pressure, characteristic speeds), c_r = U + f (c - U). WHY: the remaining reflection of the open face is half the
+    #   interior's phase-speed error (section 7.2); with f = c_num/c, the model's own phase speed of the design wave
+    #   (`numerical_phase_speed_factor`), the face radiates the wave that the model actually carries.
+    radiation_speed_factor::Float64 = 1.0
+    # - open_face_relaxation: what a relaxed free face (right/left_relaxation_time) relaxes: "level" (eta_b towards the
+    #   target level, the former relaxed outflow; reflects 1/sqrt(1 + 4 omega^2 tau^2)) or "incoming" (the incoming
+    #   characteristic variable c_out eta - Q_n towards c_out eta_T - Q_T,n, which an outgoing linear wave does not
+    #   change: no reflection at the design frequency; docs/numerics_open_boundaries.md section 8.1). The characteristic
+    #   scheme always relaxes the incoming variable.
+    open_face_relaxation::String = "level"
+    open_face_scheme::String = "radiation"
+    open_face_beta::Float64 = -0.5
+    open_face_wet_depth::Float64 = 0.1
     # Variable-thickness top layer (hydrostatic mode only): the top layer has the thickness dz + eta instead of
     # dz, its volume change d(eta)/dt enters the top-layer budgets, and the free surface is a material boundary
     # (zero flux through it). nothing (default) = automatic: on for the hydrostatic mode, off for the non-hydrostatic
@@ -276,6 +309,14 @@ function copy_config(cfg::ModelConfig)
         body_force_x=cfg.body_force_x,
         sponge_length=cfg.sponge_length,
         sponge_rate=cfg.sponge_rate,
+        radiation_theta=cfg.radiation_theta,
+        radiation_period=cfg.radiation_period,
+        nonhydro_open_face=cfg.nonhydro_open_face,
+        radiation_speed_factor=cfg.radiation_speed_factor,
+        open_face_relaxation=cfg.open_face_relaxation,
+        open_face_scheme=cfg.open_face_scheme,
+        open_face_beta=cfg.open_face_beta,
+        open_face_wet_depth=cfg.open_face_wet_depth,
         variable_top_layer=cfg.variable_top_layer,
         top_layer_min_fraction=cfg.top_layer_min_fraction,
         nonhydro_surface_dirichlet=cfg.nonhydro_surface_dirichlet,
@@ -1057,7 +1098,9 @@ end
 """
     set_x_inflow_outflow!(model, left_profile; left_discharge=nothing, left_level=nothing, left_rho=nothing,
                           open_right=true, right_profile=nothing, right_level=nothing, right_free=false,
-                          right_relaxation_time=nothing)
+                          right_relaxation_time=nothing, left_free=false, left_relaxation_time=nothing,
+                          right_target_discharge=nothing, left_target_discharge=nothing,
+                          right_incoming_level=nothing, left_incoming_level=nothing)
 
 Lateral boundary conditions: velocity `left_profile` (m/s, one value per layer) at the left boundary face, or with
 `left_discharge` q (m^2/s) the profile shape scaled to the discharge, u_k = q * left_profile_k / sum_j dZ_j left_profile_j
@@ -1094,7 +1137,33 @@ x = L (`_wd_face_bed`).
   angular frequency omega are reflected by |R| = 1/sqrt(1 + 4 omega^2 tau^2), and the mean level returns to eta_R
   within about tau (for tau >> L/sqrt(g H)). tau = Inf is `right_free`, tau -> 0 `right_level`.
 Both require `implicit_vertical_terms=true` and no `periodic_x`; in the non-hydrostatic mode (issue #49) the open face
-has dq/dx = 0 (`_check_right_level_config`, `_wd_nonhydrostatic_correction!`). `step_forward!` warns once when the
+has dq/dx = 0 (`_check_right_level_config`, `_wd_nonhydrostatic_correction!`).
+Dispersive waves (issue #86, docs/numerics_open_boundaries.md section 7; ModelConfig options): `radiation_theta`
+weights the radiation condition with theta; in the wetting-drying step `nonhydro_open_face="radiation"` lets the
+non-hydrostatic pressure of the face radiate as well, and `radiation_period` T gives both radiation conditions the
+phase speed of period T on the (filtered) current instead of the long-wave speed. A regular wave of k h = 1.2 then
+reflects 1.5 % instead of 6.9 %; other periods are reflected more (single-frequency condition). These options apply to
+both open ends.
+Characteristic open faces (`ModelConfig(open_face_scheme="characteristic")`, wetting-drying step, issue #86,
+docs/numerics_open_boundaries.md section 8): the free faces get the natural condition (face momentum plus the box term
+of `open_face_beta`) and the essential condition on the incoming characteristic variable c_out eta - Q_n (outward
+discharge); a relaxed face corrects that variable towards c_out eta_T - Q_T,n, with the target level (`right_level`,
+`left_level`) and `right_target_discharge` / `left_target_discharge` Q_T (m^2/s, positive in +x; default 0), which
+must be the discharge that passes, since the mean state of the face lies on that line. The same relaxation of the
+incoming variable for the radiation scheme: `ModelConfig(open_face_relaxation="incoming")`.
+Incoming waves (issue #86): `right_incoming_level` / `left_incoming_level` = t -> eta_in(t) (m, t in s), the level of
+the incoming wave at a free face; the face imposes it and radiates the rest (outgoing and reflected waves). Needs
+`radiation_theta=true` (radiation scheme); with the pressure radiation and `radiation_period` the face also carries the
+incoming wave's non-hydrostatic pressure (linear theory). `numerical_phase_speed_factor` gives the
+`radiation_speed_factor` that matches the radiation speed to the model's own phase speed.
+
+Free left face (`left_free=true`, wetting-drying step only, issue #86): the mirror of the right free outflow. Face 1
+gets its own level (radiation condition for the wave travelling in -x, `_update_left_free_level!`) and momentum equation
+(surface slope (eta_1 - eta_b)/(dx/2), baroclinic pressure gradient of face 2, ghost cell = first cell), and with
+`nonhydro_open_face="radiation"` its own radiating non-hydrostatic pressure. With `left_level` and
+`left_relaxation_time` the level relaxes to `left_level` (relaxed free face; without `left_free`, `left_level` keeps its
+meaning of a supercritical inlet level). Water may leave or enter through it; `left_discharge` and `left_free` exclude
+each other. `step_forward!` warns once when the
 Froude number at a boundary does not fit its type (`_check_boundary_froude!`), and once when a velocity inlet against a
 prescribed level can feed the mode of the reach (`_check_reach_mode_growth!`).
 """
@@ -1111,7 +1180,20 @@ function set_x_inflow_outflow!(
     right_level::Union{Nothing,Real}=nothing,
     right_free::Bool=false,
     right_relaxation_time::Union{Nothing,Real}=nothing,
+    left_free::Bool=false,
+    left_relaxation_time::Union{Nothing,Real}=nothing,
+    right_target_discharge::Union{Nothing,Real}=nothing,
+    left_target_discharge::Union{Nothing,Real}=nothing,
+    right_incoming_level::Union{Nothing,Function}=nothing,
+    left_incoming_level::Union{Nothing,Function}=nothing,
 )
+    if left_free
+        _set_left_free_boundary!(model, left_discharge, left_level, left_relaxation_time)
+        left_level = nothing   # the target of a relaxed free face, not the level of a supercritical inlet
+    else
+        left_relaxation_time === nothing || throw(ArgumentError("left_relaxation_time needs left_free=true and the target level left_level"))
+        model.wetdry === nothing || (model.wetdry.left_open = nothing)
+    end
     if left_discharge !== nothing
         if left_discharge isa Function
             model.wetdry === nothing && throw(ArgumentError("a time-dependent left_discharge requires ModelConfig(wetting_drying=true)"))
@@ -1134,6 +1216,9 @@ function set_x_inflow_outflow!(
     _set_inflow_density!(model, left_rho)
     _set_inflow_turbulence!(model, left_k, left_eps)
     _set_right_boundary!(model, open_right, right_profile, right_level, right_free, right_relaxation_time)
+    _set_target_discharges!(model, right_target_discharge, right_relaxation_time, left_target_discharge,
+        left_free ? left_relaxation_time : nothing)
+    _set_incoming_levels!(model, right_incoming_level, right_free, left_incoming_level, left_free)
     # WHY: the discharge scaling uses the level of time n in ws.eta_old (set by every step); before the first step it
     # is the initial level
     copyto!(model.ws.eta_old, model.state.eta)
@@ -1144,7 +1229,7 @@ end
 """
     set_x_inflow_outflow!(model, left_velocity::Function; open_right=false, right_profile=nothing, right_level=nothing,
                           right_free=false, right_relaxation_time=nothing, left_rho=nothing, left_k=nothing,
-                          left_eps=nothing)
+                          left_eps=nothing, right_target_discharge=nothing, right_incoming_level=nothing)
 
 Wetting-drying mode: time-dependent velocity at the left boundary face, `left_velocity(t)` (m/s; scalar or one value per
 layer) at the model time t (s) of the end of each step; dry layers of the face carry no flow. Right boundary, inflow
@@ -1161,6 +1246,8 @@ function set_x_inflow_outflow!(
     left_rho::Union{Nothing,Real,AbstractVector{<:Real}}=nothing,
     left_k::Union{Nothing,AbstractVector{<:Real}}=nothing,
     left_eps::Union{Nothing,AbstractVector{<:Real}}=nothing,
+    right_target_discharge::Union{Nothing,Real}=nothing,
+    right_incoming_level::Union{Nothing,Function}=nothing,
 )
     model.wetdry === nothing && throw(ArgumentError("a time-dependent boundary velocity requires ModelConfig(wetting_drying=true)"))
     model.wetdry.left_velocity = left_velocity
@@ -1170,6 +1257,8 @@ function set_x_inflow_outflow!(
     _set_inflow_density!(model, left_rho)
     _set_inflow_turbulence!(model, left_k, left_eps)
     _set_right_boundary!(model, open_right, right_profile, right_level, right_free, right_relaxation_time)
+    _set_target_discharges!(model, right_target_discharge, right_relaxation_time, nothing, nothing)
+    _set_incoming_levels!(model, right_incoming_level, right_free, nothing, false)
     return model
 end
 
@@ -1216,6 +1305,66 @@ function _set_inflow_turbulence!(model::Model, left_k, left_eps)
     if model.wetdry !== nothing
         model.wetdry.left_k = left_k === nothing ? nothing : Float64.(collect(left_k))
         model.wetdry.left_eps = left_eps === nothing ? nothing : Float64.(collect(left_eps))
+    end
+    return nothing
+end
+
+# Free (radiating) left face (issue #86): wetting-drying step only; no discharge (the face has its own momentum equation);
+# with left_level and left_relaxation_time the level relaxes to left_level (relaxed free face), as at the right.
+function _set_left_free_boundary!(model::Model, left_discharge, left_level, left_relaxation_time)
+    wd = model.wetdry
+    wd === nothing && throw(ArgumentError("left_free=true is implemented for wetting_drying=true only"))
+    left_discharge === nothing || throw(ArgumentError("left_free and left_discharge exclude each other (the free face computes its velocity)"))
+    model.config.nx >= 2 || throw(ArgumentError("left_free needs nx >= 2 (the slope of face 2)"))
+    _check_right_level_config(model.config)   # the same requirements as an open right face
+    relaxed = left_relaxation_time !== nothing
+    if relaxed
+        left_level === nothing && throw(ArgumentError("left_relaxation_time needs the target level left_level"))
+        left_relaxation_time > 0 || throw(ArgumentError("left_relaxation_time must be > 0 (Inf: no relaxation)"))
+        isfinite(left_level) || throw(ArgumentError("left_level must be finite"))
+    else
+        left_level === nothing || throw(ArgumentError("left_level and left_free exclude each other (unless left_relaxation_time is given: relaxed free face)"))
+    end
+    eta_b = _extrapolated_left_level(model.state.eta)
+    wd.left_open = OpenFaceState(eta_b, eta_b, 1.0, relaxed ? Float64(left_level) : 0.0,
+        relaxed ? Float64(left_relaxation_time) : Inf, NaN)
+    fill!(wd.q_left, 0.0)
+    return nothing
+end
+
+# Target discharges Q_T (m^2/s, positive in +x) of the drift correction of relaxed characteristic faces (issue #86,
+# docs/numerics_open_boundaries.md section 8.1): the mean state of such a face lies on c_out eta - Q_n = c_out eta_T -
+# Q_T,n, so the target must carry the discharge that passes (0 if not given).
+function _set_target_discharges!(model::Model, right_q, right_tau, left_q, left_tau)
+    for (q, tau, side) in ((right_q, right_tau, "right"), (left_q, left_tau, "left"))
+        q === nothing && continue
+        (model.wetdry !== nothing && (model.config.open_face_scheme == "characteristic" ||
+                                      model.config.open_face_relaxation == "incoming")) ||
+            throw(ArgumentError("$(side)_target_discharge needs wetting_drying=true and open_face_scheme=\"characteristic\" or open_face_relaxation=\"incoming\""))
+        tau === nothing && throw(ArgumentError("$(side)_target_discharge needs a relaxed free face ($(side)_free, $(side)_level, $(side)_relaxation_time)"))
+        isfinite(q) || throw(ArgumentError("$(side)_target_discharge must be finite"))
+    end
+    if model.wetdry !== nothing
+        model.wetdry.char_right.target_discharge = right_q === nothing ? 0.0 : Float64(right_q)
+        model.wetdry.char_left.target_discharge = left_q === nothing ? 0.0 : Float64(left_q)
+    end
+    return nothing
+end
+
+# Incoming waves of the free faces (issue #86): eta_in(t) (m) at the face, imposed while the outgoing waves radiate
+# (`_radiation_face_dirichlet`, `_wd_characteristic_dirichlet!`, `_add_incoming_pressure!`).
+function _set_incoming_levels!(model::Model, right_f, right_free::Bool, left_f, left_free::Bool)
+    for (f, free, side) in ((right_f, right_free, "right"), (left_f, left_free, "left"))
+        f === nothing && continue
+        model.wetdry === nothing && throw(ArgumentError("$(side)_incoming_level needs wetting_drying=true"))
+        free || throw(ArgumentError("$(side)_incoming_level needs a free face ($(side)_free=true)"))
+        (model.config.open_face_scheme == "characteristic" || model.config.radiation_theta) ||
+            throw(ArgumentError("$(side)_incoming_level needs radiation_theta=true (or open_face_scheme=\"characteristic\")"))
+        isfinite(f(model.wetdry.time)) || throw(ArgumentError("$(side)_incoming_level must be finite"))
+    end
+    if model.wetdry !== nothing
+        model.wetdry.char_right.incoming = right_f
+        model.wetdry.char_left.incoming = left_f
     end
     return nothing
 end
@@ -1280,6 +1429,7 @@ function clear_x_inflow_outflow!(model::Model)
     if model.wetdry !== nothing
         model.wetdry.left_k = nothing
         model.wetdry.left_eps = nothing
+        model.wetdry.left_open = nothing
     end
     model.x_boundary_u_right_open = false
     model.x_boundary_u_right_profile = nothing
@@ -1296,6 +1446,31 @@ function _check_model_config(cfg::ModelConfig)
     cfg.advective_courant_warning > 0.0 ||
         throw(ArgumentError("advective_courant_warning must be > 0 (Inf: no warning), got $(cfg.advective_courant_warning)"))
     cfg.wetting_drying && _check_wetting_drying_config(cfg)
+    cfg.nonhydro_open_face in ("neumann", "radiation") ||
+        throw(ArgumentError("nonhydro_open_face must be \"neumann\" or \"radiation\", got \"$(cfg.nonhydro_open_face)\""))
+    cfg.nonhydro_open_face == "radiation" && !cfg.wetting_drying &&
+        throw(ArgumentError("nonhydro_open_face=\"radiation\" is implemented for wetting_drying=true only"))
+    (isfinite(cfg.radiation_period) && cfg.radiation_period >= 0.0) ||
+        throw(ArgumentError("radiation_period must be >= 0 (0: long-wave speed), got $(cfg.radiation_period)"))
+    # WHY: with dq/dx = 0 at the face (or without a non-hydrostatic pressure) the face has the long-wave impedance, and a
+    # level radiating with the dispersive phase speed reflects more than the long-wave speed (measured: 15.6 % instead of
+    # 6.9 % at k h = 1.2; docs/numerics_open_boundaries.md, section 7)
+    cfg.radiation_period > 0.0 && !(cfg.nonhydro_open_face == "radiation" && !cfg.use_hydrostatic) &&
+        throw(ArgumentError("radiation_period > 0 needs use_hydrostatic=false and nonhydro_open_face=\"radiation\""))
+    (isfinite(cfg.radiation_speed_factor) && RADIATION_SPEED_FACTOR_RANGE[1] <= cfg.radiation_speed_factor <= RADIATION_SPEED_FACTOR_RANGE[2]) ||
+        throw(ArgumentError("radiation_speed_factor must lie in $(RADIATION_SPEED_FACTOR_RANGE), got $(cfg.radiation_speed_factor)"))
+    cfg.open_face_relaxation in ("level", "incoming") ||
+        throw(ArgumentError("open_face_relaxation must be \"level\" or \"incoming\", got \"$(cfg.open_face_relaxation)\""))
+    cfg.open_face_relaxation == "incoming" && !cfg.wetting_drying &&
+        throw(ArgumentError("open_face_relaxation=\"incoming\" is implemented for wetting_drying=true only"))
+    cfg.open_face_scheme in ("radiation", "characteristic") ||
+        throw(ArgumentError("open_face_scheme must be \"radiation\" or \"characteristic\", got \"$(cfg.open_face_scheme)\""))
+    cfg.open_face_scheme == "characteristic" && !cfg.wetting_drying &&
+        throw(ArgumentError("open_face_scheme=\"characteristic\" is implemented for wetting_drying=true only"))
+    (isfinite(cfg.open_face_beta) && -1.0 <= cfg.open_face_beta <= 0.0) ||
+        throw(ArgumentError("open_face_beta must lie in [-1, 0], got $(cfg.open_face_beta)"))
+    (isfinite(cfg.open_face_wet_depth) && cfg.open_face_wet_depth >= 0.0) ||
+        throw(ArgumentError("open_face_wet_depth must be >= 0 (m), got $(cfg.open_face_wet_depth)"))
     if cfg.periodic_x && use_variable_top_layer(cfg)
         throw(ArgumentError("periodic_x=true is not supported with the variable top layer"))
     end
@@ -1382,7 +1557,9 @@ function _apply_x_boundary_conditions!(model::Model, u::AbstractMatrix{<:Real})
         return nothing
     end
 
-    if model.x_boundary_u_left_profile === nothing
+    if _left_face_computed(model)
+        # free left face (issue #86): u of the boundary face comes from its own momentum equation
+    elseif model.x_boundary_u_left_profile === nothing
         @views u[:, 1] .= 0.0
     else
         left_profile = model.x_boundary_u_left_profile
@@ -1542,6 +1719,13 @@ end
 # transient; only a clear mismatch (a level prescribed at an outflow with Fr > 1.05, a level at an inflow with Fr < 0.95)
 # means the boundary type is wrong.
 const BOUNDARY_FROUDE_MARGIN = 0.05
+const RADIATION_NEWTON_ITERATIONS = 50   # -, Newton steps of the Doppler dispersion relation (_radiation_speed)
+const RADIATION_NEWTON_RTOL = 1e-12      # -, relative step at which that Newton iteration stops
+const RADIATION_SPEED_FACTOR_RANGE = (0.5, 2.0)   # -, admissible radiation_speed_factor (c_num/c is within a few %)
+# Calibration of the model's phase speed (numerical_phase_speed_factor): standing wave in a closed basin
+const PHASE_CALIBRATION_AMPLITUDE = 1e-3   # -, wave amplitude / depth (linear)
+const PHASE_CALIBRATION_PERIODS = 6        # -, periods simulated; the zero crossings of all but the first are used
+const PHASE_CALIBRATION_MIN_CELLS = 8      # -, fewest cells per wavelength of the calibration basin
 
 # Warns once per model when the Froude number at an open boundary does not fit its type (issue #46): a prescribed level
 # at a supercritical outflow over-specifies it (use right_free=true); a prescribed level at a subcritical inflow does too
@@ -1897,7 +2081,9 @@ function _update_free_outflow_level!(model::Model)
     nx = cfg.nx
     eta = model.state.eta
     U, depth = _face_velocity_depth(model, nx + 1)
+    U_rad = _update_radiation_current!(model, U)   # m/s, current of the radiation speed (U itself for period 0)
     celerity = depth > 0.0 ? sqrt(cfg.g * depth) : 0.0   # m/s, long-wave speed (0 for a dry face)
+    _prepare_characteristic_face!(model, :right, U >= celerity, U_rad, depth)
     if U >= celerity
         # supercritical: the level of the face is the interior one, extrapolated (time n)
         model.x_boundary_eta_free = _extrapolated_right_level(eta)
@@ -1906,18 +2092,349 @@ function _update_free_outflow_level!(model::Model)
     end
     bed = model.wetdry === nothing ? model.geometry.bed_level : model.wetdry.bed
     s_bed = (bed[nx] - bed[nx - 1]) / model.dx   # -, slope of a bed-parallel surface (eta rises with the bed)
-    mu = (U + celerity) * cfg.dt / (0.5 * model.dx)   # >= 0 (U > -celerity: not a supercritical inflow)
-    mu = max(mu, 0.0)
-    r = cfg.dt / model.x_boundary_relaxation_time   # -, relaxation to the target level (0: none)
-    eta_eff = (model.x_boundary_eta_free + mu * s_bed * 0.5 * model.dx + r * model.x_boundary_eta_target) / (1.0 + r)
-    model.x_boundary_free_dirichlet = (eta_eff, (1.0 + r) / (1.0 + mu + r))
+    # radiation speed: U + sqrt(g h), or with radiation_period > 0 the phase speed of that period (issue #86; the
+    # same speed as the pressure radiation of the face, so that the hydrostatic and the non-hydrostatic part of the
+    # outgoing wave leave together)
+    char = model.wetdry === nothing ? nothing : model.wetdry.char_right
+    model.x_boundary_free_dirichlet = _radiation_face_dirichlet(model, char, model.x_boundary_eta_free, eta[nx], s_bed,
+        U * depth, U_rad, depth, model.x_boundary_relaxation_time, model.x_boundary_eta_target, 1.0)
     return nothing
+end
+
+"""
+    _radiation_face_dirichlet(model, char, eta_b, eta_N, s_bed, Q_out, U_out, depth, tau, eta_T, n) -> (eta_eff, w)
+
+Dirichlet form of the radiation condition of a free face (right n = 1, left n = -1) at time n: face level eta_b (m),
+adjacent cell level eta_N (m), bed-parallel slope s_bed (-), outward discharge Q_out = Q_n^n (m^2/s), current U_out (m/s)
+in the direction of the outgoing wave, face depth (m), relaxation time tau (s; Inf: none) and target level eta_T (m).
+The radiation speed is c_out = `_radiation_speed`(U_out) (mu = c_out dt/(dx/2)).
+- Without incoming wave and with `open_face_relaxation="level"`: `_radiation_dirichlet` as before (bit for bit).
+- Incoming wave eta_in(t) (`right_incoming_level` / `left_incoming_level`, issue #86): the face radiates the
+  deviation from it, eta - eta_in, at the face and at the adjacent cell centre (`_prepare_incoming!`), so that it imposes
+  the incoming wave and radiates the rest; a relaxed level then relaxes towards eta_T + eta_in.
+- `open_face_relaxation="incoming"`: instead of the level, the incoming characteristic variable w_in = c_out eta - Q_n
+  is relaxed, explicitly: eta_eff -= (dt/tau) (w_in^n - w_T)/c_out with w_T = c_out eta_T - Q_T,n + (c_out + c_in)
+  eta_in (Q_T: `right_target_discharge` / `left_target_discharge`). An outgoing wave has Q_n' = c_out eta' (with
+  c_out the model's phase speed, `radiation_speed_factor`), so w_in and the relaxation do not see it
+  (docs/numerics_open_boundaries.md section 8.1).
+"""
+function _radiation_face_dirichlet(model::Model, char::Union{Nothing,CharacteristicFaceState}, eta_b::Real, eta_N::Real,
+        s_bed::Real, Q_out::Real, U_out::Real, depth::Real, tau::Real, eta_T::Real, n::Real)
+    cfg = model.config
+    half = 0.5 * model.dx
+    c_out = max(_radiation_speed(cfg, U_out, depth), 0.0)   # >= 0 (U > -celerity: not a supercritical inflow)
+    mu = _level_radiation_speed(cfg, c_out, U_out) * cfg.dt / half
+    incoming_relax = cfg.open_face_relaxation == "incoming"
+    r = incoming_relax ? 0.0 : cfg.dt / tau   # -, relaxation of the level (0: none)
+    (char === nothing || (char.incoming === nothing && !incoming_relax)) &&
+        return _radiation_dirichlet(cfg, eta_b, eta_N, s_bed, half, mu, r, eta_T)
+    c_in = _radiation_speed(cfg, -U_out, depth)
+    char.u_out = U_out
+    _prepare_incoming!(model, char, c_in)
+    eta_eff, weight = _radiation_dirichlet(cfg, eta_b, eta_N, s_bed, half, mu, r, eta_T;
+        e_b_old=char.e_b_old, e_b_new=char.e_b_new, e_n_old=char.e_n_old, e_n_new=char.e_n_new)
+    if incoming_relax && isfinite(tau) && c_out > 0.0
+        w_target = c_out * eta_T - n * char.target_discharge + (c_out + c_in) * char.e_b_old
+        eta_eff -= (cfg.dt / tau) * (c_out * eta_b - Q_out - w_target) / c_out
+    end
+    return eta_eff, weight
+end
+
+"""
+    _level_radiation_speed(cfg, c_out, U_out) -> m/s
+
+Speed with which the level (and the non-hydrostatic pressure) of a free face radiates, from the absolute speed c_out
+(m/s) of the outgoing wave and the current U_out (m/s) in its direction. With `radiation_theta=true` and a current that
+enters through the face (U_out < 0): the intrinsic speed c_out - U_out. WHY: the face momentum has no advection then
+(the outer face carries the zero-gradient flux of the inflow), so the face does not carry the wave with the current;
+the characteristic form of the face (docs/numerics_open_boundaries.md section 8) gives the intrinsic speed for that
+face momentum. Measured with a current of 0.16 m/s entering (k h = 0.3, hydrostatic): 4.0 % reflection with U + c,
+0.22 % with c. Otherwise c_out (the former speed; outflow: the face momentum advects with the current).
+"""
+_level_radiation_speed(cfg::ModelConfig, c_out::Real, U_out::Real) =
+    (cfg.radiation_theta && U_out < 0.0) ? c_out - U_out : c_out
+
+"""
+    _prepare_incoming!(model, char, c_in)
+
+Incoming wave of an open face for this step (issue #86): eta_in (m) at the face at the start and the end of the step,
+and at the adjacent cell centre, where the incoming wave of speed c_in (m/s, absolute, into the domain) arrives
+(dx/2)/c_in later: eta_in(t - (dx/2)/c_in). The wave number of the incoming design wave, k_in = omega/c_in (rad/m;
+0 without `radiation_period`), gives its non-hydrostatic pressure (`_incoming_pressure_profile`). Zero without an
+incoming wave.
+"""
+function _prepare_incoming!(model::Model, char::CharacteristicFaceState, c_in::Real)
+    cfg = model.config
+    f = char.incoming
+    if f === nothing
+        char.e_b_old = char.e_b_new = char.e_n_old = char.e_n_new = char.e_g = char.k_in = 0.0
+        return nothing
+    end
+    t, dt = model.wetdry.time, cfg.dt
+    lag = c_in > 0.0 ? 0.5 * model.dx / c_in : 0.0   # s
+    char.e_b_old, char.e_b_new = f(t), f(t + dt)
+    char.e_n_old, char.e_n_new = f(t - lag), f(t + dt - lag)
+    char.e_g = f(t + 2.0 * lag)   # m, one cell outside (the ghost node of the inflow advection), time n
+    char.c_in = c_in
+    all(isfinite, (char.e_b_old, char.e_b_new, char.e_n_old, char.e_n_new)) ||
+        throw(DomainError(t, "the incoming level of an open face is not finite at t = $t s"))
+    char.k_in = (cfg.radiation_period > 0.0 && c_in > 0.0) ? 2pi / cfg.radiation_period / c_in : 0.0
+    return nothing
+end
+
+"""
+    _radiation_dirichlet(cfg, eta_b, eta_in, s_bed, half, mu, r, eta_target) -> (eta_eff, w)
+
+Dirichlet form of the radiation condition of an open face (both ends, issues #46, #54, #86): the face level eta_b (m) at
+half = dx/2 (m) from the adjacent cell centre with level eta_in (m), the bed-parallel slope s_bed (-, towards the face),
+mu = c dt/(dx/2) (-) and r = dt/tau (-) of the relaxation to eta_target (m):
+- backward Euler: eta_b^{n+1} (1 + mu + r) = eta_b^n + mu (eta_in^{n+1} + s_bed dx/2) + r eta_target;
+- theta-weighted (`radiation_theta`, issue #86): eta_b^{n+1} - eta_b^n = -mu [theta (eta_b - eta_in - s_bed dx/2)^{n+1}
+  + (1 - theta) (eta_b - eta_in - s_bed dx/2)^n] - r (eta_b^{n+1} - eta_target).
+Both read eta_b^{n+1} = eta_in^{n+1} + w (eta_eff - eta_in^{n+1}) with w = (1 + r)/(1 + mu + r), resp.
+(1 + r)/(1 + theta mu + r) > 0 (`_right_boundary_dirichlet`). WHY theta: the interior and the face momentum act at
+n + theta; a radiation condition at n + 1 shifts the boundary level by (1 - theta) omega dt and reflects
+|R| ~ (1 - theta)/2 Cr k dx; weighted like the interior it reflects tan^2(k dx/4) (docs/numerics_open_boundaries.md,
+section 5). The backward-Euler arithmetic is that of issues #46/#54 term for term (bit for bit).
+"""
+function _radiation_dirichlet(cfg::ModelConfig, eta_b::Real, eta_in::Real, s_bed::Real, half::Real, mu::Real, r::Real,
+        eta_target::Real; e_b_old::Real=0.0, e_b_new::Real=0.0, e_n_old::Real=0.0, e_n_new::Real=0.0)
+    if cfg.radiation_theta
+        th = cfg.theta
+        if e_b_old == e_b_new == e_n_old == e_n_new == 0.0
+            explicit = eta_b - (1.0 - th) * mu * (eta_b - eta_in - s_bed * half)
+            return ((explicit + th * mu * s_bed * half + r * eta_target) / (1.0 + r), (1.0 + r) / (1.0 + th * mu + r))
+        end
+        # incoming wave (issue #86): the radiation condition for the deviation eta - eta_in, with eta_in = e_b at the face
+        # and e_n at the cell centre; the level relaxes towards eta_target + e_b
+        explicit = eta_b + (e_b_new - e_b_old) - (1.0 - th) * mu * ((eta_b - e_b_old) - (eta_in - e_n_old) - s_bed * half) +
+                   th * mu * (e_b_new - e_n_new)
+        return ((explicit + th * mu * s_bed * half + r * (eta_target + e_b_new)) / (1.0 + r), (1.0 + r) / (1.0 + th * mu + r))
+    end
+    (e_b_old == e_b_new == e_n_old == e_n_new == 0.0) ||
+        throw(ArgumentError("an incoming wave at an open face needs radiation_theta=true"))
+    return ((eta_b + mu * s_bed * half + r * eta_target) / (1.0 + r), (1.0 + r) / (1.0 + mu + r))
+end
+
+"""
+    _update_left_free_level!(model)
+
+Free (radiating) left face of the wetting-drying step (`set_x_inflow_outflow!(...; left_free=true)`, issue #86): the
+mirror of `_update_free_outflow_level!`. The outgoing wave travels in -x with the speed c = -U + sqrt(g h), or with
+`radiation_period` the phase speed of that period on the current -U (U the depth-mean face velocity, positive into the
+domain; filtered over the period). Supercritical outflow to the left (-U >= sqrt(g h)): the level extrapolated linearly
+to x = 0. Otherwise the radiation condition of `_radiation_dirichlet` towards the first cell centre, with the bed-parallel
+slope s_bed = (z_b,1 - z_b,2)/dx and the relaxation to the target level of a relaxed free face.
+"""
+function _update_left_free_level!(model::Model)
+    cfg = model.config
+    face = model.wetdry.left_open
+    eta = model.state.eta
+    U, depth = _face_velocity_depth(model, 1)
+    U_out = -U   # m/s, velocity in the direction of the outgoing wave
+    if cfg.radiation_period > 0.0
+        r_f = cfg.dt / cfg.radiation_period
+        face.u_mean = isnan(face.u_mean) ? U_out : (face.u_mean + r_f * U_out) / (1.0 + r_f)
+        U_out = face.u_mean
+    end
+    celerity = depth > 0.0 ? sqrt(cfg.g * depth) : 0.0
+    _prepare_characteristic_face!(model, :left, -U >= celerity, U_out, depth)
+    if -U >= celerity
+        face.eta_b = _extrapolated_left_level(eta)
+        face.eta_eff, face.weight = face.eta_b, 1.0
+        return nothing
+    end
+    bed = model.wetdry.bed
+    s_bed = (bed[1] - bed[2]) / model.dx   # -, slope of a bed-parallel surface towards x = 0
+    face.eta_eff, face.weight = _radiation_face_dirichlet(model, model.wetdry.char_left, face.eta_b, eta[1], s_bed,
+        -U * depth, U_out, depth, face.relaxation_time, face.eta_target, -1.0)
+    return nothing
+end
+
+# Free left face after the free-surface solve: eta_b^{n+1} = eta_1^{n+1} + w (eta_eff - eta_1^{n+1}); for a
+# characteristic face with its level weight (_wd_characteristic_dirichlet!).
+function _finish_left_free_level!(model::Model)
+    face = model.wetdry.left_open
+    eta_1 = model.state.eta[1]
+    char = model.wetdry.char_left
+    weight = _characteristic_active(model, char) ? char.level_weight : face.weight
+    face.eta_b = eta_1 + weight * (face.eta_eff - eta_1)
+    return nothing
+end
+
+"""
+    _prepare_characteristic_face!(model, side, supercritical, U_out, depth)
+
+Characteristic open face (`open_face_scheme="characteristic"`, issue #86, docs/numerics_open_boundaries.md section 8),
+before the step: whether the face is active (subcritical; a supercritical outflow keeps the extrapolated level of the
+radiation scheme), and the absolute speeds of its outgoing and incoming waves, c_out = `_radiation_speed`(U_out) and
+c_in = `_radiation_speed`(-U_out) (m/s): U_out (m/s) is the (filtered) current in the direction of the outgoing wave,
+depth (m) that of the face. Long waves: c_out = U_out + sqrt(g h), c_in = sqrt(g h) - U_out; with `radiation_period`
+the phase speeds of that period. The Dirichlet form of the face is set in the free-surface solve
+(`_wd_characteristic_dirichlet!`), since it needs the predictor of the step.
+"""
+function _prepare_characteristic_face!(model::Model, side::Symbol, supercritical::Bool, U_out::Real, depth::Real)
+    cfg = model.config
+    (cfg.open_face_scheme == "characteristic" && model.wetdry !== nothing) || return nothing
+    char = side === :right ? model.wetdry.char_right : model.wetdry.char_left
+    char.c_out = _radiation_speed(cfg, U_out, depth)
+    char.c_in = _radiation_speed(cfg, -U_out, depth)
+    char.u_out = U_out
+    # WHY c_in > 0: the incoming characteristic must enter (subcritical); a supercritical inflow is not supported
+    char.active = !supercritical && depth > 0.0 && char.c_in > 0.0
+    return nothing
+end
+
+# Whether an open face uses the characteristic scheme in this step (subcritical, scheme selected).
+_characteristic_active(model::Model, char::CharacteristicFaceState) =
+    model.config.open_face_scheme == "characteristic" && char.active
+
+# Level (m) at x = 0 extrapolated linearly from the first two cell centres (mirror of _extrapolated_right_level).
+_extrapolated_left_level(eta::AbstractVector{<:Real}) = 1.5 * eta[1] - 0.5 * eta[2]
+
+# Whether the left boundary face is a free (radiating) face with its own momentum equation (wetting-drying step).
+_left_face_computed(model::Model) = model.wetdry !== nothing && model.wetdry.left_open !== nothing
+
+# Surface slope (1) at the free left face: time n (old=true) from the face level of time n, or the implicit slope of
+# time n + 1, w (eta_1^{n+1} - eta_eff)/(dx/2) (the mirror of _right_boundary_slope).
+function _left_boundary_slope(eta::AbstractVector{<:Real}, model::Model, dx::Real; old::Bool=false)
+    face = model.wetdry.left_open
+    old && return (eta[1] - face.eta_b) / (0.5 * dx)
+    return face.weight * (eta[1] - face.eta_eff) / (0.5 * dx)
+end
+
+"""
+    _update_radiation_current!(model, U) -> U_rad (m/s)
+
+Current that Doppler-shifts the radiation speed of the open right face (issue #86). With `radiation_period` T > 0
+(wetting-drying step): the face depth-mean velocity U low-pass filtered over T, implicit,
+U_rad^{n+1} = (U_rad^n + (dt/T) U)/(1 + dt/T), started at U. WHY: the instantaneous U contains the orbital velocity of the
+wave itself (about +-a omega/(k h), +-0.2 m/s for Klopman's waves), which does not shift the wave's own phase speed and
+would modulate it at the wave frequency. With T = 0: U (the long-wave characteristic speed U + sqrt(g h) is nonlinear in U
+by design).
+"""
+function _update_radiation_current!(model::Model, U::Real)
+    T = model.config.radiation_period
+    wd = model.wetdry
+    (T > 0.0 && wd !== nothing) || return U
+    r = model.config.dt / T
+    wd.u_right_mean = isnan(wd.u_right_mean) ? U : (wd.u_right_mean + r * U) / (1.0 + r)
+    return wd.u_right_mean
+end
+
+"""
+    _radiation_speed(cfg, U, depth) -> c (m/s)
+
+Speed of the outgoing wave at the open right face for the radiation of the non-hydrostatic pressure (issue #86): the
+long-wave speed U + sqrt(g h) for `radiation_period = 0`, otherwise the absolute phase speed omega/k of a wave of
+period T on the depth-mean current U (m/s) in depth h (m), with k from the Doppler-shifted linear dispersion relation
+(omega - k U)^2 = g k tanh(k h), omega = 2 pi / T (Newton; e.g. Jonsson 1990, eq. not checked). Valid for |U| below the
+blocking velocity of the wave; for U >= sqrt(g h) the long-wave speed is returned.
+"""
+function _radiation_speed(cfg::ModelConfig, U::Real, depth::Real)
+    depth > 0.0 || return 0.0
+    c0 = sqrt(cfg.g * depth)
+    factor = cfg.radiation_speed_factor   # -, c_num/c of the model (WHY == 1 apart: the former arithmetic bit for bit)
+    (cfg.radiation_period > 0.0 && U < c0) || return factor == 1.0 ? U + c0 : U + factor * c0
+    omega = 2pi / cfg.radiation_period
+    k = omega / (U + c0)   # rad/m, long-wave start: (omega - k U)^2 = g k tanh(k h) has the root k >= this one
+    for _ in 1:RADIATION_NEWTON_ITERATIONS
+        sigma = omega - k * U
+        f = sigma^2 - cfg.g * k * tanh(k * depth)
+        df = -2.0 * U * sigma - cfg.g * tanh(k * depth) - cfg.g * k * depth / cosh(k * depth)^2
+        step = f / df
+        k -= step
+        abs(step) <= RADIATION_NEWTON_RTOL * k && break
+    end
+    return factor == 1.0 ? omega / k : U + factor * (omega / k - U)
+end
+
+"""
+    numerical_phase_speed_factor(cfg; current=0.0) -> f (-)
+
+Ratio of the model's intrinsic phase speed to the linear-theory one for the wave of period `cfg.radiation_period` (s)
+in depth `cfg.depth` (m) on a uniform `current` (m/s, in the direction of the wave; the absolute speed is then
+U + f (c - U)), with the vertical and horizontal resolution, time step, theta and pressure options of `cfg`
+(wetting-drying step). For a face that absorbs waves travelling against the current, pass that (negative) current: the
+waves are shorter there and the model's dispersion error larger. Pass it as `radiation_speed_factor`: the open faces then radiate the wave that the model
+carries, and their remaining reflection is no longer the interior's dispersion error (issue #86,
+docs/numerics_open_boundaries.md section 7.2: at k h = 1.2 with 10 layers 1.49 % with c, 0.15 % with c_num).
+
+Method: a standing wave eta = a cos(k x) of one wavelength in a closed basin with the grid spacing dx = length/nx of
+`cfg` (the wavelength rounded to whole cells, at least PHASE_CALIBRATION_MIN_CELLS; amplitude
+PHASE_CALIBRATION_AMPLITUDE times the depth, flat bed, uniform density), run over PHASE_CALIBRATION_PERIODS periods. The
+period follows from the zero crossings of the level in the first column (linear interpolation between steps), and
+c_num = omega_num / k is compared with sqrt(g tanh(k h)/k) at the same k. A standing wave in a closed basin is an exact
+discrete mode of the interior scheme (walls at the faces), so the factor is that of a progressive wave of the same k;
+it is applied as a factor on the intrinsic phase speed, also on a current. Cost: one small run (one wavelength).
+"""
+function numerical_phase_speed_factor(cfg::ModelConfig; current::Real=0.0)
+    cfg.wetting_drying || throw(ArgumentError("numerical_phase_speed_factor needs wetting_drying=true"))
+    cfg.radiation_period > 0.0 || throw(ArgumentError("numerical_phase_speed_factor needs radiation_period > 0 (the design wave)"))
+    h, g = cfg.depth, cfg.g
+    omega = 2pi / cfg.radiation_period
+    lin = copy_config(cfg)
+    lin.radiation_speed_factor = 1.0
+    isfinite(current) && abs(current) < sqrt(g * h) || throw(ArgumentError("current must be subcritical, got $(current) m/s"))
+    c_abs = _radiation_speed(lin, current, h)   # m/s, linear-theory absolute phase speed on the current
+    k = omega / c_abs   # rad/m, its wave number (Doppler-shifted)
+    dx = cfg.length / cfg.nx
+    ncell = max(PHASE_CALIBRATION_MIN_CELLS, round(Int, 2pi / k / dx))
+    L = ncell * dx
+    kc = 2pi / L   # rad/m, wave number of the calibration basin
+    cal = copy_config(lin)
+    cal.nx, cal.length = ncell, L
+    cal.bed_level = zeros(ncell)
+    cal.write_plots = false
+    cal.sponge_length = 0.0
+    cal.body_force_x = 0.0
+    model = Model(cal)
+    fill!(model.state.rho, cal.rho0)
+    refresh_density_metadata!(model)
+    xc = ((1:ncell) .- 0.5) .* dx
+    initialize_water_level!(model, h .+ PHASE_CALIBRATION_AMPLITUDE * h .* cos.(kc .* xc))
+    set_x_inflow_outflow!(model, zeros(cal.nz); open_right=false)
+    T_guess = 2pi / (kc * sqrt(g * tanh(kc * h) / kc))
+    nsteps = round(Int, PHASE_CALIBRATION_PERIODS * T_guess / cal.dt)
+    crossings = Float64[]
+    prev = PHASE_CALIBRATION_AMPLITUDE * h
+    for n in 1:nsteps
+        step_forward!(model)
+        cur = water_depth(model)[1] - h
+        if (prev > 0.0) != (cur > 0.0)
+            push!(crossings, (n - 1 + prev / (prev - cur)) * cal.dt)
+        end
+        prev = cur
+    end
+    length(crossings) >= 4 || throw(ErrorException("numerical_phase_speed_factor: too few zero crossings ($(length(crossings)))"))
+    # WHY skip the first crossing: the start excites small parasitic modes that have decayed by then (theta damping)
+    half_periods = diff(crossings[2:end])
+    T_num = 2.0 * sum(half_periods) / length(half_periods)
+    ratio = (2pi / T_num) / (kc * sqrt(g * tanh(kc * h) / kc))   # -, 1 + eps: sigma_num/sigma at the fixed k
+    # WHY the conversion: the radiation condition needs the phase speed at the fixed (absolute) frequency of the design
+    # wave, c_num = omega/k_num with omega - k_num U = sigma_num(k_num). With sigma_num(k) = (1 + eps) sigma_lin(k) near k
+    # (the Doppler term k U taken as exact), k_num solves (omega - k U)^2 = (1 + eps)^2 g k tanh(k h) (Newton from k);
+    # about 1 + eps c/c_g on still water: 1.39 eps at k h = 1.2, where the factor at the fixed k alone left 0.35 %
+    # instead of 0.15 %. The factor applies to the intrinsic speed: U + f (c - U) = omega/k_num.
+    U = Float64(current)
+    kn = k
+    for _ in 1:RADIATION_NEWTON_ITERATIONS
+        sigma = omega - kn * U
+        res = sigma^2 - ratio^2 * g * kn * tanh(kn * h)
+        dres = -2.0 * U * sigma - ratio^2 * g * (tanh(kn * h) + kn * h / cosh(kn * h)^2)
+        step = res / dres
+        kn -= step
+        abs(step) <= RADIATION_NEWTON_RTOL * kn && break
+    end
+    return (omega / kn - U) / (c_abs - U)
 end
 
 # Free outflow after the free-surface solve: the level of the boundary face at n + 1 from its Dirichlet condition,
 # eta_b^{n+1} = eta_nx^{n+1} + w (eta_eff - eta_nx^{n+1}) (_update_free_outflow_level!).
 function _finish_free_outflow_level!(model::Model)
     eta_eff, weight = model.x_boundary_free_dirichlet
+    wd = model.wetdry
+    wd !== nothing && _characteristic_active(model, wd.char_right) && (weight = wd.char_right.level_weight)
     eta_nx = model.state.eta[end]
     model.x_boundary_eta_free = eta_nx + weight * (eta_eff - eta_nx)
     return nothing
@@ -2085,9 +2602,11 @@ function _step_forward!(model::Model)
     end
     # free outflow: radiated level of the boundary face for this step, from the state of time n
     model.x_boundary_right_free && _update_free_outflow_level!(model)
+    _left_face_computed(model) && _update_left_free_level!(model)   # free left face (issue #86)
     if cfg.wetting_drying
         _step_forward_wetting_drying!(model)
         model.x_boundary_right_free && _finish_free_outflow_level!(model)
+        _left_face_computed(model) && _finish_left_free_level!(model)
         _check_surface_froude!(model)
         return nothing
     end
