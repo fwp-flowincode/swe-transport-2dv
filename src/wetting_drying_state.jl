@@ -51,6 +51,48 @@ mutable struct OpenFaceState
     u_mean::Float64
 end
 
+"""
+    CharacteristicFaceState
+
+Per-step data of an open face with `open_face_scheme="characteristic"` (issue #86, docs/numerics_open_boundaries.md
+section 8), right or left:
+- `active`: subcritical this step (false: not open, or supercritical outflow with the extrapolated level);
+- `c_out`, `c_in` (m/s): absolute speeds of the outgoing and the incoming wave (long-wave or design-period phase speeds);
+- `beta` (-): the weight of the natural condition this step (limited at a shallow boundary column);
+- `d_old` (m): D^n = eta_b^n - eta_N^n, the face level minus the adjacent cell level;
+- `phi` (m/s): theta g dt H_f/(dx/2) of the face;
+- `level_weight` (-): eta_b^{n+1} = eta_N^{n+1} + level_weight (eta_eff - eta_N^{n+1}) (the flux weight differs for
+  beta != 0);
+- `target_discharge` (m^2/s, positive in +x): Q_T of the drift correction (relaxed face).
+Incoming wave of an open face (`right_incoming_level` / `left_incoming_level`, both schemes; issue #86):
+- `incoming`: nothing, or the level eta_in(t) (m) of the incoming wave at the face as a function of the time t (s);
+- `e_b_old`, `e_b_new` (m): eta_in at the face at the start and the end of the step;
+- `e_n_old`, `e_n_new` (m): the same at the adjacent cell centre, eta_in(t - (dx/2)/c_in) (the incoming wave arrives
+  there half a cell later);
+- `k_in` (rad/m): wave number of the incoming design wave (0 without `radiation_period`), for its non-hydrostatic
+  pressure.
+"""
+mutable struct CharacteristicFaceState
+    active::Bool
+    c_out::Float64
+    c_in::Float64
+    beta::Float64
+    d_old::Float64
+    phi::Float64
+    level_weight::Float64
+    target_discharge::Float64
+    incoming::Union{Nothing,Function}
+    e_b_old::Float64
+    e_b_new::Float64
+    e_n_old::Float64
+    e_n_new::Float64
+    k_in::Float64
+    u_out::Float64   # m/s, (filtered) current in the direction of the outgoing wave, U_n
+    e_g::Float64     # m, eta_in one cell outside the face at time n (ghost node of the inflow advection)
+end
+
+CharacteristicFaceState() = CharacteristicFaceState(false, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, nothing, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
 mutable struct WetDryState{T<:Real}
     bed::Vector{T}
     bed_face::Vector{T}
@@ -122,5 +164,8 @@ mutable struct WetDryState{T<:Real}
     left_open::Union{Nothing,OpenFaceState}
     q_left::Vector{T}            # Pa, nz: non-hydrostatic pressure of the open left face (pressure radiation)
     q_left_explicit::Vector{T}   # Pa, nz: work array (q_1^n, then the explicit part of the radiation)
+    # characteristic open faces (open_face_scheme = "characteristic", issue #86)
+    char_right::CharacteristicFaceState
+    char_left::CharacteristicFaceState
 end
 

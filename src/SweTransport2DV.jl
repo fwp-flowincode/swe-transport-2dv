@@ -45,7 +45,7 @@ export VegetationStemConfig, VegetationStem, VegetationModel, VegetationPatch, p
 export KEpsilonState, k_epsilon_step!, turbulent_viscosity_u!, implicit_vertical_diffusion!, bed_friction_coefficient, turbulence_closure, ke_time_scale
 export KE_C_MU_VALUE, KE_C1_VALUE, KE_C2_VALUE
 export update_stem_posture!, vegetation_drag_rate, stem_tip_deflection, stem_deflected_height, VEGETATION_EXPLICIT_DRAG_LIMIT
-export attach_vegetation!, clear_vegetation!, vegetation_source!, copy_vegetation, vegetation_path, set_x_inflow_outflow!, clear_x_inflow_outflow!
+export attach_vegetation!, clear_vegetation!, vegetation_source!, copy_vegetation, vegetation_path, set_x_inflow_outflow!, clear_x_inflow_outflow!, numerical_phase_speed_factor
 export WetDryState, layer_thicknesses!, water_depth, initialize_water_level!, set_sluice_gate!, clear_sluice_gates!
 export SedimentState, attach_sediment!, suspended_sediment_mass
 export ModelPerformance, reset_performance!, performance_models, print_performance_report, process_cpu_time

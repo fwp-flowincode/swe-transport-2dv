@@ -20,7 +20,8 @@ Contents:
 5. Analysis of the discrete reflection
 6. Relaxed free outflow
 7. Non-hydrostatic pressure at the open face (7.1 why a dispersive speed alone does not help, 7.2 radiation of the
-   non-hydrostatic pressure, 7.3 the free left face)
+   non-hydrostatic pressure, 7.3 the free left face, 7.4 the model's own phase speed, 7.5 a current entering through the
+   face, 7.6 generating waves)
 8. Characteristic open face: absorbing and generating (design)
 9. Inflow
 10. Practice and limitations
@@ -427,15 +428,100 @@ the mirror of sections 3, 4, 6 and 7.2.
 - A current of 0.16 m/s leaving through a relaxed free left face (velocity inflow at the right) is a steady state to
   round-off ($10^{-16}$).
 
-Not covered yet: generating waves through an open face (an incoming signal prescribed while the outgoing waves radiate),
-needed for waves against a current that enters at $x=0$ (#85). Section 8 gives the formulation for it.
+Generating waves through an open face is in section 7.6.
+
+### 7.4 The model's own phase speed (`radiation_speed_factor`)
+
+Section 7.2 showed that the remaining reflection is half the interior's phase-speed error: the face radiates the
+linear-theory speed $c$, the model's wave travels with $c_{num}$. `ModelConfig(radiation_speed_factor=f)` multiplies the
+intrinsic phase speed of every radiation speed, $c_r=U+f\,(c-U)$. With $f=c_{num}/c$ the face radiates the wave that the
+model carries.
+
+**Calibration** (`numerical_phase_speed_factor(cfg; current=U)`).
+1. Run a standing wave of the design wavelength in a closed basin. It uses the grid spacing, layers, time step, $\theta$
+   and pressure options of `cfg`, and the wavelength rounded to whole cells. Its zero crossings give the frequency error
+   at the fixed wave number, $\sigma_{num}=(1+\varepsilon)\,\sigma(k)$. A standing wave between walls is an exact discrete
+   mode of the interior scheme.
+2. Convert to the phase speed at the fixed frequency, which is what the radiation condition needs: solve
+   $(\omega-kU)^2=(1+\varepsilon)^2gk\tanh kh$ for $k_{num}$, and set $f=(\omega/k_{num}-U)/(c_{abs}-U)$. On still water
+   that is about $1+\varepsilon\,c/c_g$. The step matters: at $kH=1.2$, $c/c_g=1.39$, and the factor at the fixed
+   wave number alone left 0.35 % instead of 0.18 %.
+
+It costs one small run of about 0.2 s. On a current the waves are shorter against it and longer with it, so calibrate
+for the current in the direction of the waves that the face absorbs.
+
+| $kH$ (10 layers) | $f$ calibrated | $f$ from the progressive wave | $\lvert R\rvert$ with $f=1$ | $\lvert R\rvert$ calibrated |
+|---|---|---|---|---|
+| 0.6 | 1.0072 | 1.0074 | 0.31 % | 0.08 % |
+| 1.2 | 1.0328 | 1.0320 | 1.49 % | 0.18 % |
+| 1.2 (20 layers) | 1.0157 | 1.0160 | 0.72 % | 0.15 % |
+| 2.0 | 1.0845 | 1.0774 | 3.66 % | 0.40 % |
+
+*Table 3. The calibrated factor and the reflection of regular waves (set-up of Table 1). "From the progressive wave":
+$k/k_{num}$ fitted in the channel. Scanning $f$ at $kH=1.2$ gives the smallest reflection at 1.032 (0.15 %).*
+
+### 7.5 A current entering through the open face
+
+When the current enters through a free face (the opposing case of #85, where the waves leave against the current), the
+radiation condition with the speed $U+c$ reflects heavily. With a current of 0.16 m/s at $kH=0.3$ (hydrostatic) it
+reflected 4.1 %; at $kH=1.2$ 7.1 %. Outflow reflects 0.2–0.3 %.
+
+The cause is the face momentum, not the speed itself. The outer face of the open control volume carries the zero-gradient
+flux of the inflow, so the face momentum has no advection: the face does not carry the wave with the current. For this
+face momentum, the characteristic form of the face (section 8) gives the intrinsic speed $c$ as the radiation speed.
+
+With `radiation_theta=true` the level and the non-hydrostatic pressure of a face where the current enters therefore
+radiate with the intrinsic speed $c_r-U_n$. Reflection: 0.22 % at $kH=0.3$; at $kH=1.2$ 0.38 % with the factor of
+section 7.4 calibrated for the opposing current ($f=1.0447$). The backward-Euler default keeps $U+c$ (bit for bit).
+
+### 7.6 Generating waves through an open face
+
+`set_x_inflow_outflow!(...; left_incoming_level=t -> eta_in(t))` (or `right_incoming_level`) imposes the level
+$\eta_{in}(t)$ of an incoming wave at a free face, while the outgoing and reflected waves radiate. It needs
+`radiation_theta=true` and the wetting-drying step. The face radiates the deviation from the incoming wave:
+- **Level.** $\eta-\eta_{in}$ radiates, with $\eta_{in}$ at the face and at the adjacent cell centre. The incoming wave
+  of absolute speed $c_{in}$ reaches the centre $(\Delta x/2)/c_{in}$ later. A relaxed level relaxes towards
+  $\eta_T+\eta_{in}$.
+- **Non-hydrostatic pressure.** $q-q_{in}$ radiates, with $q_{in}=\rho_0g\,\eta_{in}\,\bigl(\cosh kz/\cosh kz_s-1\bigr)$
+  and $k$ the incoming wave number of the design period.
+  WHY $z_s$ is the centre of the still-water surface cell, not the surface: the model's $q$ is zero in the whole surface
+  cell. With the linear-theory profile ($z_s=h$) the generated amplitude was 0.988, 0.963 and 0.942 of the target at
+  $kH$ = 0.6, 1.2 and 2.0. With the surface-cell centre it is 1.002, 1.000 and 0.999.
+- **Advection.** Where the current enters through the generating face (waves and current entering together, Klopman's
+  following case), the face momentum lacks $U\,\partial u/\partial x$ of the incoming wave (section 7.5). Its outer node
+  gets the velocity of zero gradient of the deviation from the incoming wave, so the inflow term carries the incoming
+  wave's orbital velocity (linear theory) one cell outside. Without it the generated amplitude was 3.5 % too small on a
+  following current of 0.16 m/s.
+
+**Relaxation of the incoming variable** (`ModelConfig(open_face_relaxation="incoming")`). A relaxed face then corrects
+$w_{in}=c_{out}\eta-Q_n$ towards $c_{out}\eta_T-Q_{T,n}+(c_{out}+c_{in})\eta_{in}$, instead of correcting the level.
+- $Q_T$ is `right_target_discharge` / `left_target_discharge`, in m²/s, positive in $+x$.
+- An outgoing wave has $Q_n'=c_{out}\eta'$ (with the calibrated speed), so the correction does not see it.
+- With $\tau=2T$ at $kH=1.2$ the level relaxation reflects 5.1 % (theory $1/\sqrt{1+4\omega^2\tau^2}=4.0$ %); the
+  incoming variable reflects 0.22 %, the same as without relaxation.
+- The target must carry the discharge that passes (section 8.1).
+
+**Results** (`test/test_open_boundary_generation.jl`). Regular waves of 2 mm, depth 0.5 m, 10 layers, 40 cells per
+wavelength, 100 steps per period, $\theta=0.7$, with the calibrated factor. Generated at the left face, absorbed at the
+right; the amplitude is fitted with a complex wave number and extrapolated to $x=0$:
+
+| case | generated / target | $\lvert R\rvert$ at the absorbing face |
+|---|---|---|
+| still water, $kH=0.6$ | 1.002 | 0.09 % |
+| still water, $kH=1.2$ | 1.000 | 0.18 % |
+| still water, $kH=2.0$ | 1.000 | 0.39 % |
+| following current 0.16 m/s, $kH=1.2$ ($\tau=20T$, incoming variable) | 1.001 | 0.27 % |
+| opposing current 0.16 m/s, $kH=1.2$ (current enters at the absorbing face) | 0.998 | 0.38 % |
+
+*Table 4. Wave generation through the free left face.*
 
 8 Characteristic open face: absorbing and generating (issue #86)
 ----------------------------------------------------------------
 
-**Status: design.** Nothing in this section is implemented yet. The order of the work is in
-`docs/plan_issue_86_relaxation_zones.md`. The method follows Borsboom (2023) and Mooiman (2024), adapted from their
-collocated finite-volume-element scheme to the staggered 2DV grid of this model.
+**Status: implemented as `ModelConfig(open_face_scheme="characteristic")` (wetting-drying step).** The method follows
+Borsboom (2023) and Mooiman (2024), adapted from their collocated finite-volume-element scheme to the staggered 2DV grid
+of this model. Use it for hydrostatic and long waves, where its box form absorbs an order better than the radiation
+scheme (section 8.7). For dispersive waves in the non-hydrostatic mode use the radiation scheme of sections 7.2–7.6.
 
 ### 8.1 Two conditions per open face
 
@@ -618,25 +704,31 @@ essential condition are
 
 $$
 Q_b^{n+1}=\hat Q_b+c_\beta\beta D^n-(\varphi+c_\beta\beta)\,D^{n+1},\qquad
-c_{out}(\eta_b^{n+1}-\eta_b^n)-(Q_b^{n+1}-Q_b^n)=G ,
+c_{io}(\eta_b^{n+1}-\eta_b^n)-(Q_b^{n+1}-Q_b^n)=G ,
 $$
 
-with $G=\Delta F-\varepsilon(w_{in}^n-w_T)$. In the velocity form of 8.1, $c_{out}$ becomes $c_{i,out}$ and $Q_b$
-becomes $H\bar u_b$; linearly the two are the same. Eliminating $\eta_b^{n+1}$ gives the Dirichlet form of section 4:
+with $G=\Delta F-\varepsilon(w_{in}^n-w_T)$ and the intrinsic speed $c_{io}=c_{out}-U_n$ of the outgoing wave.
+WHY $c_{io}$, not $c_{out}$: the face thicknesses are frozen within a step, so the discharge increment of the face is
+$H\Delta\bar u_n$, without the part $U_n\Delta\eta$ of $\Delta Q_n$. That is the velocity form of 8.1. With $c_{out}$, an
+outgoing wave on a current of 0.16 m/s reflected 2.9 % instead of 0.2 %. The drift correction acts on states and keeps
+$c_{out}$. Eliminating $\eta_b^{n+1}$ gives the Dirichlet form of section 4:
 
 $$
 Q_b^{n+1}=\hat Q_b+c_\beta\beta D^n+\varphi\,w\,(\eta_N^{n+1}-\eta_{\mathrm{eff}}),\qquad
-w=\frac{(\varphi+c_\beta\beta)\,c_{out}}{\varphi\,(c_{out}+\varphi+c_\beta\beta)},
+w=\frac{(\varphi+c_\beta\beta)\,c_{io}}{\varphi\,S},\qquad S=c_{io}+\varphi+c_\beta\beta ,
 $$
 
 $$
-\eta_{\mathrm{eff}}=\eta_b^n+\frac{\hat Q_b-Q_b^n+c_\beta\beta D^n+G}{c_{out}} .
+\eta_{\mathrm{eff}}=\eta_b^n+\frac{\hat Q_b-Q_b^n+c_\beta\beta D^n+G}{c_{io}},\qquad
+\eta_b^{n+1}=\eta_N^{n+1}+\frac{c_{io}}{S}\,(\eta_{\mathrm{eff}}-\eta_N^{n+1}) .
 $$
 
-The explicit flux $c_\beta\beta D^n$ goes into the predictor of the face, and $\eta_b^{n+1}$ follows after the solve
-from the essential condition. The free-surface matrix, the Newton iteration and the non-hydrostatic mode keep their
-structure.
-- **$\beta=0$:** $w=1/(1+\varphi/c_{out})$, the weight of the $\theta$-weighted radiation (with $c_r=c$). The
+The explicit flux $c_\beta\beta D^n$ goes into the predictor of the face (`_wd_characteristic_predictor!`), once per
+step. $(\eta_{\mathrm{eff}},w)$ is recomputed from the predictor in every free-surface solve
+(`_wd_characteristic_dirichlet!`), including the repeated solve after the non-hydrostatic correction, so the final face
+discharge satisfies the essential condition exactly. The level weight $c_{io}/S$ differs from the flux weight $w$
+unless $\beta=0$. The free-surface matrix, the Newton iteration and the non-hydrostatic mode keep their structure.
+- **$\beta=0$:** $w=1/(1+\varphi/c_{io})$, the weight of the $\theta$-weighted radiation (with $c_r=c$). The
   difference is that $\eta_{\mathrm{eff}}$ now contains every explicit tendency of the face (advection, friction,
   vertical exchange), because the essential condition is written for $Q_b$, not for $\eta_b$. The results therefore
   are not bit for bit those of section 5, and the scheme is a new option.
@@ -673,20 +765,48 @@ structure.
   Supercritical inflow (both characteristics entering) is not supported.
 - **Left face.** The mirror image, with $n=-1$: $Q_n=-Q_1$, $U_n=-U_1$, and $D=\eta_b-\eta_1$.
 
-### 8.6 Proposed options
+### 8.6 Options
 
-The defaults keep the present results bit for bit.
-- `ModelConfig(open_face_scheme="radiation")`: the present scheme. `"characteristic"` is this section. It requires the
-  wetting-drying step.
-- `ModelConfig(open_face_beta=-0.5)`: the weight $\beta$ (dimensionless).
-- `ModelConfig(open_face_wet_depth)` (m): below this depth of the boundary column, $\beta$ is limited (section 8.4).
+The defaults keep the former results bit for bit.
+- `ModelConfig(open_face_scheme="radiation")`: the scheme of sections 4–7. `"characteristic"` is this section; it requires
+  the wetting-drying step.
+- `ModelConfig(open_face_beta=-0.5)`: the weight $\beta$ (dimensionless, in $[-1,0]$).
+- `ModelConfig(open_face_wet_depth=0.1)` (m): below this depth of the boundary column, $\beta$ is limited (section 8.4).
 - `set_x_inflow_outflow!`, per face:
-  - the incoming wave `right_incoming_level=t -> eta_in(t)` (m) or `right_incoming_discharge=t -> q_in(t)` (m²/s);
-  - the target `right_level` (m) and `right_target_discharge` (m²/s) for $w_T$;
+  - the incoming wave `right_incoming_level=t -> eta_in(t)` (m). Only the level is implemented; an incoming
+    discharge would use $\Delta F=\frac{c_{out}+c_{in}}{c_{in}}\Delta q_{in}$;
+  - the target `right_level` (m) and `right_target_discharge` (m²/s, positive in $+x$) for $w_T$;
   - `right_relaxation_time` (s) for $\varepsilon=\Delta t/\tau$.
 
-  The same with `left_` for the left face.
-- The non-hydrostatic incoming pressure uses `radiation_period` as the period of the design wave.
+  The same with `left_` for the left face. These options apply to both schemes (section 7.6).
+
+### 8.7 Measured in the model
+
+`test/test_open_boundary_generation.jl` and the regular-wave set-up of Table 1:
+- **Hydrostatic long waves** ($kH=0.3$, 4 layers, 40 cells per wavelength):
+
+  | | still water | 0.16 m/s leaving | 0.16 m/s entering |
+  |---|---|---|---|
+  | radiation, $\theta$-weighted | 0.13 % | 0.28 % | 0.22 % (intrinsic speed, 7.5) |
+  | characteristic, $\beta=0$ | 0.154 % (analysis 0.154 %) | 0.22 % | 0.22 % |
+  | characteristic, $\beta=-\tfrac12$ | 0.013 % | 0.13 % | 0.15 % |
+
+  The box form absorbs an order better than the radiation scheme without current, and it handles a current entering
+  through the face by construction.
+- **Dispersive waves, non-hydrostatic.** Here the characteristic face reflects more than the radiation scheme: 2.8 %
+  against 1.5 % at $kH=1.2$, and 0.11 % against 0.03 % at $kH=0.3$ (both with the pressure radiation and the period).
+  Two causes were found:
+  - **Impedance.** The essential condition fixes $Q/\eta$ at the linear-theory speed, while the model's wave has
+    $Q/\eta=c_{num}$ (measured to 0.1 %). The factor of section 7.4 removes this.
+  - **Pressure coupling.** In the radiation scheme the level and $q_b$ radiate with the same weight, so the total
+    pressure of the face moves as one. Here the level follows the essential condition while $q_b$ still radiates.
+    Radiating $q_b$ with the level's effective speed $gh/c_{out}$ took $kH=1.2$ from 2.8 % to 1.6 %, and to 0.30 %
+    together with the factor.
+  - The best result (0.30 %) is still twice that of the calibrated radiation scheme (0.15 %), and a remainder of
+    about 0.1 % at $kH=0.3$ is unexplained. For dispersive waves, the radiation scheme with sections 7.4–7.6 is
+    therefore the recommended one.
+- Uniform current through two relaxed characteristic faces: a steady state to $10^{-14}$. Mirror symmetry of the two
+  faces: to round-off.
 
 9 Inflow
 --------
@@ -725,8 +845,13 @@ Practice:
 - Inflow: a discharge, ramped from rest (`left_discharge=t -> q(t)`), not a velocity, against a fixed level.
 - Non-hydrostatic waves that should leave (wetting-drying step): `radiation_theta=true`,
   `nonhydro_open_face="radiation"` and `radiation_period` = the wave period (regular waves) or the peak period
-  (section 7.2). Resolve the waves vertically well enough: the remaining reflection is half the interior's phase-speed
-  error.
+  (section 7.2), with `radiation_speed_factor = numerical_phase_speed_factor(cfg; current)` for the current in the
+  direction of the waves that leave (section 7.4). Without the factor the remaining reflection is half the interior's
+  phase-speed error.
+- Waves that should enter (a wave flume, Klopman's cases of #85): free faces at both ends, the incoming wave as
+  `left_incoming_level` (section 7.6), `open_face_relaxation="incoming"` with the target level and the target discharge
+  of the mean flow at both faces.
+- Hydrostatic or long waves: `open_face_scheme="characteristic"` (box form) absorbs an order better (section 8.7).
 
 Limitations:
 - **First-order reflection at $\theta<1$** (section 5): $|R|\approx\frac{1-\theta}{2}Cr\,k\Delta x$, about 1.5 % at 60
@@ -738,14 +863,16 @@ Limitations:
   about $|c-c_r|/(c+c_r)$ (8 % for long waves at the period of $kH=1.2$). The pressure radiation is implemented in the
   wetting-drying step only.
 - **Mean flow:** the analysis of section 5 is without mean flow. The model uses $c=U+\sqrt{gh}$ of time $n$; the
-  steady normal flow is exact (a steady state to round-off over a real bed slope). With the pressure radiation the
-  reflection on a following current of 0.16 m/s (Froude number 0.07) was measured (section 7.2); a current entering
-  through the open face (waves leaving against it) has not been tested.
+  steady normal flow is exact (a steady state to round-off over a real bed slope). A current entering through the face
+  needs `radiation_theta=true` (intrinsic speed, section 7.5); the backward-Euler default reflects about $Fr/2$ there.
+  Measured at Froude number 0.07 (0.16 m/s in 0.5 m) in both directions (sections 7.5, 7.6).
+- **Generation:** linear incoming waves of one design period (the non-hydrostatic part of the incoming pressure and the
+  inflow advection use linear theory at `radiation_period`). An incoming discharge instead of a level is not
+  implemented.
 - **Neutral level on the fixed grid:** with a free outflow and no level prescribed anywhere, the mean level is a
   neutral mode there. Use the relaxed outflow, the variable top layer or the wetting-drying step.
 - **The left end** is open only as a free face in the wetting-drying step (`left_free`, section 7.3); a discharge or
-  velocity inlet is reflective ($R=+1$ with a discharge). Neither end can yet impose an incoming wave while letting the
-  outgoing ones radiate. Section 8 gives the design for that; it is not implemented yet.
+  velocity inlet is reflective ($R=+1$ with a discharge).
 - **Steady non-uniform outflow:** the free outflow pulls the outlet towards the bed-parallel continuation of the last
   cell. For a backwater curve at the outlet, prescribe the level.
 

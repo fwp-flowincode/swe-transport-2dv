@@ -37,7 +37,8 @@ function WetDryState(cfg::ModelConfig; T::Type{<:Real}=Float64)
         zeros(T, nz, nx + 1), zeros(T, nz + 1, nx), zeros(T, nz, nx), zeros(T, nz, nx), zeros(T, nz + 1, nx), zeros(Int, nz, nx),
         Int[], Int[], T[], T[], fill(T(-1), nz, nx + 1), 0.0, 0.0, 0, 0, nothing, fill(T(Inf), nx + 1), ones(T, nx + 1), fill(false, nx + 1),
         nothing, nothing, nothing, nothing, spzeros(T, 0, 0), Int[], Int[], Int[], 0, 0, nothing, 0, 0, 0, 0,
-        RemapWork(nz, nx; T=T), zeros(T, nz), zeros(T, nz), NaN, nothing, zeros(T, nz), zeros(T, nz))
+        RemapWork(nz, nx; T=T), zeros(T, nz), zeros(T, nz), NaN, nothing, zeros(T, nz), zeros(T, nz),
+        CharacteristicFaceState(), CharacteristicFaceState())
 end
 
 """
@@ -174,12 +175,43 @@ end
 # closes the face above its (contracted) lower edge z_g: hf_k = max(0, min(z_{k+1}, zeta_f, z_g) - max(z_k, z_b,f)), so
 # the layer cut by the edge is partly open, like a layer cut by the surface; the face is closed if z_g - z_b,f is at
 # most dry_depth_threshold.
+"""
+    _wd_characteristic_outflow_level(model, wd, f) -> zeta (m above the grid bottom) or nothing
+
+Level that sets the layer thicknesses of a characteristic open face f (1 or nx + 1; `open_face_scheme="characteristic"`,
+issue #86) while water leaves through it: the level of the adjacent column continued parallel to the bed to the face,
+zeta_N + (z_b,N - z_b,N-1)/2 (right; mirror at the left), i.e. the face has the depth of that column over its
+extrapolated bed (`_wd_face_bed`). nothing for inflow, a still face, other boundaries and the radiation scheme (the face
+level eta_b, as before).
+WHY the upwind level: the interior faces take the level of the upwind cell; with the face level eta_b instead, an
+outgoing wave meets a face whose thickness lags by half a cell, which reflects to first order, about 0.27 Fr k dx
+(normal-mode analysis, docs/numerics_open_boundaries.md section 8.3). WHY bed-parallel: uniform flow over a sloping bed
+then keeps the same depth at the outlet face.
+"""
+function _wd_characteristic_outflow_level(model::Model, wd::WetDryState, f::Int)
+    model.config.open_face_scheme == "characteristic" || return nothing
+    nx = model.config.nx
+    u = model.state.u
+    if f == nx + 1 && model.x_boundary_right_free
+        s = sum(view(u, :, f))
+        s > 0.0 || return nothing
+        return _wd_level(model, nx) + 0.5 * (wd.bed[nx] - wd.bed[nx - 1])
+    elseif f == 1 && wd.left_open !== nothing
+        s = sum(view(u, :, 1))
+        s < 0.0 || return nothing
+        return _wd_level(model, 1) + 0.5 * (wd.bed[1] - wd.bed[2])
+    end
+    return nothing
+end
+
 function _wd_face_thicknesses!(model::Model, wd::WetDryState)
     cfg = model.config
     u = model.state.u
     nx = cfg.nx
     @inbounds for f in 1:(nx + 1)
-        if f == nx + 1 && _right_boundary_level(model) !== nothing
+        if (f == nx + 1 || f == 1) && (zc = _wd_characteristic_outflow_level(model, wd, f)) !== nothing
+            zeta_f = zc   # characteristic face with outflow: the upwind level (issue #86)
+        elseif f == nx + 1 && _right_boundary_level(model) !== nothing
             zeta_f = cfg.depth + _right_boundary_level(model)   # water level or free outflow: the face level is known
         elseif f == 1 && model.x_boundary_eta_left !== nothing
             zeta_f = cfg.depth + model.x_boundary_eta_left    # inlet level prescribed (supercritical inflow, #46)
@@ -910,6 +942,121 @@ function _wd_check_depth_positivity(model::Model, wd::WetDryState)
     return nothing
 end
 
+# The characteristic open faces of the step: (state, face index f, adjacent column N, outward normal n, face level
+# eta_b^n in m). Inactive faces (radiation scheme, not open, supercritical) are skipped by the callers.
+function _wd_characteristic_faces(model::Model, wd::WetDryState)
+    nx = model.config.nx
+    right = (wd.char_right, nx + 1, nx, 1.0, model.x_boundary_right_free ? model.x_boundary_eta_free : NaN)
+    left = (wd.char_left, 1, 1, -1.0, wd.left_open === nothing ? NaN : wd.left_open.eta_b)
+    return (right, left)
+end
+
+"""
+    _wd_characteristic_predictor!(model, wd)
+
+Characteristic open faces (`open_face_scheme="characteristic"`, issue #86; Borsboom 2023, Mooiman 2024, adapted to the
+staggered grid in docs/numerics_open_boundaries.md section 8). The natural condition of the face is its momentum equation
+plus the box term c_beta beta d(eta_b - eta_N)/dt (outward discharge Q_n, D = eta_b - eta_N, c_beta = min(c_in, c_out),
+which is c - |U_n| for long waves). Its explicit part c_beta beta D^n is added here to the predictor of the face, once
+per step, distributed like the surface slope (Delta u_k = n c_beta beta D^n r_k / H_f, so that sum_k hf_k Delta u_k =
+n c_beta beta D^n with H_f = sum_k hf_k r_k). It also fixes beta and phi = theta g dt H_f/(dx/2) (m/s) for the solves of
+the step: beta = `open_face_beta`, limited to -phi/c_beta (the flux weight w >= 0) where the boundary column is shallower
+than `open_face_wet_depth` at time n, so that the face cannot make the free-surface matrix lose the M-matrix property
+if the column falls dry (section 8.4). beta = -1/2 reflects (k dx)^3/64, beta = 0 is the radiation condition
+weighted with theta (normal-mode analysis, section 8.3).
+"""
+function _wd_characteristic_predictor!(model::Model, wd::WetDryState)
+    cfg = model.config
+    cfg.open_face_scheme == "characteristic" || return nothing
+    ws = model.ws
+    for (char, f, N, n, eta_b) in _wd_characteristic_faces(model, wd)
+        char.active || continue
+        Hf = ws.H_face[f]   # m, effective depth of the implicit column of the face
+        if !(Hf > 0.0)
+            char.active = false   # dry face: no flux, the radiation form (weight 1) is harmless
+            continue
+        end
+        c_beta = min(char.c_in, char.c_out)   # m/s
+        phi = cfg.theta * cfg.g * cfg.dt * Hf / (0.5 * model.dx)
+        beta = cfg.open_face_beta
+        depth_N = _wd_level(model, N) - wd.bed[N]
+        depth_N < cfg.open_face_wet_depth && (beta = max(beta, -phi / c_beta))
+        char.beta, char.phi = beta, phi
+        char.d_old = eta_b - model.ws.eta_old[N]
+        incr = n * c_beta * beta * char.d_old / Hf   # m/s per unit column response
+        @inbounds for k in 1:cfg.nz
+            wd.hf[k, f] > 0.0 && (ws.u_hat[k, f] += incr * ws.r_vert[k, f])
+        end
+    end
+    return nothing
+end
+
+"""
+    _wd_characteristic_dirichlet!(model, wd)
+
+Dirichlet form (eta_eff, w) of the characteristic open faces for the free-surface solve, from the predictor u_hat of this
+solve (it is called again after the non-hydrostatic correction). Essential condition on the incoming characteristic
+variable w_in = c_out eta - Q_n, as a time increment with the drift correction of a relaxed face (Borsboom 2023, eq. 3-4):
+
+    c_out (eta_b^{n+1} - eta_b^n) - (Q_n^{n+1} - Q_n^n) = G,   G = -eps (c_out eta_b^n - Q_n^n - (c_out eta_T - Q_T,n)),
+
+eps = dt/tau (0 without relaxation). With Q_n^{n+1} = Qhat_n - (phi + c_beta beta) D^{n+1} (Qhat_n from the predictor,
+which holds the explicit box term) the solved face reads
+
+    Q_n^{n+1} = Qhat_n + phi w (eta_N^{n+1} - eta_eff),   eta_b^{n+1} = eta_N^{n+1} + w_l (eta_eff - eta_N^{n+1}),
+    w = (phi + c_beta beta) c_out / (phi S),   w_l = c_out / S,   S = c_out + phi + c_beta beta,
+    eta_eff = eta_b^n + (Qhat_n - Q_n^n + G) / c_out,
+
+the Dirichlet form of the radiation scheme (`_right_boundary_dirichlet`, `_left_boundary_slope`) with the flux weight w;
+the level weight w_l goes to `_finish_free_outflow_level!` / `_finish_left_free_level!`. For beta = 0 both weights are
+1/(1 + phi/c_out), the theta-weighted radiation condition (docs/numerics_open_boundaries.md section 8.2). The drift
+correction acts on w_in, which an outgoing linear wave does not change: unlike the level relaxation of the radiation
+scheme it reflects nothing at the design frequency (section 8.1).
+"""
+function _wd_characteristic_dirichlet!(model::Model, wd::WetDryState)
+    cfg = model.config
+    cfg.open_face_scheme == "characteristic" || return nothing
+    ws = model.ws
+    for (char, f, _, n, eta_b) in _wd_characteristic_faces(model, wd)
+        char.active || continue
+        Qhat = 0.0   # m^2/s, outward discharges of the predictor and of time n
+        Qold = 0.0
+        @inbounds for k in 1:cfg.nz
+            Qhat += wd.hf[k, f] * ws.u_hat[k, f]
+            Qold += wd.hf[k, f] * ws.u_old[k, f]
+        end
+        Qhat *= n
+        Qold *= n
+        tau, eta_T = f == 1 ? (wd.left_open.relaxation_time, wd.left_open.eta_target) :
+                              (model.x_boundary_relaxation_time, model.x_boundary_eta_target)
+        c_out = char.c_out
+        # m^2/s: the incoming wave, Delta F = (c_out + c_in) Delta eta_in (Mooiman 2024, eq. 17), and the drift correction
+        # of the incoming characteristic variable (its target carries the incoming wave)
+        G = (c_out + char.c_in) * (char.e_b_new - char.e_b_old)
+        if isfinite(tau)
+            w_target = c_out * eta_T - n * char.target_discharge + (c_out + char.c_in) * char.e_b_old
+            G -= (cfg.dt / tau) * (c_out * eta_b - Qold - w_target)
+        end
+        cb_beta = min(char.c_in, char.c_out) * char.beta   # m/s
+        # WHY the intrinsic speed c_out - U_n for the increments: the face thicknesses are frozen within the step, so the
+        # discharge increment of the face is sum_k hf_k Delta u_k = H Delta u_n without the part U_n Delta eta of
+        # Delta Q_n; the essential condition then reads (c_out - U_n) Delta eta_b - Delta Q_n = G (its velocity form,
+        # docs/numerics_open_boundaries.md section 8.1). With c_out the outgoing wave of a current of 0.16 m/s reflected
+        # 2.9 % instead of 0.3 % (k h = 0.3, hydrostatic). The drift correction acts on states and keeps c_out.
+        c_io = c_out - char.u_out   # m/s, intrinsic speed of the outgoing wave
+        S = c_io + char.phi + cb_beta
+        weight = (char.phi + cb_beta) * c_io / (char.phi * S)
+        char.level_weight = c_io / S
+        eta_eff = eta_b + (Qhat - Qold + G) / c_io
+        if f == 1
+            wd.left_open.eta_eff, wd.left_open.weight = eta_eff, weight
+        else
+            model.x_boundary_free_dirichlet = (eta_eff, weight)
+        end
+    end
+    return nothing
+end
+
 """
     _wd_free_surface_solve!(model, wd)
 
@@ -946,6 +1093,7 @@ function _wd_free_surface_solve!(model::Model, wd::WetDryState)
     nz, nx = cfg.nz, cfg.nx
     dt, dx, g, H = cfg.dt, model.dx, cfg.g, cfg.depth
     theta = cfg.theta
+    _wd_characteristic_dirichlet!(model, wd)   # characteristic open faces: (eta_eff, w) from this predictor (issue #86)
     # WHY theta^2 and the theta transport: u^{n+1} = u_hat - theta g dt d(eta^{n+1})/dx enters the continuity flux
     # sum_k hf (theta u^{n+1} + (1 - theta) u^n) (issue #34); theta = 1 is the former scheme exactly
     coeff = theta * theta * dt * dt * g / (dx * dx)   # 1/m
@@ -995,6 +1143,12 @@ function _wd_free_surface_solve!(model::Model, wd::WetDryState)
         @inbounds begin
             for i in 1:nx
                 p = H + eta[i] >= wd.bed[i] ? 1.0 : 0.0
+                # characteristic face with a negative flux weight (box term, open_face_beta < 0 at a small Courant
+                # number): (P + T) is an M-matrix only while its column is wet (docs/numerics_open_boundaries.md 8.4)
+                if p == 0.0 && ((i == nx && a[nx + 1] < 0.0) || (i == 1 && a[1] < 0.0))
+                    throw(DomainError(i, @sprintf("boundary column %d falls dry with a negative open-face weight; increase open_face_wet_depth (now %.3g m)",
+                        i, cfg.open_face_wet_depth)))
+                end
                 denom = p + a[i] + a[i + 1] + (i > 1 ? a[i] * wd.cp[i - 1] : 0.0)
                 if !(denom > 0.0)
                     # a connected group of columns that is dry in this iterate and receives no water: only possible if a
@@ -1082,6 +1236,81 @@ function _wd_update_level_from_fluxes!(model::Model, wd::WetDryState)
             wd.clamped_volume += (_wd_level(model, i) - wd.bed[i] - depth) * dx
         end
         ws.eta_t[i] = (st.eta[i] - ws.eta_old[i]) / dt
+    end
+    return nothing
+end
+
+"""
+    _incoming_pressure_profile(k_in, z, zs) -> P (-)
+
+Non-hydrostatic part of the dynamic pressure of the incoming wave of wave number k_in (rad/m), at the height z (m) above
+the bed, per unit of rho0 g eta: P = cosh(k_in z)/cosh(k_in zs) - 1, zero at the height zs (m) of the centre of the
+surface cell and above (the hydrostatic part rho0 g eta is carried by the level). Linear wave theory (e.g. Dean &
+Dalrymple 1991, Sec. 4.4; equation numbers not checked) has zs = h, the depth.
+WHY zs at the surface-cell centre: the model's q is zero in the whole surface cell (`_wd_nonhydrostatic_correction!`),
+so its wave carries this profile, not the one that vanishes at the surface. Generated amplitude / target with zs = h:
+0.988, 0.963, 0.942 at k h = 0.6, 1.2, 2.0 (10 layers); with the surface-cell centre 1.002, 1.000, 0.999.
+"""
+function _incoming_pressure_profile(k_in::Real, z::Real, zs::Real)
+    (zs > 0.0 && 0.0 <= z <= zs) || return 0.0
+    return cosh(k_in * z) / cosh(k_in * zs) - 1.0
+end
+
+"""
+    _incoming_inflow_advection(model, wd, char, k, f, n) -> m/s^2
+
+Momentum advection of the incoming wave at a free face (f = 1 or nx + 1, outward normal n) through which the current
+enters (issue #86): the face's own advection has no inflow term there (the outer face carries the zero-gradient flux
+of `_wd_advection_tendency`), which drops U du/dx of the incoming wave and generated 3.5 % too little on a following
+current of 0.16 m/s (k h = 1.2). The outer node gets the velocity of zero gradient of the deviation from the incoming
+wave, u_ghost = u_b + (u_in(ghost) - u_in(b)), so the inflow term is a/dx (u_in(ghost) - u_in(b)) with a = -n u_k (m/s,
+> 0 for inflow), u_in = -n eta_in sigma cosh(k_in z)/sinh(k_in h) (linear theory, intrinsic frequency sigma =
+omega - k_in U_in) and the ghost a cell outside, where the incoming wave passes dx/c_in earlier (`char.e_g`, time n).
+0 without an incoming wave, for outflow, without a design period, or for a dry face layer.
+"""
+function _incoming_inflow_advection(model::Model, wd::WetDryState, char::CharacteristicFaceState, k::Int, f::Int,
+        n::Real)
+    (char.incoming === nothing || char.k_in == 0.0 || wd.hf[k, f] <= 0.0) && return 0.0
+    cfg = model.config
+    a = -n * model.state.u[k, f]   # m/s, inflow velocity of layer k
+    a > 0.0 || return 0.0
+    zb = _wd_face_bed(model, wd, f)
+    h = cfg.depth - zb
+    z = (k - 0.5) * model.dz - zb
+    (h > 0.0 && 0.0 <= z <= h) || return 0.0
+    sigma = 2pi / cfg.radiation_period + char.k_in * char.u_out   # rad/s, intrinsic: U_in = -U_out
+    profile = sigma * cosh(char.k_in * z) / sinh(char.k_in * h)
+    return a / model.dx * (-n) * profile * (char.e_g - char.e_b_old)
+end
+
+"""
+    _add_incoming_pressure!(model, wd, char, E, f, th, mu)
+
+Incoming wave at an open face with pressure radiation (issue #86): the face pressure radiates the deviation from the
+incoming wave's non-hydrostatic pressure q_in = rho0 g eta_in P_k (`_incoming_pressure_profile` at the layer centres
+above the face bed, zero from the centre of the still-water surface cell up, wave number `char.k_in`), with eta_in at the face (e_b) and at the adjacent cell centre (e_n):
+
+    (q_b - q_in,b)^{n+1} (1 + th mu) = (q_b - q_in,b)^n - (1 - th) mu [(q_b - q_in,b) - (q_N - q_in,N)]^n
+                                        + th mu (q_N - q_in,N)^{n+1},
+
+so the explicit part E of q_b^{n+1} (1 + th mu) gains (q_in,b^{n+1} - q_in,b^n) + (1 - th) mu (q_in,b - q_in,N)^n +
+th mu (q_in,b - q_in,N)^{n+1}. Nothing without an incoming wave or design period.
+"""
+function _add_incoming_pressure!(model::Model, wd::WetDryState, char::CharacteristicFaceState, E::AbstractVector,
+        f::Int, th::Real, mu::Real)
+    (char.incoming === nothing || char.k_in == 0.0) && return nothing
+    cfg = model.config
+    zb = _wd_face_bed(model, wd, f)
+    # m: height above the face bed of the centre of the still-water surface cell (wet part of the layer that holds the
+    # still level cfg.depth), where the model's q is zero
+    ks = clamp(ceil(Int, cfg.depth / model.dz), 1, cfg.nz)
+    zs = 0.5 * ((ks - 1) * model.dz + cfg.depth) - zb
+    scale = cfg.rho0 * cfg.g   # Pa/m
+    @inbounds for k in 1:cfg.nz
+        P = _incoming_pressure_profile(char.k_in, (k - 0.5) * model.dz - zb, zs)
+        P == 0.0 && continue
+        E[k] += scale * P * ((char.e_b_new - char.e_b_old) + (1.0 - th) * mu * (char.e_b_old - char.e_n_old) +
+                             th * mu * (char.e_b_new - char.e_n_new))
     end
     return nothing
 end
@@ -1245,11 +1474,12 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
         U_b, depth_b = _face_velocity_depth(model, nx + 1)
         # the current of this step's level radiation (_update_free_outflow_level!), so that both radiate together
         isnan(wd.u_right_mean) || cfg.radiation_period == 0.0 || (U_b = wd.u_right_mean)
-        mu_q = max(_radiation_speed(cfg, U_b, depth_b), 0.0) * dt / (0.5 * dx)
+        mu_q = _level_radiation_speed(cfg, max(_radiation_speed(cfg, U_b, depth_b), 0.0), U_b) * dt / (0.5 * dx)
         @inbounds for k in 1:nz
             # E: explicit part of q_b^{n+1} (1 + th mu), stored in q_right_explicit
             wd.q_right_explicit[k] = wd.q_right[k] - (1.0 - th_q) * mu_q * (wd.q_right[k] - wd.q_right_explicit[k])
         end
+        _add_incoming_pressure!(model, wd, wd.char_right, wd.q_right_explicit, nx + 1, th_q, mu_q)
     end
     # free left face (issue #86): the same radiation towards -x, speed of the outgoing wave on the current -U
     radiate_left = cfg.nonhydro_open_face == "radiation" && wd.left_open !== nothing
@@ -1257,10 +1487,11 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
     if radiate_left
         U_l, depth_l = _face_velocity_depth(model, 1)
         U_out = (cfg.radiation_period > 0.0 && !isnan(wd.left_open.u_mean)) ? wd.left_open.u_mean : -U_l
-        mu_q_left = max(_radiation_speed(cfg, U_out, depth_l), 0.0) * dt / (0.5 * dx)
+        mu_q_left = _level_radiation_speed(cfg, max(_radiation_speed(cfg, U_out, depth_l), 0.0), U_out) * dt / (0.5 * dx)
         @inbounds for k in 1:nz
             wd.q_left_explicit[k] = wd.q_left[k] - (1.0 - th_q) * mu_q_left * (wd.q_left[k] - wd.q_left_explicit[k])
         end
+        _add_incoming_pressure!(model, wd, wd.char_left, wd.q_left_explicit, 1, th_q, mu_q_left)
     end
     if n == 0
         model.last_nonhydro_pcorr_max = 0.0
@@ -1550,6 +1781,9 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
                 adv = remapped ? wd.remap.tend[k] : _wd_advection_tendency(model, wd, k, f, second_order_momentum, depth_totals; vertical=!implicit)
                 tend = adv - (wd.p_anom[k, fp] - wd.p_anom[k, fp - 1]) / (cfg.rho0 * dx) + cfg.body_force_x
                 eddy_diffusion && (tend += _wd_horizontal_eddy_diffusion(model, wd, ke, k, f))
+                # incoming wave entering with the current through a free face (issue #86)
+                boundary && open_bc && (tend += _incoming_inflow_advection(model, wd, wd.char_right, k, f, 1.0))
+                left_boundary && (tend += _incoming_inflow_advection(model, wd, wd.char_left, k, f, -1.0))
                 if theta != 1.0
                     tend -= explicit_surface
                     # open right boundary face: dq/dx = 0 there (issue #49, _wd_nonhydrostatic_correction!)
@@ -1575,6 +1809,8 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
         implicit ? _wd_implicit_vertical!(model, wd, f) : _wd_vertical_viscosity!(model, wd, ws.u_hat, f)
     end
     _wd_boundary_velocities!(model, wd, ws.u_hat, wd.time + dt)
+    # characteristic open faces (issue #86): explicit part of the natural condition, once per step
+    _wd_characteristic_predictor!(model, wd)
 
     # 3.-4. free-surface solve with exact volume positivity, velocity correction
     @timeit model.timers "wd/free_surface_solve" _wd_free_surface_solve!(model, wd)

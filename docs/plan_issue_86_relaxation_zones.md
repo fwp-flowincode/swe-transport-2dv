@@ -34,16 +34,26 @@ remains.
         $0.27\,Fr\,k\Delta x$;
       - $\beta$ is limited only below `open_face_wet_depth`;
       - the box form for $q_b$ becomes a model variant in step 3.
-   3. Implementation, absorbing only ($\Delta F=0$), at both faces as option `open_face_scheme="characteristic"`. The
-      existing tests stay unchanged; new tests check the reflection against Table 2 and the mean flow on a current with
-      $(\eta_T,Q_T)$.
-   4. Generation (given level and given discharge, the incoming $q_{in}$ in the non-hydrostatic mode). Test: a
-      $kH=1.2$ wave on a 0.16 m/s current, generated at one face and absorbed at the other; check the amplitude
-      against the target and the remaining reflection.
+   3. Done: `open_face_scheme="characteristic"` (section 8.7).
+      - Hydrostatic long waves: the box form reflects 0.013 % against 0.13 %.
+      - Dispersive waves: it reflects more than the radiation scheme (impedance, pressure coupling).
+      - Decision (option A, 2026-11-09): the characteristic face stays for hydrostatic and long waves. Generation is built
+        on the radiation scheme.
+   4. Done, on the radiation scheme (sections 7.4–7.6):
+      - the calibrated speed: `radiation_speed_factor`, `numerical_phase_speed_factor(cfg; current)`;
+      - the intrinsic speed for a current entering through a face;
+      - the incoming wave (`left_incoming_level` / `right_incoming_level`), with the incoming non-hydrostatic pressure
+        zero from the centre of the surface cell up and the inflow advection of the incoming wave;
+      - the relaxation of the incoming characteristic variable (`open_face_relaxation="incoming"`, target discharges).
+
+      At $kH=1.2$, with a current of 0.16 m/s following or opposing: generated amplitude within 0.2 % of the target,
+      reflection 0.18–0.38 % (`test/test_open_boundary_generation.jl`).
 3. **Done: the free left face** (`left_free=true`), the mirror of the right one with the same options
-   (`docs/numerics_open_boundaries.md` section 7.3); exact mirror symmetry verified. For the opposing case of #85 it still
-   needs the generation of step 2 (the current enters there).
-4. **Relaxation zones (sections 2.1-2.5 below)** only if the reflection tests of 2 and 3 need them.
+   (`docs/numerics_open_boundaries.md` section 7.3); exact mirror symmetry verified.
+4. **Relaxation zones (sections 2.1-2.5 below): not needed** for the reflection levels of #85 (below 0.4 % at the design
+   period). They would only help with broad-band absorption, since the open face is exact for one frequency.
+5. **Next: #85**, Klopman's flume with free faces at both ends, the incoming wave at the left, the calibrated factor and
+   the relaxation of the incoming variable with the target level and discharge.
 
 1 Current state
 ---------------

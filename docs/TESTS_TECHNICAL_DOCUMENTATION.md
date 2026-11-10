@@ -20,6 +20,7 @@ every file includes, so each file also runs on its own (`julia --project=. test/
 | `test_dam_break.jl` | Stoker (wet bed) and Ritter (dry bed) dam breaks in layers, passive constituent (section 33) |
 | `test_layer_momentum.jl` | momentum budget of layered bores, the remapped advection against 1D (section 38) |
 | `test_open_boundary_radiation.jl` | radiation of dispersive waves at the open faces (right and free left face): theta-weighted radiation, pressure radiation, phase speed of a design period (section 39) |
+| `test_open_boundary_generation.jl` | wave generation through open faces, calibrated radiation speed, current entering a face, relaxation of the incoming characteristic variable, characteristic open face (section 40) |
 | `test_internal_seiche.jl` | internal seiche period against the two-layer relation, density extrapolation of the baroclinic pressure (section 34) |
 | `test_kelvin_helmholtz.jl` | Kelvin-Helmholtz growth rate of a resolved tanh shear layer against the Taylor-Goldstein mode (section 35) |
 | `test_plane_jet.jl` | turbulent plane jet with k-epsilon against the thin-shear-layer reference, free-jet spreading rate (section 36) |
@@ -2442,8 +2443,38 @@ Derivation, discretisation and the full results: `docs/numerics_open_boundaries.
   symmetric hump with free faces at both ends stays symmetric to $8\cdot10^{-16}$ m; a $kH=1.2$ packet leaves through
   either face with the same deviation from a long reference (2.17 % former, 0.68 % new); a current leaving through the
   left face is steady to round-off.
-- **Limits.** Exact for one frequency (with the period of $kH=1.2$, long waves reflect 8 %); wetting-drying step only;
-  no wave generation through an open face yet; a current entering through a free face was not tested.
+- **Limits.** Exact for one frequency (with the period of $kH=1.2$, long waves reflect 8 %); wetting-drying step only.
+  Generation, the calibrated speed and a current entering through a face: section 40.
+
+### 40) Wave generation and the characteristic open face (issue #86)
+
+Derivation and full results: `docs/numerics_open_boundaries.md`, sections 7.4–7.6 and 8. Options (`ModelConfig`; the
+defaults keep the former results bit for bit) and their results (depth 0.5 m, 10 layers, $kH=1.2$ unless noted):
+- **The model's own phase speed.** `radiation_speed_factor` scales the intrinsic radiation speed.
+  `numerical_phase_speed_factor(cfg; current)` gets it from a standing wave in a closed basin, converted from the fixed
+  wave number to the fixed frequency. Calibrated: 1.0328 against 1.0320 from the progressive wave. The reflection drops
+  from 1.49 % to 0.18 % (0.31 % → 0.08 % at $kH=0.6$, 3.66 % → 0.40 % at $kH=2$).
+- **A current entering through the face** (the opposing case of #85). With $U+c$ the face reflects about $Fr/2$:
+  4.1 % at $kH=0.3$ and 7.1 % at $kH=1.2$, for 0.16 m/s. With `radiation_theta=true` the face radiates with the
+  intrinsic speed, since its momentum has no advection then: 0.22 % and, with the factor, 0.38 %.
+- **Generation.** `left_incoming_level` / `right_incoming_level`: the face radiates the deviation from the incoming wave
+  in the level and in $q$. $q_{in}$ is zero from the centre of the surface cell up, as the model's $q$. An inflowing
+  current also advects the incoming wave at the face. Generated amplitude / target and reflection:
+
+  | case | amplitude / target | reflection |
+  |---|---|---|
+  | still water, $kH=0.6$ | 1.002 | 0.09 % |
+  | still water, $kH=1.2$ | 1.000 | 0.18 % |
+  | still water, $kH=2.0$ | 1.000 | 0.39 % |
+  | following current 0.16 m/s | 1.001 | 0.27 % |
+  | opposing current 0.16 m/s | 0.998 | 0.38 % |
+- **Relaxation of the incoming characteristic variable** (`open_face_relaxation="incoming"`, with
+  `right_target_discharge` / `left_target_discharge`): with $\tau=2T$ it reflects 0.22 %, the level relaxation 5.1 %.
+- **Characteristic open face** (`open_face_scheme="characteristic"`, `open_face_beta`, `open_face_wet_depth`):
+  - hydrostatic long waves: $\beta=0$ reflects 0.154 % ($(k\Delta x)^2/16$), the box form $\beta=-\tfrac12$ 0.013 %;
+    with a current of 0.16 m/s leaving or entering, 0.13 % and 0.15 %.
+  - For dispersive waves it reflects more than the calibrated radiation scheme (impedance and pressure coupling,
+    section 8.7), so the radiation scheme is recommended there.
 
 ## Test-by-test documentation
 
@@ -3797,6 +3828,35 @@ amplitude over the last 3.5 wavelengths before the open face. "New": `radiation_
   options below 1.2 % at the left face (0.68 %), former above 1.5 % (2.17 %), left and right within 1 % of each other.
 - `test_validate_residual_reflection_is_interior_dispersion_error`: $kH=2$: $|R|$ over $|c_{num}/c-1|/2$ between 0.7
   and 1.3 (0.95).
+
+### Wave generation and characteristic face tests (`test_open_boundary_generation.jl`, section 40)
+
+Regular waves as in section 39, generated at the free left face (`left_incoming_level`, ramped over 3 periods) and
+absorbed at the free right face, with the calibrated speed factor. The amplitude and reflection come from a fit of an
+incident and a reflected wave with a complex wave number over the inner channel; the amplitude is extrapolated to
+$x=0$. Measured values in brackets.
+- `test_verify_open_face_options_config_checks`: unknown scheme or relaxation, $\beta$ outside $[-1,0]$, a negative wet
+  depth and a speed factor outside $[0.5,2]$ are rejected. Also rejected: the new options on the fixed grid, an incoming
+  wave without `radiation_theta` or at a face that is not free, a target discharge with the level relaxation or without
+  a relaxation time, and the calibration without a design period.
+- `test_verify_radiation_speed_factor`: the radiation speed with factor $f$ is $U+f(c-U)$, also for the long-wave
+  speed.
+- `test_verify_open_face_schemes_steady_current`: 0.16 m/s through two relaxed free faces stays uniform to $10^{-9}$,
+  for the level relaxation, the incoming relaxation and the characteristic face ($10^{-14}$ or better).
+- `test_verify_characteristic_face_mirror_symmetry`: a symmetric hump with characteristic faces at both ends stays
+  symmetric to $10^{-12}$ m.
+- `test_validate_characteristic_box_form_long_waves`: hydrostatic $kH=0.3$: $\beta=0$ within 25 % of
+  $(k\Delta x)^2/16$ (0.154 % against 0.154 %); $\beta=-\tfrac12$ below 0.05 % (0.013 %).
+- `test_validate_current_entering_open_face`: hydrostatic $kH=0.3$, 0.16 m/s entering: the radiation scheme with
+  `radiation_theta` and the characteristic face below 0.5 % (0.22 %, 0.15 %); backward Euler with $U+c$ above 2 %
+  (4.1 %).
+- `test_validate_calibrated_radiation_speed`: the factor at $kH=1.2$ lies in $[1.025,1.040]$ (1.0328); with it $|R|$
+  below 0.4 % (0.18 %).
+- `test_validate_wave_generation_still_water`: amplitude within 1 % of the target (1.0004), $|R|$ below 0.5 % (0.18 %).
+- `test_validate_wave_generation_on_current`: following and opposing current of 0.16 m/s, incoming relaxation
+  ($\tau=20T$): amplitude within 1 % (1.0009, 0.9983), $|R|$ below 0.5 % (0.27 %, 0.38 %).
+- `test_validate_incoming_relaxation_does_not_reflect`: $\tau=2T$: the level relaxation reflects above 2 % (5.1 %;
+  theory 4.0 %), the incoming relaxation below 0.6 % (0.22 %).
 
 ## Additional validation scripts and literature basis
 
