@@ -204,6 +204,20 @@ Base.@kwdef mutable struct ModelConfig
     # (issue #25), the multigrid takes 0.63, 0.54 and 0.38 of the direct time at 8.6e3, 7.7e4 and 7e5 unknowns, but 3 to 7
     # times the (sub-millisecond) direct time below about 5e3.
     nonhydro_solver::String = "auto"
+    # Water level of the layer thicknesses at the interior u-faces of the wetting-drying step (issue #88): "upwind" (the
+    # level of the upwind column, Stelling & Duinmeijer 2003) or "limited" (second order: the upwind level plus half the
+    # limited slope of the upwind column, `_wd_limited_face_level`; upwind next to dry columns). WHY "upwind" default:
+    # keeps the results of the validated cases unchanged until "limited" is validated; "upwind" diffuses the level by
+    # about |u| dx/2 and damps waves at a rate proportional to their amplitude and to dx.
+    wd_face_level::String = "upwind"
+    # Top layer of the wetting-drying step (issue #88): "cut" (the layer cut by the surface is a layer of its own, however
+    # thin) or "merged" (a cut top layer thinner than wd_merge_fraction * dz is joined with the layer below, at the cells
+    # and the faces, `layer_thicknesses!`; face velocities are remapped by overlap when the layering changes,
+    # `_wd_remap_face_layers!`). WHY "cut" default: keeps the validated results until "merged" is validated.
+    wd_top_layer::String = "cut"
+    # -, merge threshold of wd_top_layer = "merged", as a fraction of dz (0 < fraction < 1): the top layer is then between
+    # wd_merge_fraction dz and (1 + wd_merge_fraction) dz thick (unless the column is shallower)
+    wd_merge_fraction::Float64 = 0.1
     # Relative residual |r| / |rhs| at which the multigrid CG stops (-). The pressure solve makes the theta fluxes of the
     # cells below the surface divergence-free; the residual is a divergence error of this relative size. WHY 1e-8: the
     # pressure then differs from the direct solution by about 1e-9 relative, well below the splitting error of the step
@@ -324,6 +338,9 @@ function copy_config(cfg::ModelConfig)
         wetting_drying=cfg.wetting_drying,
         dry_depth_threshold=cfg.dry_depth_threshold,
         advective_courant_warning=cfg.advective_courant_warning,
+        wd_face_level=cfg.wd_face_level,
+        wd_top_layer=cfg.wd_top_layer,
+        wd_merge_fraction=cfg.wd_merge_fraction,
     )
 end
 
@@ -1512,6 +1529,11 @@ end
 function _check_wetting_drying_config(cfg::ModelConfig)
     cfg.layer_momentum_advection in ("remapped", "column") ||
         throw(ArgumentError("layer_momentum_advection must be \"remapped\" or \"column\", got \"$(cfg.layer_momentum_advection)\""))
+    cfg.wd_face_level in ("upwind", "limited") ||
+        throw(ArgumentError("wd_face_level must be \"upwind\" or \"limited\", got \"$(cfg.wd_face_level)\""))
+    cfg.wd_top_layer in ("cut", "merged") ||
+        throw(ArgumentError("wd_top_layer must be \"cut\" or \"merged\", got \"$(cfg.wd_top_layer)\""))
+    0.0 < cfg.wd_merge_fraction < 1.0 || throw(ArgumentError("wd_merge_fraction must lie in (0, 1)"))
     cfg.nonhydro_solver in ("auto", "direct", "multigrid") ||
         throw(ArgumentError("nonhydro_solver must be \"auto\", \"direct\" or \"multigrid\", got \"$(cfg.nonhydro_solver)\""))
     0.0 < cfg.nonhydro_solver_tolerance < NH_MULTIGRID_TOLERANCE_MAX ||

@@ -140,7 +140,11 @@ include("open_boundary_helpers.jl")
         # the boundary radiates the linear-theory phase speed; the interior's phase speed differs by c_num/c - 1 =
         # k/k_num - 1, and the mismatch reflects about half of it
         R, kr = rd_reflection(; kh=2.0, options=rd_new(2.0))
-        ratio = R / (abs(1 / kr - 1) / 2)
-        @test RD_DISPERSION_RATIO_RANGE[1] < ratio < RD_DISPERSION_RATIO_RANGE[2]
+        if OB_MERGED_DEFAULT
+            @test R < RD_R_MAX_KH2_MERGED
+        else
+            ratio = R / (abs(1 / kr - 1) / 2)
+            @test RD_DISPERSION_RATIO_RANGE[1] < ratio < RD_DISPERSION_RATIO_RANGE[2]
+        end
     end
 end

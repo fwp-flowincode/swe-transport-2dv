@@ -50,16 +50,32 @@ both above the grid bottom, on interfaces z_k = (k-1) dz (m):
     h_k = max(0, min(z_{k+1}, zeta) - max(z_k, zb)),   z_{nz+1} = +infinity (the top layer is open above).
 
 sum(h) = max(zeta - zb, 0). For a flat bed and zeta in the top layer this is the variable top layer (dz + eta on top).
+
+`merge` (-, 0 <= merge < 1; `ModelConfig.wd_top_layer = "merged"`, issue #88): a top layer s (the highest with h_s > 0)
+thinner than merge * dz is joined with the layer below, if that holds water: h_{s-1} = zeta - max(z_{s-1}, zb),
+h_s = 0. The top layer is then at least merge * dz thick (unless the whole column is thinner). merge = 0: no merging.
+WHY: a top layer of arbitrarily small thickness makes the vertical coefficients 1/h of the pressure problem unbounded
+and its interface appears and disappears whenever the surface crosses a level; joining it with the layer below is
+common practice in z-layer models (e.g. the thin-top-layer treatment of Delft3D-FLOW's Z-model; reference not checked).
 """
-function layer_thicknesses!(h::AbstractVector{<:Real}, zeta::Real, zb::Real, dz::Real)
+function layer_thicknesses!(h::AbstractVector{<:Real}, zeta::Real, zb::Real, dz::Real; merge::Real=0.0)
     nz = length(h)
+    s = 0
     @inbounds for k in 1:nz
         lo = max((k - 1) * dz, zb)
         hi = k == nz ? zeta : min(k * dz, zeta)
         h[k] = max(zero(eltype(h)), hi - lo)
+        h[k] > 0 && (s = k)
+    end
+    @inbounds if s > 1 && h[s] < merge * dz && h[s - 1] > 0
+        h[s - 1] = zeta - max((s - 2) * dz, zb)
+        h[s] = zero(eltype(h))
     end
     return h
 end
+
+# Merge threshold (-) of the top layer for `layer_thicknesses!`: wd_merge_fraction with wd_top_layer = "merged", else 0
+_wd_merge(cfg::ModelConfig) = cfg.wd_top_layer == "merged" ? cfg.wd_merge_fraction : 0.0
 
 _wd_level(model::Model, i::Int) = model.config.depth + model.state.eta[i]   # m, water level zeta of column i
 
@@ -138,7 +154,7 @@ end
 
 function _wd_cell_thicknesses!(h::AbstractMatrix{<:Real}, model::Model, wd::WetDryState)
     @inbounds for i in axes(h, 2)
-        layer_thicknesses!(view(h, :, i), _wd_level(model, i), wd.bed[i], model.dz)
+        layer_thicknesses!(view(h, :, i), _wd_level(model, i), wd.bed[i], model.dz; merge=_wd_merge(model.config))
     end
     return h
 end
@@ -204,10 +220,31 @@ function _wd_characteristic_outflow_level(model::Model, wd::WetDryState, f::Int)
     return nothing
 end
 
+# Second-order face level of an interior face f (wd_face_level = "limited", issue #88): the upwind level plus half the
+# monotonized-central slope of the upwind column (van Leer 1977),
+#     zeta_f = zeta_up + MC(zeta_up - zeta_upup, zeta_down - zeta_up) / 2,
+# which lies between zeta_up and zeta_down (MC <= 2 |zeta_down - zeta_up|, same sign) and equals the upwind level at an
+# extremum. The upwind level `zeta_up` is kept where the column behind the upwind one is missing (f = 2, nx) or one of
+# the three columns is not wet (depth <= dry_depth_threshold): the positivity of the free-surface solve needs only
+# hf >= 0 and water upwind of an open face (docs/depth_positivity.md, condition C), both kept.
+# WHY: the upwind level makes the continuity flux sum(hf u) a first-order upwind flux of eta, a diffusion of about
+# |u_s| dx/2 on the level; a standing wave of ka = 0.13 lost about 0.012 1/s of energy rate to it at dx = 45 mm
+# (issue #88). WHY no Lax-Wendroff time factor (1 - c): the flux is theta-implicit in u, not an explicit transport.
+@inline function _wd_limited_face_level(model::Model, wd::WetDryState, f::Int, positive::Bool, zeta_up::Real)
+    nx = model.config.nx
+    iu, iuu, id = positive ? (f - 1, f - 2, f) : (f, f + 1, f - 1)
+    1 <= iuu <= nx || return zeta_up
+    thr = model.config.dry_depth_threshold
+    zuu, zd = _wd_level(model, iuu), _wd_level(model, id)
+    (zeta_up - wd.bed[iu] > thr && zuu - wd.bed[iuu] > thr && zd - wd.bed[id] > thr) || return zeta_up
+    return zeta_up + 0.5 * _monotonized_central_scalar(zeta_up - zuu, zd - zeta_up)
+end
+
 function _wd_face_thicknesses!(model::Model, wd::WetDryState)
     cfg = model.config
     u = model.state.u
     nx = cfg.nx
+    limited = cfg.wd_face_level == "limited"
     @inbounds for f in 1:(nx + 1)
         if (f == nx + 1 || f == 1) && (zc = _wd_characteristic_outflow_level(model, wd, f)) !== nothing
             zeta_f = zc   # characteristic face with outflow: the upwind level (issue #86)
@@ -226,13 +263,14 @@ function _wd_face_thicknesses!(model::Model, wd::WetDryState)
             end
             zl, zr = _wd_level(model, f - 1), _wd_level(model, f)
             zeta_f = s > 0 ? zl : (s < 0 ? zr : max(zl, zr))
+            limited && s != 0 && (zeta_f = _wd_limited_face_level(model, wd, f, s > 0, zeta_f))
         end
         hf = view(wd.hf, :, f)
         zb_f = _wd_face_bed(model, wd, f)
         zg = _wd_gate_level(wd, f, zb_f)
         wd.gate_active[f] = zeta_f > zg
         if zeta_f - zb_f > cfg.dry_depth_threshold && zg - zb_f > cfg.dry_depth_threshold
-            layer_thicknesses!(hf, min(zeta_f, zg), zb_f, model.dz)
+            layer_thicknesses!(hf, min(zeta_f, zg), zb_f, model.dz; merge=_wd_merge(cfg))
         else
             fill!(hf, 0.0)
         end
@@ -304,7 +342,7 @@ function _wd_left_face_transport(model::Model, shape::AbstractVector{<:Real})
     zb = _wd_face_bed(model, wd, 1)
     zeta - zb > model.config.dry_depth_threshold || return 0.0
     h = zeros(eltype(wd.hf), model.config.nz)
-    layer_thicknesses!(h, zeta, zb, model.dz)
+    layer_thicknesses!(h, zeta, zb, model.dz; merge=_wd_merge(model.config))
     return sum(h .* shape)
 end
 
@@ -925,6 +963,107 @@ function _wd_initialize_new_face_layers!(model::Model, wd::WetDryState)
 end
 
 """
+    _wd_remap_face_layers!(model, wd)
+
+Conservative remap of the face velocities u (m/s) from the face layers of the last step (wd.hf_prev) to those of this
+step (wd.hf), used with `wd_top_layer = "merged"` (issue #88) in place of `_wd_initialize_new_face_layers!`. At each
+interior face whose set of open layers changed (the surface crossed a level, or the top layer was merged or split):
+
+    u_k^new = 1/hf_k^new * integral over layer k^new of u^old(z) dz,
+
+with u^old piecewise constant on the old layers, the old top layer extended upwards without limit (the fluid that rises
+above it moves with it) and the old bottom layer downwards. A split keeps u in both parts (momentum and kinetic energy
+conserved), a merge takes the thickness-weighted mean (momentum conserved, the kinetic energy of the shear lost); a
+surface that crosses several levels in one step is mapped the same way. Faces whose layering is unchanged keep u bit
+for bit; closed layers get u = 0. Remapping by overlap integrals is the standard conservative remap of arbitrary
+Lagrangian-Eulerian vertical coordinates (e.g. White & Adcroft 2008, J. Comput. Phys. 227; equation numbers not
+checked), here first order (piecewise constant).
+PERF: no allocation; wd.tri_a is free at this point of the step (it is the work column of the implicit vertical terms).
+"""
+function _wd_remap_face_layers!(model::Model, wd::WetDryState)
+    u = model.state.u
+    nz = model.config.nz
+    dz = model.dz
+    buf = wd.tri_a
+    @inbounds for f in 2:model.config.nx
+        wd.hf_prev[1, f] < 0.0 && continue   # first step: no previous layering
+        kb, kt = 0, 0   # lowest and highest open layer of the last step
+        same = true
+        for k in 1:nz
+            if wd.hf_prev[k, f] > 0.0
+                kb == 0 && (kb = k)
+                kt = k
+            end
+            (wd.hf_prev[k, f] > 0.0) == (wd.hf[k, f] > 0.0) || (same = false)
+        end
+        (same || kb == 0) && continue
+        zb_f = _wd_face_bed(model, wd, f)
+        for k in 1:nz
+            buf[k] = u[k, f]
+        end
+        for k in 1:nz
+            if wd.hf[k, f] <= 0.0
+                u[k, f] = 0.0
+                continue
+            end
+            lo = max((k - 1) * dz, zb_f)
+            hi = lo + wd.hf[k, f]
+            acc = 0.0
+            single = 0
+            for kk in kb:kt
+                wd.hf_prev[kk, f] > 0.0 || continue
+                olo = kk == kb ? -Inf : max((kk - 1) * dz, zb_f)
+                ohi = kk == kt ? Inf : max((kk - 1) * dz, zb_f) + wd.hf_prev[kk, f]
+                if olo <= lo && hi <= ohi
+                    single = kk   # the new layer lies in one old layer: u unchanged
+                    break
+                end
+                overlap = min(hi, ohi) - max(lo, olo)
+                overlap > 0.0 && (acc += overlap * buf[kk])
+            end
+            u[k, f] = single > 0 ? buf[single] : acc / (hi - lo)
+        end
+    end
+    copyto!(wd.hf_prev, wd.hf)
+    return nothing
+end
+
+"""
+    _wd_rebuild_interface_velocities!(model, wd)
+
+Vertical velocity w^{n+1} (m/s) of the state on the layers of time n+1 (wd.h_new), used with `wd_top_layer = "merged"`
+(issue #88) after the constituent transport:
+
+    w_1 = 0,   w_{k+1} = w_k - (q_{k,i+1/2} - q_{k,i-1/2}) / dx   for the layers k below the top layer s of the column,
+    w_k = 0   for k > s (the top of the top layer and the interfaces above it, inside a merged layer included),
+
+with the theta discharges q (m^2/s) of the step. The cells below the top layer have the same thickness at n and n+1
+unless the surface crossed their upper interface in this step, so this equals the flux-consistent w of the continuity
+step there; it differs only where the layering changed.
+WHY: the continuity step of the transport also carries the volume that moves between cells when the layering changes
+(a merged top layer that splits hands over its upper part, h = merge dz, to the new cell in one step: a flux of
+merge dz / dt, about 0.35 m/s for dz = 25 mm and dt = 7.2 ms). That flux is a remap of the grid, not a velocity of
+the fluid; kept as the state w it entered the vertical momentum advection of the next step and dissipated about 0.3 1/s
+of the energy of a standing wave of ka = 0.13 (issue #88, energy budget).
+"""
+function _wd_rebuild_interface_velocities!(model::Model, wd::WetDryState)
+    w = model.state.w
+    nz = model.config.nz
+    dx = model.dx
+    @inbounds for i in axes(w, 2)
+        s = 0
+        for k in 1:nz
+            wd.h_new[k, i] > 0.0 && (s = k)
+        end
+        w[1, i] = 0.0
+        for k in 1:nz
+            w[k + 1, i] = k < s ? w[k, i] - (wd.q[k, i + 1] - wd.q[k, i]) / dx : 0.0
+        end
+    end
+    return nothing
+end
+
+"""
     _wd_check_depth_positivity(model, wd)
 
 Stops the run if a column holds a negative depth zeta - z_b beyond round-off at the start of a step (only possible if the
@@ -1301,13 +1440,17 @@ function _add_incoming_pressure!(model::Model, wd::WetDryState, char::Characteri
     (char.incoming === nothing || char.k_in == 0.0) && return nothing
     cfg = model.config
     zb = _wd_face_bed(model, wd, f)
-    # m: height above the face bed of the centre of the still-water surface cell (wet part of the layer that holds the
-    # still level cfg.depth), where the model's q is zero
+    # m: height above the face bed where the model's q is zero: "cut" the centre of the still-water surface cell (wet part
+    # of the layer that holds the still level cfg.depth), "merged" the still level itself (q = 0 at zeta, issue #88; the
+    # profile is then evaluated at the centres of the still-water wet parts of the layers, the top cell's below zeta)
+    merged = cfg.wd_top_layer == "merged"
     ks = clamp(ceil(Int, cfg.depth / model.dz), 1, cfg.nz)
-    zs = 0.5 * ((ks - 1) * model.dz + cfg.depth) - zb
+    zs = merged ? cfg.depth - zb : 0.5 * ((ks - 1) * model.dz + cfg.depth) - zb
     scale = cfg.rho0 * cfg.g   # Pa/m
     @inbounds for k in 1:cfg.nz
-        P = _incoming_pressure_profile(char.k_in, (k - 0.5) * model.dz - zb, zs)
+        zc = merged ? 0.5 * (max((k - 1) * model.dz, zb) + (k == cfg.nz ? cfg.depth : min(k * model.dz, cfg.depth))) :
+            (k - 0.5) * model.dz
+        P = _incoming_pressure_profile(char.k_in, zc - zb, zs)
         P == 0.0 && continue
         E[k] += scale * P * ((char.e_b_new - char.e_b_old) + (1.0 - th) * mu * (char.e_b_old - char.e_n_old) +
                              th * mu * (char.e_b_new - char.e_n_new))
@@ -1339,8 +1482,11 @@ repeated free-surface solve:
    so the continuity of the cells below the surface holds approximately, and w follows from the layer continuity (step 6).
    WHY not correct u directly (as Casulli 1999 does): that changes the column transports after the solve, and the new
    level computed from them is no longer guaranteed to be at or above the bed.
-WHY q = 0 in the surface cell (not at the surface itself): the surface cell is cut by the moving surface and can be
-arbitrarily thin; the simple condition keeps the system SPD for every geometry. It is first order in the surface-cell
+With `wd_top_layer = "merged"` (issue #88) the geometry is the grid of time n (h_nh = h^n), w^n comes from the
+continuity of u^n at every interface, the w advection is second order (limited), and the top cell is an unknown with
+q = 0 at the surface zeta (Dirichlet at h_s/2 above its centre, predicted surface velocity delta/dt).
+WHY q = 0 in the surface cell (not at the surface itself) with "cut": the surface cell is cut by the moving surface and
+can be arbitrarily thin; the simple condition keeps the system SPD for every geometry. It is first order in the surface-cell
 thickness (period error of a standing wave, test_validate_wd_nonhydro_standing_wave_full_dispersion_*).
 For a lake at rest the right-hand side is exactly zero, so q = 0 and nothing changes.
 Open right boundary (water level or free outflow, issue #49): the boundary face is not corrected (dq/dx = 0 there).
@@ -1359,10 +1505,19 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
     h_nh, w_star, idx = wd.h_nh, wd.w_star, wd.nh_index
     wet(k, i) = h_nh[k, i] > WD_EMPTY_CELL_THICKNESS
 
-    # 1. provisional geometry
-    @inbounds for i in 1:nx
-        zeta = max(cfg.depth + ws.eta_old[i] + wd.delta[i], wd.bed[i])
-        layer_thicknesses!(view(h_nh, :, i), zeta, wd.bed[i], model.dz)
+    # 1. geometry of the pressure problem: "cut" the provisional level zeta^n + delta of the free-surface solve; "merged"
+    # (issue #88) the grid of time n, on which the whole step is computed (the layering change to n+1 is a remap)
+    # WHY the grid of time n with "merged": with the provisional geometry, a merged top layer of time n that splits in
+    # h_nh gave the cell below a divergence source (h_nh - h^n)/dt of about -merge dz/dt, which the projection turned
+    # into a spurious w and pressure gradient (energy budget, issue #88). On the grid of time n every interface between
+    # two wet cells lies below the top layer, so w^n there is the exact continuity integral of u^n (no fallback).
+    if cfg.wd_top_layer == "merged"
+        copyto!(h_nh, wd.h)
+    else
+        @inbounds for i in 1:nx
+            zeta = max(cfg.depth + ws.eta_old[i] + wd.delta[i], wd.bed[i])
+            layer_thicknesses!(view(h_nh, :, i), zeta, wd.bed[i], model.dz)
+        end
     end
 
     # 2. w predictor at the interfaces k = 2..nz between two wet cells (k-1 below, k above), from w^n
@@ -1393,34 +1548,54 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
     W = theta == 1.0 ? st.w : wd.w_nh
     u0 = wd.u_old
     fill!(w_star, 0.0)
+    # Explicit upwind advection of w. With wd_top_layer = "merged" (issue #88) second order where the stencil exists: the
+    # upwind difference c (w_up - w_k) plus the anti-diffusive correction -c (phi_k - phi_up) of the flux-limited
+    # Lax-Wendroff face values, phi_j = (1 - C)/2 MC(w_j - w_{j,up}, w_{j,down} - w_j), C = c dt (van Leer 1977,
+    # Sweby 1984; the same limiter as the tvd2 transport). phi = 0 where a neighbour interface is missing (first order),
+    # and the correction is left out where the first-order step is capped (dt sum c > 1).
+    # WHY: the first-order upwind form diffuses w by |u| dx/2 and |w| h/2, an energy loss proportional to the amplitude
+    # (0.007 to 0.014 1/s of a standing wave of ka = 0.13 at nz = 10..40, energy budget of issue #88).
+    second_w = cfg.wd_top_layer == "merged"
+    wv(kk, j) = 2 <= kk <= nz && 1 <= j <= nx && wet(kk - 1, j) && wet(kk, j)   # interface kk of column j holds a w
+    phi_x(kk, j, d, C) = (wv(kk, j + d) && wv(kk, j - d)) ?
+        0.5 * (1.0 - C) * _monotonized_central_scalar(W[kk, j] - W[kk, j + d], W[kk, j - d] - W[kk, j]) : 0.0
+    # WHY no surface value as the upper stencil point (d(zeta)/dt of the last step at the top of the top cell): tried,
+    # it raised the energy loss at both amplitudes (issue #88)
+    phi_z(kk, j, d, C) = (wv(kk + d, j) && wv(kk - d, j)) ?
+        0.5 * (1.0 - C) * _monotonized_central_scalar(W[kk, j] - W[kk + d, j], W[kk - d, j] - W[kk, j]) : 0.0
     @inbounds for i in 1:nx, k in 2:nz
         (wet(k - 1, i) && wet(k, i)) || continue
         wk = W[k, i]
         ubar = 0.25 * (u0[k - 1, i] + u0[k - 1, i + 1] + u0[k, i] + u0[k, i + 1])   # m/s, u at the interface
         csum = 0.0
         tend = 0.0
+        anti = 0.0   # 1/s * m/s, second-order correction of the tendency
         if ubar > 0.0 && i > 1 && wet(k - 1, i - 1) && wet(k, i - 1)
             c = ubar / dx
             csum += c
             tend += c * (W[k, i - 1] - wk)
+            second_w && (anti -= c * (phi_x(k, i, -1, c * dt) - phi_x(k, i - 1, -1, c * dt)))
         elseif ubar < 0.0 && i < nx && wet(k - 1, i + 1) && wet(k, i + 1)
             c = -ubar / dx
             csum += c
             tend += c * (W[k, i + 1] - wk)
+            second_w && (anti -= c * (phi_x(k, i, 1, c * dt) - phi_x(k, i + 1, 1, c * dt)))
         end
         w_below = 0.5 * (W[k - 1, i] + wk)   # m/s, at the centre of cell k-1
         if w_below > 0.0 && k > 2 && wet(k - 2, i)
             c = w_below / h_nh[k - 1, i]
             csum += c
             tend += c * (W[k - 1, i] - wk)
+            second_w && (anti -= c * (phi_z(k, i, -1, c * dt) - phi_z(k - 1, i, -1, c * dt)))
         end
         w_above = 0.5 * (wk + W[k + 1, i])   # m/s, at the centre of cell k
         if w_above < 0.0 && k < nz && wet(k + 1, i)
             c = -w_above / h_nh[k, i]
             csum += c
             tend += c * (W[k + 1, i] - wk)
+            second_w && (anti -= c * (phi_z(k, i, 1, c * dt) - phi_z(k + 1, i, 1, c * dt)))
         end
-        w_star[k, i] = wk + (dt * csum > 1.0 ? tend / csum : dt * tend)
+        w_star[k, i] = wk + (dt * csum > 1.0 ? tend / csum : dt * (tend + anti))
     end
     if theta != 1.0
         # The continuity below holds for the theta velocities; with w^{n+1} = w_star - dt/rho0 dz(theta q^{n+1} +
@@ -1433,7 +1608,19 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
         end
     end
 
-    # 3. pressure problem: unknowns are the wet cells below the surface cell of each column
+    # 3. pressure problem: unknowns are the wet cells below the surface cell of each column ("cut"), or all wet cells
+    # with q = 0 at the surface zeta ("merged", issue #88): the top cell s couples to q = 0 at the distance h_s/2 above
+    # its centre, through the surface velocity w_s = w*_s - theta dt/rho0 (0 - q_s)/(h_s/2), predicted from the vertical
+    # momentum like the interior interfaces (w^n from the continuity of u^n over the column, theta split of q).
+    # WHY: q = 0 in the whole surface cell puts the pressure node of the surface half a cell too low; with the merged top
+    # layer (up to (1 + merge) dz thick) that is a large part of the wave's pressure profile. Phase speed / linear theory
+    # at k h = 0.6, 1.2, 2.0 (10 layers, 40 cells per wavelength, theta = 0.7): "cut" 1.0072, 1.0328, 1.0845; "merged"
+    # 0.9981, 0.9971, 0.9950 (20 layers: 1.0028, 1.0157, 1.0417 against 0.9983, 0.9981, 0.9984; issue #88).
+    # WHY not w*_s = delta/dt (the level change of the free-surface solve, tried first): it is a continuity value, the
+    # surface fluid then gets its new velocity without pressure, the non-hydrostatic pressure is too weak and the waves
+    # too fast (1.0458 at k h = 1.2, 1.1601 at 2.0).
+    # The top cell is never thinner than merge dz (except in a shallow column), so its coefficient 2/h_s stays bounded.
+    top_unknown = cfg.wd_top_layer == "merged"
     n = 0
     fill!(idx, 0)
     @inbounds for i in 1:nx
@@ -1444,7 +1631,16 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
                 break
             end
         end
-        for k in 1:(s - 1)
+        if top_unknown && s > 0
+            # w^n at the surface: continuity integral of the discharges of time n over the column; theta predictor as at
+            # the interior interfaces, with dz q^n = (0 - q_s^n)/(h_s/2)
+            ws_n = 0.0
+            for k in 1:s
+                ws_n -= (wd.q[k, i + 1] - wd.q[k, i]) / dx
+            end
+            w_star[s + 1, i] = ws_n + theta * (1.0 - theta) * dt / rho0 * wd.q_nh[s, i] / (0.5 * h_nh[s, i])
+        end
+        for k in 1:(top_unknown ? s : s - 1)
             wet(k, i) || continue
             n += 1
             idx[k, i] = n
@@ -1566,11 +1762,13 @@ function _wd_nonhydrostatic_correction!(model::Model, wd::WetDryState)
             end
             use_mg && (mg.levels[1].dv[k, i] += a)
         end
-        # interface k+1 (above): always between wet cells, since k lies below the surface cell
-        a = 1.0 / (0.5 * (h_nh[k, i] + h_nh[k + 1, i]))
+        # interface k+1 (above): between wet cells, since k lies below the surface cell ("cut"); for the top cell
+        # ("merged") the surface, q = 0 at h_k/2 above the centre
+        top = k == nz || !wet(k + 1, i)
+        a = top ? 1.0 / (0.5 * h_nh[k, i]) : 1.0 / (0.5 * (h_nh[k, i] + h_nh[k + 1, i]))
         div += w_star[k + 1, i]
         diag += a
-        N = idx[k + 1, i]
+        N = top ? 0 : idx[k + 1, i]
         if N > 0
             push!(rows, P); push!(cols, N); push!(vals, -a)
         end
@@ -1730,7 +1928,7 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
     @timeit model.timers "wd/geometry" begin
         _wd_cell_thicknesses!(wd.h, model, wd)
         _wd_face_thicknesses!(model, wd)
-        _wd_initialize_new_face_layers!(model, wd)
+        cfg.wd_top_layer == "merged" ? _wd_remap_face_layers!(model, wd) : _wd_initialize_new_face_layers!(model, wd)
         copyto!(ws.u_old, st.u)   # u^n with the newly opened face layers (theta part of the continuity flux)
         @. wd.q = wd.hf * st.u   # discharges of time n, for the advection
     end
@@ -1828,7 +2026,7 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
 
     # 6. vertical fluxes through the fixed interfaces (m/s), integrated upwards from the bed
     @timeit model.timers "wd/level_and_w" @inbounds for i in 1:nx
-        layer_thicknesses!(view(wd.h_new, :, i), _wd_level(model, i), wd.bed[i], model.dz)
+        layer_thicknesses!(view(wd.h_new, :, i), _wd_level(model, i), wd.bed[i], model.dz; merge=_wd_merge(cfg))
     end
     max_mismatch = 0.0
     @timeit model.timers "wd/level_and_w" @inbounds for i in 1:nx
@@ -1850,6 +2048,7 @@ function _step_forward_wetting_drying!(model::Model, wd::WetDryState)
         @timeit model.timers "wd/density_transport" _wd_turbulent_density_diffusion!(model, wd, model.turbulence)
         @timeit model.timers "wd/k_epsilon" _wd_k_epsilon_step!(model, wd, model.turbulence)
     end
+    cfg.wd_top_layer == "merged" && _wd_rebuild_interface_velocities!(model, wd)
     wd.time += dt
 
     # Hydrostatic and non-hydrostatic pressure components in the wet cells.
