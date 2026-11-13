@@ -3400,11 +3400,17 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\thinspace p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). 
 ### Wetting and drying tests (`test_wetting_drying.jl`, section 18)
 
 Exactness, conservation and positivity tests run for the four variants hydrostatic/non-hydrostatic x `upwind1`/`tvd2`
-(suffix `_hydro_upwind1` etc.), each in 1D (nz = 1) and 2DV.
+(suffix `_hydro_upwind1` etc.) and for the merged top layer (`wd_top_layer = "merged"`, issue #88) with `tvd2`
+(`_hydro_tvd2_merged`, `_nonhydro_tvd2_merged`), each in 1D (nz = 1) and 2DV.
 
 - `test_verify_wd_layer_thickness_kernel`: `layer_thicknesses!` gives non-negative layers summing to
   $\max(\zeta-z_b,0)$, reduces to the variable top layer for a flat bed, keeps the top layer open above the grid top and
-  cuts the layers at bed and surface correctly.
+  cuts the layers at bed and surface correctly. With `merge` = 0.1 a top layer thinner than 0.1 $\Delta z$ joins the layer
+  below (also one cut by the bed), a thicker one is kept, a column thinner than the threshold keeps its one layer, and
+  the sum stays $\max(\zeta-z_b,0)$.
+- `test_verify_wd_merged_face_remap` (issue #88): the overlap remap of the face velocities conserves the face momentum
+  $\sum h_f u$ when the top layer is merged, gives both parts of a split top layer the velocity of the old one, sets
+  closed layers to 0 and leaves a face with unchanged layering bit for bit.
 - `test_verify_wd_configuration_checks`: unknown momentum scheme, `periodic_x` and a negative bed are rejected; one layer,
   a bed that is not a whole number of cells, the non-hydrostatic mode and `tvd2` are accepted.
 - `test_verify_wd_lake_at_rest_{1d,2dv,2dv_stratified}_*`: still water over a beach rising out of the water, an island and
@@ -3476,6 +3482,18 @@ Exactness, conservation and positivity tests run for the four variants hydrostat
 - `test_validate_wd_nonhydro_standing_wave_deep_water`: $kH=3$ (shallow-water period 42 % too short): period error
   below 3 % on 40 x 40 cells (observed 1.9 %). Over $kH=0.25\ldots3$ the phase speed is within 0.0-1.9 % of the exact one
   (`experiments/wetting_drying`, mode `dispersion`).
+- `test_verify_wd_nonhydro_standing_wave_energy_amplitude_independent` (issue #88): standing wave of the Klopman (1994)
+  flume ($h$ = 0.5 m, $T$ = 1.44 s, $k$ = 2.35 1/m, $kh$ = 1.18) in a closed basin of one wavelength, 60 x 20 cells,
+  $N$ = 200 steps per period, $\theta$ = 0.55, `tvd2`. An inviscid standing wave conserves its energy and the
+  $\theta$ damping is linear, so the energy rate (period means, periods 2-10) must be the same at $a$ = 0.057 m
+  ($ka$ = 0.13) and at $a$ = 0.0057 m, namely $2\cdot4\pi^2(\theta-\tfrac12)/(NT)$ = 0.0137 1/s. Measured: 0.0161 1/s for
+  the small wave (within 25 %, tested), 0.0483 1/s for the large one: an amplitude-dependent loss of 0.032 1/s, which
+  does not change with $\Delta x$, $\Delta t$, $n_z$, the advection scheme or the closure (issue #88). The excess test
+  (at most 0.002 1/s) stays `@test_broken` for the default scheme. With the merged top layer, the remap, the pressure
+  problem on the grid of time $n$, the second-order $w$ advection and the limited face level (`wd_top_layer = "merged"`,
+  `wd_face_level = "limited"`) the excess drops to 0.0033 1/s (rates 0.0169 and 0.0136 1/s; the small wave loses only
+  the $\theta$ part); the remainder does not change with $\Delta x$, $\Delta t$ or $n_z$ and is not yet understood, so this
+  check is `@test_broken` as well (docs/plan_issue_88_wave_damping.md, section 8).
 - `test_validate_wd_solitary_wave_runup`: non-breaking solitary wave, $H/d=0.019$, beach 1:19.85, against the maximum
   runup $R/d=2.831\sqrt{\cot\beta}\thinspace(H/d)^{5/4}$ of Synolakis (1987): 1D within 10 % at $\Delta x=0.05$ m (observed 6.2 %) and
   smaller than at 0.1 m (11.2 %); 2DV non-hydrostatic (12 layers, `tvd2`) within 15 % at 0.1 m (observed 12.9 %). The
@@ -3827,7 +3845,9 @@ amplitude over the last 3.5 wavelengths before the open face. "New": `radiation_
 - `test_validate_left_free_face_reflection_matches_right`: $kH=1.2$ packet against a three times longer channel: new
   options below 1.2 % at the left face (0.68 %), former above 1.5 % (2.17 %), left and right within 1 % of each other.
 - `test_validate_residual_reflection_is_interior_dispersion_error`: $kH=2$: $|R|$ over $|c_{num}/c-1|/2$ between 0.7
-  and 1.3 (0.95).
+  and 1.3 (0.95). With the merged top layer as default (`wd_top_layer = "merged"`, issue #88) the interior's phase
+  error is 0.4 % instead of 7 %, the ratio is no longer a measure, and $|R|$ itself must stay below 0.6 % (0.39 %; "cut"
+  3.66 %).
 
 ### Wave generation and characteristic face tests (`test_open_boundary_generation.jl`, section 40)
 
@@ -3851,7 +3871,7 @@ $x=0$. Measured values in brackets.
   `radiation_theta` and the characteristic face below 0.5 % (0.22 %, 0.15 %); backward Euler with $U+c$ above 2 %
   (4.1 %).
 - `test_validate_calibrated_radiation_speed`: the factor at $kH=1.2$ lies in $[1.025,1.040]$ (1.0328); with it $|R|$
-  below 0.4 % (0.18 %).
+  below 0.4 % (0.18 %). With the merged top layer as default the factor range is $[0.990,1.005]$ (0.9971, issue #88).
 - `test_validate_wave_generation_still_water`: amplitude within 1 % of the target (1.0004), $|R|$ below 0.5 % (0.18 %).
 - `test_validate_wave_generation_on_current`: following and opposing current of 0.16 m/s, incoming relaxation
   ($\tau=20T$): amplitude within 1 % (1.0009, 0.9983), $|R|$ below 0.5 % (0.27 %, 0.38 %).

@@ -11,6 +11,7 @@ const OG_AMPLITUDE_RTOL = 0.01          # -, |generated amplitude / target - 1| 
 const OG_R_MAX_GENERATION = 0.005       # -, reflection at the absorbing face while generating (0.0018, 0.0027, 0.0038)
 const OG_R_MAX_CALIBRATED = 0.004       # -, k h = 1.2 with the calibrated speed factor (0.0018; factor 1: 0.0149)
 const OG_FACTOR_RANGE = (1.025, 1.040)  # -, numerical_phase_speed_factor at k h = 1.2, 10 layers (1.0328; progressive fit 1.0320)
+const OG_FACTOR_RANGE_MERGED = (0.990, 1.005)  # -, the same with wd_top_layer = "merged" (0.9971; issue #88)
 const OG_R_MAX_INFLOW = 0.005           # -, hydrostatic k h = 0.3, current entering the face (radiation 0.0022, box 0.0015)
 const OG_R_MIN_INFLOW_FORMER = 0.02     # -, the same with backward-Euler radiation (U + c, no intrinsic speed; 0.041)
 const OG_R_MAX_BOX = 0.0005             # -, hydrostatic k h = 0.3, box form beta = -1/2 (0.00013)
@@ -195,7 +196,8 @@ end
             momentum_advection_scheme="tvd2", use_hydrostatic=false, wetting_drying=true, bed_level=zeros(nx),
             write_plots=false, rd_new(OG_KH)...)
         f = numerical_phase_speed_factor(cfg)
-        @test OG_FACTOR_RANGE[1] < f < OG_FACTOR_RANGE[2]
+        fr = OB_MERGED_DEFAULT ? OG_FACTOR_RANGE_MERGED : OG_FACTOR_RANGE
+        @test fr[1] < f < fr[2]
         R, _ = rd_reflection(; kh=OG_KH, options=merge(rd_new(OG_KH), (; radiation_speed_factor=f)))
         @test R < OG_R_MAX_CALIBRATED
     end

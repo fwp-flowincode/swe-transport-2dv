@@ -22,6 +22,11 @@ const RD_R_MAX_CURRENT = 0.015       # k h = 1.2 on a following current of 0.16 
 const RD_CURRENT = 0.16              # m/s, Klopman's mean current
 # |R| against half the relative phase-speed error of the interior, |c_num/c - 1|/2 (k h = 2: 0.0366 against 0.0387, ratio 0.95)
 const RD_DISPERSION_RATIO_RANGE = (0.7, 1.3)
+# Merged top layer (wd_top_layer = "merged", issue #88): the interior's phase error at k h = 2 is 0.4 % instead of 7 %, so
+# the ratio above is no longer a measure (1.83); the reflection itself is bounded instead (0.0039; "cut" 0.0366)
+const RD_R_MAX_KH2_MERGED = 0.006
+# the expected values of the dispersion-dependent tests follow the default top layer (they switch with the default)
+const OB_MERGED_DEFAULT = ModelConfig().wd_top_layer == "merged"
 const RD_SOLVER_TOL = 1e-6           # -, max |eta_direct - eta_multigrid| / a after 300 steps (CG tolerance 1e-8; measured 2.9e-10)
 const RD_RADIATION_SPEED_RTOL = 1e-10   # -, residual of the Doppler dispersion relation / (g k tanh k h)
 # Free left face (left_free): mirror symmetry and wave packets

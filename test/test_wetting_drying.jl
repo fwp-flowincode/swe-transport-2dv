@@ -19,9 +19,14 @@ const WD_VARIANTS = (
     (tag="hydro_tvd2", use_hydrostatic=true, momentum_advection_scheme="tvd2", transport_advection_scheme="tvd2"),
     (tag="nonhydro_upwind1", use_hydrostatic=false, momentum_advection_scheme="upwind1", transport_advection_scheme="upwind1"),
     (tag="nonhydro_tvd2", use_hydrostatic=false, momentum_advection_scheme="tvd2", transport_advection_scheme="tvd2"),
+    # merged top layer (issue #88)
+    (tag="hydro_tvd2_merged", use_hydrostatic=true, momentum_advection_scheme="tvd2", transport_advection_scheme="tvd2",
+        wd_top_layer="merged"),
+    (tag="nonhydro_tvd2_merged", use_hydrostatic=false, momentum_advection_scheme="tvd2", transport_advection_scheme="tvd2",
+        wd_top_layer="merged"),
 )
 wd_variant_kwargs(v) = (use_hydrostatic=v.use_hydrostatic, momentum_advection_scheme=v.momentum_advection_scheme,
-    transport_advection_scheme=v.transport_advection_scheme)
+    transport_advection_scheme=v.transport_advection_scheme, wd_top_layer=get(v, :wd_top_layer, "cut"))
 
 # Cell-centre coordinates (m) of a configuration.
 wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
@@ -57,6 +62,50 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         @test isapprox(h[2], 0.4 - 0.33; atol=TOL_IDENTITY)
         @test isapprox(h[3], dz; atol=TOL_IDENTITY)
         @test isapprox(h[4], 0.75 - 0.6; atol=TOL_IDENTITY)
+        # merged top layer (issue #88): a top layer thinner than merge dz joins the layer below
+        merge = 0.1
+        layer_thicknesses!(h, 0.61, 0.0, dz; merge=merge)   # top layer 0.01 < 0.02: merged
+        @test h[4] == 0.0 && isapprox(h[3], 0.61 - 0.4; atol=TOL_IDENTITY)
+        layer_thicknesses!(h, 0.63, 0.0, dz; merge=merge)   # top layer 0.03: kept
+        @test isapprox(h[4], 0.03; atol=TOL_IDENTITY) && isapprox(h[3], dz; atol=TOL_IDENTITY)
+        layer_thicknesses!(h, 0.21, 0.19, dz; merge=merge)  # the layer below is cut by the bed: merged into it
+        @test h[2] == 0.0 && isapprox(h[1], 0.02; atol=TOL_IDENTITY)
+        layer_thicknesses!(h, 0.01, 0.0, dz; merge=merge)   # a column thinner than merge dz: one thin layer
+        @test isapprox(h[1], 0.01; atol=TOL_IDENTITY)
+        for (zeta, zb) in ((0.73, 0.0), (0.61, 0.31), (0.405, 0.0), (1.37, 0.05), (0.6, 0.6))
+            layer_thicknesses!(h, zeta, zb, dz; merge=merge)
+            @test all(>=(0.0), h)
+            @test isapprox(sum(h), max(zeta - zb, 0.0); atol=TOL_IDENTITY)
+        end
+    end
+
+    # Overlap remap of the face velocities (wd_top_layer = "merged", issue #88): a merge conserves the momentum of the
+    # face column (thickness-weighted mean), a split keeps u in both parts, an unchanged face keeps u bit for bit.
+    @testset "test_verify_wd_merged_face_remap" begin
+        nz, dz = 4, 0.25
+        model = Model(wd_config(nx=3, nz=nz, depth=1.0, wd_top_layer="merged"))
+        wd, u = model.wetdry, model.state.u
+        f = 2
+        fill!(wd.hf_prev, 0.0); fill!(wd.hf, 0.0)
+        # merge: [dz, dz, dz, 0.01] -> [dz, dz, dz + 0.01, 0]
+        wd.hf_prev[:, f] .= (dz, dz, dz, 0.01)
+        wd.hf[:, f] .= (dz, dz, dz + 0.01, 0.0)
+        u[:, f] .= (0.1, 0.2, 0.3, 0.7)
+        momentum = sum(wd.hf_prev[:, f] .* u[:, f])
+        SweTransport2DV._wd_remap_face_layers!(model, wd)
+        @test isapprox(sum(wd.hf[:, f] .* u[:, f]), momentum; rtol=TOL_IDENTITY)
+        @test u[1, f] == 0.1 && u[2, f] == 0.2 && u[4, f] == 0.0
+        # split: [dz, dz, dz + 0.03, 0] -> [dz, dz, dz, 0.03]
+        wd.hf_prev[:, f] .= (dz, dz, dz + 0.03, 0.0)
+        wd.hf[:, f] .= (dz, dz, dz, 0.03)
+        u[:, f] .= (0.1, 0.2, 0.3, 0.0)
+        SweTransport2DV._wd_remap_face_layers!(model, wd)
+        @test u[3, f] == 0.3 && u[4, f] == 0.3
+        # unchanged layering: u kept
+        wd.hf[:, f] .= (dz, dz, dz, 0.05)
+        u[:, f] .= (0.1, 0.2, 0.3, 0.4)
+        SweTransport2DV._wd_remap_face_layers!(model, wd)
+        @test u[:, f] == [0.1, 0.2, 0.3, 0.4]
     end
 
     @testset "test_verify_wd_configuration_checks" begin
@@ -706,6 +755,73 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
             t_prev, e_prev = n * cfg.dt, e
         end
         @test abs(period - period_exact) / period_exact < NH_DEEP_REL_MAX
+    end
+
+    # ---- Non-hydrostatic: energy of a finite-amplitude standing wave (issue #88) ------------------------------------
+    # An inviscid standing wave conserves its energy; the only loss of the scheme should be the theta damping, which is
+    # linear and therefore the same at every amplitude (energy rate 2 * 4 pi^2 (theta - 1/2)/(N T) for N steps per
+    # period). Klopman (1994) wave: h = 0.5 m, T = 1.44 s, k = 2.35 1/m (kh = 1.18), one wavelength in a closed basin.
+    # Measured (60 x 20, N = 200, theta = 0.55, 10 periods): energy rate 0.0483 1/s at a = 0.057 m, 0.0161 1/s at
+    # a = 0.0057 m, theta part 0.0137 1/s: the excess 0.032 1/s is the amplitude-dependent loss of issue #88.
+    # WHY the energy averaged over a period: the discrete kinetic and potential energies exchange within a period.
+    NH_ENERGY_DEPTH = 0.5            # m
+    NH_ENERGY_PERIOD = 1.44          # s
+    NH_ENERGY_K = 2.35               # 1/m
+    NH_ENERGY_AMPLITUDE = 0.057      # m, ka = 0.13 (Klopman incident wave at the station)
+    NH_ENERGY_AMPLITUDE_RATIO = 0.1  # -, the small wave
+    NH_ENERGY_STEPS = 200            # -, steps per period
+    NH_ENERGY_THETA = 0.55           # -
+    NH_ENERGY_PERIODS = 10           # -
+    NH_ENERGY_RATE_EXCESS_MAX = 2e-3 # 1/s, allowed difference of the energy rates (weakly nonlinear changes O((ka)^2))
+    NH_ENERGY_THETA_RTOL = 0.25      # -, small wave against the linear theta rate (measured 0.18: start-up, round-off)
+    @testset "test_verify_wd_nonhydro_standing_wave_energy_amplitude_independent" begin
+        H, T, k = NH_ENERGY_DEPTH, NH_ENERGY_PERIOD, NH_ENERGY_K
+        L = 2pi / k
+        nx, nz, g, rho = 60, 20, 9.81, 1000.0
+        function energy_rate(a; scheme...)
+            cfg = wd_config(; length=L, depth=H, nx=nx, nz=nz, dt=T / NH_ENERGY_STEPS, theta=NH_ENERGY_THETA,
+                use_hydrostatic=false, momentum_advection_scheme="tvd2", transport_advection_scheme="tvd2",
+                implicit_vertical_terms=true, scheme...)
+            model = Model(cfg)
+            initialize_water_level!(model, H .+ a .* cos.(k .* wd_x_centres(cfg)); rho=rho)
+            dx = L / nx
+            function energy()   # J/m: potential + kinetic energy of the wet cells
+                st, wd = model.state, model.wetdry
+                E = 0.5 * rho * g * sum((water_depth(model) .- H) .^ 2) * dx
+                for i in 1:nx, kk in 1:nz
+                    uc = 0.5 * (st.u[kk, i] + st.u[kk, i + 1])
+                    wc = 0.5 * (st.w[kk, i] + st.w[kk + 1, i])
+                    E += 0.5 * rho * (uc^2 + wc^2) * wd.h[kk, i] * dx
+                end
+                return E
+            end
+            means = Float64[]
+            acc = 0.0
+            for n in 1:(NH_ENERGY_PERIODS * NH_ENERGY_STEPS)
+                step_forward!(model)
+                acc += energy()
+                if n % NH_ENERGY_STEPS == 0
+                    push!(means, acc / NH_ENERGY_STEPS)
+                    acc = 0.0
+                end
+            end
+            # WHY from period 2: the non-hydrostatic pressure of the initial state at rest builds up in the first period
+            return -log(means[end] / means[2]) / ((length(means) - 2) * T)   # 1/s
+        end
+        rate_large = energy_rate(NH_ENERGY_AMPLITUDE)
+        rate_small = energy_rate(NH_ENERGY_AMPLITUDE_RATIO * NH_ENERGY_AMPLITUDE)
+        rate_theta = 2 * 4pi^2 * (NH_ENERGY_THETA - 0.5) / (NH_ENERGY_STEPS * T)
+        @test rate_small ≈ rate_theta rtol = NH_ENERGY_THETA_RTOL   # the small wave loses only the theta damping
+        # issue #88: the default scheme ("cut" top layer, upwind face level) keeps the amplitude-dependent loss
+        @test_broken rate_large - rate_small <= NH_ENERGY_RATE_EXCESS_MAX
+        # merged top layer, remap, second-order w advection and the top cell as pressure unknown, with the limited face
+        # level (issue #88): measured excess 0.0033 1/s (rates 0.01689 and 0.01355 1/s); the remainder does not change
+        # with dx, dt or nz and is not yet understood (docs/plan_issue_88_wave_damping.md, section 8)
+        merged = (wd_top_layer="merged", wd_face_level="limited")
+        rate_large_m = energy_rate(NH_ENERGY_AMPLITUDE; merged...)
+        rate_small_m = energy_rate(NH_ENERGY_AMPLITUDE_RATIO * NH_ENERGY_AMPLITUDE; merged...)
+        @test rate_small_m ≈ rate_theta rtol = NH_ENERGY_THETA_RTOL
+        @test_broken abs(rate_large_m - rate_small_m) <= NH_ENERGY_RATE_EXCESS_MAX
     end
 
     # ---- Solitary wave runup on a plane beach (Synolakis 1987) ----------------------------------------------------
