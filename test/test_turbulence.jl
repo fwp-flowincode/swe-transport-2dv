@@ -302,6 +302,60 @@ end
         @test KEpsilonState(4, 3).realizability
     end
 
+    @testset "test_verify_k_epsilon_wave_stabilization_kernel" begin
+        # Larsen & Fuhrman (2018): nu_t = C_mu k T / max(1, lambda_2 C p_rat), p_rat = strain2/rotation2, C = C2/C1.
+        # Off (lambda_2 = 0): the standard nu_t. Simple shear (strain2 = rotation2 = S^2, p_rat = 1, lambda_2 C < 1):
+        # unchanged. Pure strain (rotation2 = 0, the potential flow under waves): nu_t reduced; with a little rotation
+        # by exactly lambda_2 C p_rat.
+        LAMBDA2 = 0.1
+        k, eps = 1e-3, 1e-4
+        S2 = (0.5 / (sqrt(KE_C_MU_VALUE) * k / eps))^2   # 1/s^2, below the realizability bound (T = k/eps)
+        nu_std = KE_C_MU_VALUE * k^2 / eps
+        off, on = KEpsilonState(4, 3), KEpsilonState(4, 3; wave_stabilization=LAMBDA2)
+        @test SweTransport2DV.ke_eddy_viscosity(off, k, eps, S2, 0.0) ≈ nu_std rtol = TOL_IDENTITY
+        @test SweTransport2DV.ke_eddy_viscosity(on, k, eps, S2, S2) ≈ nu_std rtol = TOL_IDENTITY
+        p_rat = 100.0
+        expected = nu_std / (LAMBDA2 * SweTransport2DV.KE_STAB_C * p_rat)
+        @test SweTransport2DV.ke_eddy_viscosity(on, k, eps, S2, S2 / p_rat) ≈ expected rtol = TOL_IDENTITY
+        @test SweTransport2DV.ke_eddy_viscosity(on, k, eps, S2, 0.0) < expected
+        @test_throws ArgumentError KEpsilonState(4, 3; wave_stabilization=-0.1)
+        @test Model(ModelConfig(; nx=4, nz=4, turbulence_closure="k_epsilon", ke_wave_stabilization=LAMBDA2)).turbulence.wave_stabilization == LAMBDA2
+    end
+
+    # Standing wave of the Klopman flume (h = 0.5 m, T = 1.44 s, k = 2.35 1/m, a = 0.057 m) in a closed basin without bed
+    # friction, wetting-drying step, k-epsilon: the flow is nearly potential, so the standard closure is unstable there
+    # (Larsen & Fuhrman 2018) and nu_t at mid-depth grows exponentially from its initial value; the stabilisation stops
+    # the growth. Measured (60 x 20 cells, N = 200, theta = 0.6): mean nu_t over z = 0.18-0.35 m grows by 4.1 from
+    # period 12 to 20 without, by 1.0 with lambda_2 = 0.1 (1.4 with 0.05).
+    KE_STAB_GROWTH_OFF_MIN = 2.0    # -, nu_t(period 20)/nu_t(period 12) without the stabilisation, at least
+    KE_STAB_GROWTH_ON_MAX = 1.5     # -, the same with lambda_2 = 0.1, at most
+    @testset "test_verify_k_epsilon_wave_stabilization_stops_growth" begin
+        H, T, kw, a = 0.5, 1.44, 2.35, 0.057
+        L = 2pi / kw
+        nx, nz, N = 60, 20, 200
+        function growth(lambda2)
+            cfg = ModelConfig(; wetting_drying=true, use_hydrostatic=false, momentum_advection_scheme="tvd2",
+                transport_advection_scheme="tvd2", nu=1.2e-6, rayleigh_damping=0.0, apply_froude_limiter=false,
+                rho_left=1000.0, rho_right=1000.0, write_plots=false, write_animation=false,
+                write_pressure_buoyancy_diagnostics=false, length=L, depth=H, nx=nx, nz=nz, dt=T / N, theta=0.6,
+                implicit_vertical_terms=true, turbulence_closure="k_epsilon", wd_top_layer="merged",
+                wd_face_level="limited", ke_wave_stabilization=lambda2)
+            model = Model(cfg)
+            initialize_water_level!(model, H .+ a .* cos.(kw .* [(i - 0.5) * L / nx for i in 1:nx]); rho=1000.0)
+            mid() = (m = model.turbulence.nu_t[8:14, :]; sum(m) / length(m))   # m^2/s, z = 0.18-0.35 m
+            nu12 = 0.0
+            for p in 1:20
+                for _ in 1:N
+                    step_forward!(model)
+                end
+                p == 12 && (nu12 = mid())
+            end
+            return mid() / nu12
+        end
+        @test growth(0.0) > KE_STAB_GROWTH_OFF_MIN
+        @test growth(0.1) < KE_STAB_GROWTH_ON_MAX
+    end
+
     @testset "test_verify_k_epsilon_realizability_switch" begin
         # the same dam-break start without the bound: the explicit production at the front raises k while eps lags, and
         # nu_t exceeds 1 m^2/s within ten steps (observed 41 m^2/s in the second step); with the bound it stays physical

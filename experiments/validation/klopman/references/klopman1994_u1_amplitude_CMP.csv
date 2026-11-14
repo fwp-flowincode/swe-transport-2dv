@@ -1,0 +1,36 @@
+# Test #CMP: waves following the current. Amplitude of the first harmonic of the horizontal velocity, Fig. 4.13 (index 74).
+# Digitised from Klopman (1994), Delft Hydraulics report H840.30 Part II (scanned figures; template matching of the
+# markers on 300 dpi renders, grid lines as the axis calibration; digitising error about 0.001 m/s and 0.5 mm in z,
+# below 1 mm the heights of the log figure). Preliminary data (report section 4.1): the LDV calibration factor used
+# (0.0913 instead of 0.0968 m/s/V) underestimates all velocities by about 7 %; no cross-talk correction; valid from
+# 35 mm below the wave trough downwards. Overlapping markers of the two LDVs near z = 0.25 m are partly merged.
+# z: height above the (false) bed in m; station x = 22.50 m, flume centre line.
+z_m,u1_amplitude_m_per_s,source_figure
+0.00032,0.1622,4.13
+0.00053,0.1665,4.13
+0.00053,0.1715,4.13
+0.00053,0.1762,4.13
+0.00074,0.1816,4.13
+0.00095,0.1863,4.13
+0.00242,0.1992,4.13
+0.00347,0.1961,4.13
+0.00557,0.1888,4.13
+0.00978,0.1821,4.13
+0.01462,0.1852,4.13
+0.02976,0.1877,4.13
+0.04974,0.1888,4.13
+0.07476,0.1909,4.13
+0.09979,0.1931,4.13
+0.12482,0.1970,4.13
+0.14963,0.2013,4.13
+0.17466,0.2048,4.13
+0.19968,0.2075,4.13
+0.25563,0.2184,4.13
+0.25962,0.2202,4.13
+0.26467,0.2218,4.13
+0.27960,0.2270,4.13
+0.29958,0.2331,4.13
+0.32440,0.2410,4.13
+0.34942,0.2505,4.13
+0.37424,0.2590,4.13
+0.39926,0.2678,4.13

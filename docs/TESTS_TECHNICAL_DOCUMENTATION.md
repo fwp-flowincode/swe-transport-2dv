@@ -3384,6 +3384,15 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\thinspace p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). 
   density mass to round-off, k and $\varepsilon$ positive and finite, max $\nu_t<10^{-2}$ m²/s.
 - `test_verify_k_epsilon_realizability_bound`: the time scale is $k/\varepsilon$ without strain and in equilibrium shear,
   the bound above; on by default.
+- `test_verify_k_epsilon_wave_stabilization_kernel` (issue #85): the stabilised eddy viscosity of Larsen & Fuhrman
+  (2018), $\nu_t=C_\mu k^2/\max(\varepsilon,\lambda_2 C p_{rat}\varepsilon)$, $p_{rat}=S_{ij}S_{ij}/\Omega_{ij}\Omega_{ij}$,
+  $C=C_2/C_1$ (`ke_eddy_viscosity`, `ModelConfig(ke_wave_stabilization=`$\lambda_2$`)`): unchanged with $\lambda_2=0$ and in
+  simple shear ($p_{rat}=1$), reduced by exactly $\lambda_2 C p_{rat}$ for $p_{rat}=100$, smaller still without rotation;
+  $\lambda_2<0$ rejected; the option reaches the k-epsilon state.
+- `test_verify_k_epsilon_wave_stabilization_stops_growth` (issue #85): standing wave of the Klopman flume ($h$ = 0.5 m,
+  $T$ = 1.44 s, $ka$ = 0.13) in a closed basin without bed friction, wetting-drying step, 60 x 20 cells, 20 periods: the
+  mean $\nu_t$ at mid-depth grows by more than 2 from period 12 to 20 without the stabilisation (measured 4.1), by less
+  than 1.5 with $\lambda_2=0.1$ (measured 1.0): the instability of two-equation closures in nearly potential flow.
 - `test_verify_k_epsilon_realizability_switch`: without the bound the dam-break front exceeds $\nu_t=1$ m²/s within ten
   steps, with it $\nu_t$ stays below $10^{-2}$ m²/s.
 - `test_verify_clear_vegetation_resets_k_epsilon_production`: the vegetation production $P_v$ is zero after
@@ -3408,6 +3417,13 @@ Exactness, conservation and positivity tests run for the four variants hydrostat
   cuts the layers at bed and surface correctly. With `merge` = 0.1 a top layer thinner than 0.1 $\Delta z$ joins the layer
   below (also one cut by the bed), a thicker one is kept, a column thinner than the threshold keeps its one layer, and
   the sum stays $\max(\zeta-z_b,0)$.
+- `test_verify_wd_wave_bed_friction_kernel` (issue #85): Swart's (1974) wave friction factor (formula, 0.035 at
+  Klopman's $A/k_s=34$, the cap 0.3 below $A/k_s=1.57$); the running statistics of the bed velocity recover the orbital
+  excursion $A=U_w/\omega$ of $u=U_c+U_w\sin\omega t$, and the factor $1+(f_w/(2c_b)-1)\,r$ with the wave share
+  $r=\mathrm{var}\,u/(\mathrm{var}\,u+\bar u^2)$, to within 2 % (the exponential means pass 1.1 % of the $2\omega$
+  oscillation of the variances); a steady current keeps the factor 1, a current with 0.5 mm/s of fast noise within
+  $10^{-3}$ of 1 (without the wave share the current-only Klopman case had 5.5); `wave_bed_friction="swart"` needs a
+  rough bed and the implicit vertical terms and builds the state.
 - `test_verify_wd_merged_face_remap` (issue #88): the overlap remap of the face velocities conserves the face momentum
   $\sum h_f u$ when the top layer is merged, gives both parts of a split top layer the velocity of the old one, sets
   closed layers to 0 and leaves a face with unchanged layering bit for bit.

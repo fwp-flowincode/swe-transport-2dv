@@ -114,6 +114,35 @@ end
 @inline _ke_time(ke, k::Real, eps::Real, strain2::Real) =
     ke.realizability ? ke_time_scale(k, eps, strain2) : k / eps
 
+# -, C of the stabilised eddy viscosity for k-epsilon: C2/C1 = 1.33 (Larsen & Fuhrman 2018; as noted in the OpenFOAM
+# implementation multiphaseStabilizedTurbulence, whose default 1.51 is the k-omega value)
+const KE_STAB_C = KE_C2 / KE_C1
+const KE_STAB_ROTATION_FLOOR = 1e-30   # 1/s^2, guard of the strain/rotation ratio in irrotational flow
+
+"""
+    ke_eddy_viscosity(ke, k, eps, strain2, rotation2) -> nu_t (m^2/s)
+
+Eddy viscosity of the k-epsilon closure: nu_t = C_mu k T (T from `_ke_time`, k/eps without the realizability bound),
+with the stabilisation of Larsen & Fuhrman (2018, J. Fluid Mech. 853, 419-460; equation numbers not checked) when
+ke.wave_stabilization = lambda_2 > 0:
+
+    nu_t = C_mu k T / max(1, lambda_2 C p_rat),   p_rat = S_ij S_ij / (Omega_ij Omega_ij) = strain2 / rotation2,
+
+i.e. C_mu k^2 / max(eps, lambda_2 C p_rat eps) for T = k/eps, C = C2/C1 (KE_STAB_C). `k` (m^2/s^2), `eps` (m^2/s^3),
+`strain2` = 2 S_ij S_ij and `rotation2` = (du/dz - dw/dx)^2 = 2 Omega_ij Omega_ij (1/s^2, 2DV). Form as implemented in
+OpenFOAM's multiphaseStabilizedTurbulence (nut = Cmu k^2 / max(epsilon, lambda2 C pRat epsilon)).
+WHY: two-equation closures are unconditionally unstable in the nearly potential flow beneath waves (strain without
+rotation, p_rat -> infinity): k grows exponentially there (Larsen & Fuhrman 2018). In simple shear S_ij S_ij =
+Omega_ij Omega_ij, p_rat = 1 and lambda_2 C < 1, so the closure is unchanged in boundary layers and currents.
+Klopman's flume (issue #85) had nu_t = 1.6e-3 to 2e-3 m^2/s at mid-depth under the waves, 5 to 7 times the current only.
+"""
+@inline function ke_eddy_viscosity(ke, k::Real, eps::Real, strain2::Real, rotation2::Real)
+    nu = KE_C_MU * k * _ke_time(ke, k, eps, strain2)
+    ke.wave_stabilization > 0 || return nu
+    p_rat = strain2 / max(rotation2, KE_STAB_ROTATION_FLOOR)
+    return nu / max(1.0, ke.wave_stabilization * KE_STAB_C * p_rat)
+end
+
 """
     KEpsilonState(nz, nx; T=Float64)
 
@@ -144,23 +173,28 @@ mutable struct KEpsilonState{T<:Real}
     wall_function::Symbol       # wetting-drying step, bed cell (issue #62): :local (u* of the local velocity) or :equilibrium
     wall_cell_min_fraction::Float64   # -, equilibrium wall function: smallest wall-cell thickness over dz
     c3_stable::Float64          # -, C3 of the eps equation in stable stratification (issue #42; see KE_C3_STABLE)
+    # stabilisation under waves (Larsen & Fuhrman 2018, see ke_eddy_viscosity): lambda_2 (-, 0 = off) and the squared
+    # rotation rate (du/dz - dw/dx)^2 (1/s^2) of the cells, set with the strain
+    wave_stabilization::Float64
+    rotation2::Matrix{T}
 end
 
 function KEpsilonState(nz::Int, nx::Int; T::Type{<:Real}=Float64, cfk::Real=KE_VEG_CFK, cfe::Real=KE_VEG_CFE, surface_condition::Symbol=:rodi,
     realizability::Bool=true, horizontal_diffusion::Bool=true, wall_function::Symbol=:equilibrium,
-    wall_cell_min_fraction::Real=KE_WALL_CELL_MIN_FRACTION, c3_stable::Real=KE_C3_STABLE)
+    wall_cell_min_fraction::Real=KE_WALL_CELL_MIN_FRACTION, c3_stable::Real=KE_C3_STABLE, wave_stabilization::Real=0.0)
     nz >= 2 || throw(ArgumentError("k-epsilon requires nz >= 2"))
     wall_function in (:local, :equilibrium) || throw(ArgumentError("wall_function must be :local or :equilibrium"))
     0 <= wall_cell_min_fraction < 1 || throw(ArgumentError("wall_cell_min_fraction must be in [0, 1)"))
     (isfinite(c3_stable) && c3_stable < KE_C2) || throw(ArgumentError("c3_stable must be finite and below C2"))
     surface_condition in (:zero_flux, :rodi) || throw(ArgumentError("surface_condition must be :zero_flux or :rodi"))
+    (isfinite(wave_stabilization) && wave_stabilization >= 0) || throw(ArgumentError("wave_stabilization must be >= 0"))
     k = fill(T(KE_K_INIT), nz, nx)
     eps = fill(T(KE_C_MU * KE_K_INIT^2 / KE_NU_T_INIT), nz, nx)
     nu_t = fill(T(KE_NU_T_INIT), nz, nx)
     z() = zeros(T, nz, nx)
     return KEpsilonState{T}(k, eps, nu_t, z(), z(), z(), z(), z(), z(), zeros(T, nx), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz), zeros(T, nz),
         Float64(cfk), Float64(cfe), surface_condition, realizability, horizontal_diffusion, wall_function,
-        Float64(wall_cell_min_fraction), Float64(c3_stable))
+        Float64(wall_cell_min_fraction), Float64(c3_stable), Float64(wave_stabilization), z())
 end
 
 """
@@ -295,6 +329,7 @@ function k_epsilon_step!(ke::KEpsilonState, u::AbstractMatrix{<:Real}, w::Abstra
         # WHY -du/dx in the variable top row: its top flux includes the volume change of the row
         dwdz = (variable_top && kk == nz) ? -dudx : (w[kk + 1, i] - w[kk, i]) / dz
         ke.strain2[kk, i] = (dudz + dwdx)^2 + 2 * dudx^2 + 2 * dwdz^2
+        ke.rotation2[kk, i] = (dudz - dwdx)^2
         ke.production[kk, i] = nu_t[kk, i] * ke.strain2[kk, i]
         n2 = -(g / rho0) * (rho[k_up, i] - rho[k_dn, i]) / dist(k_dn, k_up, i)
         ke.buoyancy[kk, i] = -(nu_t[kk, i] / KE_SIGMA_RHO) * n2
@@ -358,7 +393,7 @@ function k_epsilon_step!(ke::KEpsilonState, u::AbstractMatrix{<:Real}, w::Abstra
             end
         end
     end
-    nu_t .= KE_C_MU .* k .* _ke_time.(Ref(ke), k, eps, ke.strain2)
+    nu_t .= ke_eddy_viscosity.(Ref(ke), k, eps, ke.strain2, ke.rotation2)
     return ke
 end
 

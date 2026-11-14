@@ -93,6 +93,19 @@ end
 
 CharacteristicFaceState() = CharacteristicFaceState(false, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, nothing, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
+# Wave-enhanced bed friction (ModelConfig.wave_bed_friction = "swart", issue #85): running statistics of the velocity
+# of the friction layer of each u-face (nx + 1), exponential means over wave_friction_filter_time, and the factor on
+# the log-law friction coefficient of the last step (`_wd_wave_friction_factor!`).
+mutable struct WaveFrictionState
+    mean_u::Vector{Float64}    # m/s, running mean of u_1
+    mean_uu::Vector{Float64}   # m^2/s^2, running mean of u_1^2
+    mean_a::Vector{Float64}    # m/s^2, running mean of a = du_1/dt
+    mean_aa::Vector{Float64}   # m^2/s^4, running mean of a^2
+    u_prev::Vector{Float64}    # m/s, u_1 of the last step (NaN: none yet)
+    factor::Vector{Float64}    # -, c / c_b of the last step (>= 1)
+end
+WaveFrictionState(n::Int) = WaveFrictionState(zeros(n), zeros(n), zeros(n), zeros(n), fill(NaN, n), ones(n))
+
 mutable struct WetDryState{T<:Real}
     bed::Vector{T}
     bed_face::Vector{T}
@@ -167,5 +180,6 @@ mutable struct WetDryState{T<:Real}
     # characteristic open faces (open_face_scheme = "characteristic", issue #86)
     char_right::CharacteristicFaceState
     char_left::CharacteristicFaceState
+    wave_friction::Union{Nothing,WaveFrictionState}   # wave-enhanced bed friction (issue #85), nothing: off
 end
 

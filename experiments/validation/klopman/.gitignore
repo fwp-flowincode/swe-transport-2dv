@@ -1,0 +1,3 @@
+# run caches (binary model state, tuned amplitudes) and run logs of run_klopman_cases.jl
+results/state/
+*.log
