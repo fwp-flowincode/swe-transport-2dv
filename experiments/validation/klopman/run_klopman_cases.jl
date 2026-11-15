@@ -7,6 +7,9 @@
 # under waves (ModelConfig.ke_wave_stabilization, default 0; result files then end in _l<lambda2>); bed: "swart" for the
 # wave-enhanced bed friction (ModelConfig.wave_bed_friction; files then end in _swart), default the log law.
 # ENV KL_RUN_PERIODS: production periods per case, e.g. "WMN=300" (default KL_RUN_PERIODS for all).
+# ENV KL_THETA_N: theta and steps per period of the wave runs, e.g. "0.55:200" (default KL_THETA:KL_STEPS_PER_PERIOD);
+# the wave result files and amplitude caches then end in _t<theta>n<N>. The #SP state does not depend on it.
+# ENV KL_NX: columns (default 760, dx = 45 mm); other values add _nx<nx> to all result and cache files.
 # Caches in results/state/ (per nz and option tag): the steady #SP state and the tuned incoming amplitude of each case
 # are reused by later runs with the same settings; ENV KL_FRESH=true ignores and rewrites them (after a model change).
 # Procedure
@@ -25,7 +28,6 @@ const KL_SPINUP_TIME = 600.0        # s, current only from the uniform current (
 const KL_SPINUP_LEVEL_TIME = 300.0  # s, continuation with the target levels from the first spin-up
 const KL_SP_AVERAGE_TIME = 100.0    # s, averaging window of the current-only profile
 const KL_TUNE_AVERAGE_PERIODS = 10  # -, averaging window of the tuning run
-const KL_TUNE_MARGIN_PERIODS = 2    # -, after the arrival of the full wave at the station, before the tuning average
 const KL_RUN_PERIODS = 150          # -, production run of a wave case
 const KL_AVERAGE_PERIODS = 50       # -, averaging window at the end of the production run
 
@@ -37,37 +39,18 @@ lambda2 = length(ARGS) >= 3 ? parse(Float64, ARGS[3]) : 0.0
 bed = length(ARGS) >= 4 ? ARGS[4] : "none"
 opts = (; ke_wave_stabilization=lambda2, wave_bed_friction=bed)
 run_periods = Dict(Symbol(first(split(e, "="))) => parse(Int, last(split(e, "="))) for e in split(get(ENV, "KL_RUN_PERIODS", ""), ",") if occursin("=", e))
-tag = (lambda2 > 0 ? "_l$(lambda2)" : "") * (bed == "none" ? "" : "_$(bed)")
+nx = parse(Int, get(ENV, "KL_NX", "760"))
+tag = (lambda2 > 0 ? "_l$(lambda2)" : "") * (bed == "none" ? "" : "_$(bed)") * (nx == 760 ? "" : "_nx$(nx)")
+theta_n = get(ENV, "KL_THETA_N", "")
+wave_theta = isempty(theta_n) ? KL_THETA : parse(Float64, first(split(theta_n, ":")))
+wave_steps = isempty(theta_n) ? KL_STEPS_PER_PERIOD : parse(Int, last(split(theta_n, ":")))
+# WHY a separate tag: the wave runs (amplitude tuning, profiles) depend on theta and N, the steady current-only state not
+wave_tag = tag * (isempty(theta_n) ? "" : "_t$(wave_theta)n$(wave_steps)")
 state_dir = joinpath(results_dir, "state")
 mkpath(state_dir)
 fresh = get(ENV, "KL_FRESH", "false") == "true"
 using Serialization
 
-"""
-    arrival_periods(case) -> periods (-)
-
-Time (in wave periods) until the full incoming wave stands at the station: the ramp (KL_RAMP_PERIODS) plus the travel
-time from the generating face at the absolute group speed c_g + U_n (linear theory with the Doppler shift,
-(omega - k U_n)^2 = g k tanh(k h), U_n the current in the direction of the wave), rounded up, plus
-KL_TUNE_MARGIN_PERIODS. WHY: the tuning average must not see the arriving front (the opposing wave needs about 16
-periods; the former fixed 20 periods before the average left little margin).
-"""
-function arrival_periods(case)
-    spec = klopman_case(case)
-    h, T, g = KL_DEPTH, KL_PERIOD, KL_G
-    omega = 2pi / T
-    Un = spec.wave === :left ? spec.q / h : -spec.q / h   # m/s, current in the direction of the wave
-    k = omega^2 / g
-    for _ in 1:50   # Newton on (omega - k U)^2 - g k tanh(k h)
-        fk = (omega - k * Un)^2 - g * k * tanh(k * h)
-        dfk = -2Un * (omega - k * Un) - g * tanh(k * h) - g * k * h / cosh(k * h)^2
-        k -= fk / dfk
-    end
-    sigma = omega - k * Un
-    cg = sigma / k * 0.5 * (1 + 2k * h / sinh(2k * h)) + Un   # m/s, absolute group speed
-    dist = spec.wave === :left ? KL_STATION - KL_SECTION_START : KL_SECTION_END - KL_STATION   # m, face to station
-    return KL_RAMP_PERIODS + ceil(Int, dist / (cg * T)) + KL_TUNE_MARGIN_PERIODS
-end
 
 # m^2/s: discharge through a u-face (sum hf u)
 face_discharge(model, f) = sum(model.wetdry.hf[:, f] .* model.state.u[:, f])
@@ -112,12 +95,12 @@ if !fresh && isfile(sp_cache)
     @printf("== nz = %d: current only (#SP) loaded from %s (target levels %+.5f / %+.5f m)\n", nz, basename(sp_cache), levels...)
 else
     println("== nz = $(nz): current only (#SP), spin-up at N = $(KL_SPINUP_STEPS_PER_PERIOD)")
-    sp = klopman_model(:SP; nz=nz, steps_per_period=KL_SPINUP_STEPS_PER_PERIOD, options=opts)
+    sp = klopman_model(:SP; nx=nx, nz=nz, steps_per_period=KL_SPINUP_STEPS_PER_PERIOD, options=opts)
     log_every = round(Int, 100.0 / sp.config.dt)
     run_time!(sp, KL_SPINUP_TIME; every=log_every, label="SP")
     levels = (sp.state.eta[1], sp.state.eta[end])
     @printf("target levels from the spin-up: left %+.5f m, right %+.5f m\n", levels...)
-    spm = klopman_model(:SP; nz=nz, steps_per_period=KL_SPINUP_STEPS_PER_PERIOD, levels=levels, initial=sp, options=opts)
+    spm = klopman_model(:SP; nx=nx, nz=nz, steps_per_period=KL_SPINUP_STEPS_PER_PERIOD, levels=levels, initial=sp, options=opts)
     run_time!(spm, KL_SPINUP_LEVEL_TIME - KL_SP_AVERAGE_TIME; every=log_every, label="SP levels")
     avg = StationAverage(spm)
     run_time!(spm, KL_SP_AVERAGE_TIME; avg=avg, every=log_every, label="SP average")
@@ -138,13 +121,14 @@ for case in cases
     init = spec.q > 0.0 ? sp2 : nothing   # WHY: waves only has no current; it starts at rest
     lv = spec.q > 0.0 ? levels : (0.0, 0.0)
     T = KL_PERIOD
-    amp_cache = joinpath(state_dir, "amplitude_$(case)_nz$(nz)$(tag).txt")
+    amp_cache = joinpath(state_dir, "amplitude_$(case)_nz$(nz)$(wave_tag).txt")
     if !fresh && isfile(amp_cache)
         a = parse(Float64, strip(read(amp_cache, String)))
         @printf("tuning: production amplitude %.4f m loaded from %s\n", a, basename(amp_cache))
     else
         a0 = KL_AMPLITUDE
-        tune = klopman_model(case; nz=nz, amplitude=a0, levels=lv, initial=init, options=opts)
+        tune = klopman_model(case; nx=nx, nz=nz, amplitude=a0, theta=wave_theta, steps_per_period=wave_steps, levels=lv, initial=init,
+            options=opts)
         nstart = arrival_periods(case)
         run_time!(tune, nstart * T)
         tavg = StationAverage(tune)
@@ -155,7 +139,8 @@ for case in cases
         @printf("tuning (%d + %d periods): station amplitude %.4f m with %.4f m at the face; production amplitude %.4f m\n",
             nstart, KL_TUNE_AVERAGE_PERIODS, a_station, a0, a)
     end
-    model = klopman_model(case; nz=nz, amplitude=a, levels=lv, initial=init, options=opts)
+    model = klopman_model(case; nx=nx, nz=nz, amplitude=a, theta=wave_theta, steps_per_period=wave_steps, levels=lv, initial=init,
+        options=opts)
     every = round(Int, 25 * T / model.config.dt)
     nrun = get(run_periods, case, KL_RUN_PERIODS)
     run_time!(model, (nrun - KL_AVERAGE_PERIODS) * T; every=every, label=string(case))
@@ -173,7 +158,7 @@ for case in cases
         k=0.5 .* (r1.k[i1] .+ r2.k[i2]))
     drift = maximum(abs.(r2.u[i2] .- r1.u[i1]))
     local q = discharges(model)
-    write_profile("$(case)_nz$(nz)$(tag).csv", rr, ["Klopman #$(case), nz = $(nz), nx = $(model.config.nx), theta = $(model.config.theta), N = $(KL_STEPS_PER_PERIOD), average over the last $(KL_AVERAGE_PERIODS) periods of $(nrun)",
+    write_profile("$(case)_nz$(nz)$(wave_tag).csv", rr, ["Klopman #$(case), nz = $(nz), nx = $(model.config.nx), theta = $(model.config.theta), N = $(wave_steps), average over the last $(KL_AVERAGE_PERIODS) periods of $(nrun)",
         @sprintf("incoming amplitude %.4f m; station first-harmonic amplitude %.4f / %.4f m (two halves), trough %.4f m",
             a, r1.eta1, r2.eta1, min(r1.eta_min, r2.eta_min)),
         @sprintf("steadiness: max |u_mean(second half) - u_mean(first half)| = %.4f m/s", drift),

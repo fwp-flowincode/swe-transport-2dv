@@ -3894,6 +3894,24 @@ $x=0$. Measured values in brackets.
 - `test_validate_incoming_relaxation_does_not_reflect`: $\tau=2T$: the level relaxation reflects above 2 % (5.1 %;
   theory 4.0 %), the incoming relaxation below 0.6 % (0.22 %).
 
+### Klopman flume tests (`test_klopman.jl`, validation case 2DV-13, issue #85)
+
+Waves following and opposing a current in the flume of Klopman (1994); case module and full runs in
+`experiments/validation/klopman/` (README there, plan `docs/plan_issue_85_klopman_flume.md`).
+
+- `test_verify_klopman_setup`: the arrival time of the full wave at the station used by the amplitude tuning (15, 12
+  and 17 periods for waves only, following, opposing: ramp, travel at the Doppler group speed, margin); the case
+  settings (θ, Δt, merged top layer and limited face level, k-ε with z₀, free left face); the initial uniform current
+  carries the target discharge 0.0805 m²/s through every interior face (round-off); the start from a saved state copies
+  u, η and k; the station averages of 20 steps are finite and positive; the seven reference profiles read with heights
+  increasing from the bed. About 30 s (190 × 10 cells).
+- `test_validate_klopman_shear_sign_coarse` (only with `SWE_SLOW_TESTS=true`, about 10 min): the primary criterion of
+  #85 on a coarse grid (380 × 10 cells, waves at N = 200, λ₂ = 0.1, the incoming amplitudes of the tuned nz = 20 runs,
+  100 periods from the current-only state, averages over the last 30): relative to the current only, the upper-half
+  shear (least squares over 0.25–0.40 m) decreases for following waves (measured −0.002 against 0.067 1/s, tested)
+  and increases for opposing waves. The opposing check is `@test_broken`: on 20 layers the increase is only about 10 % of
+  the measured change, and on this grid (50 mm layers, twice the θ damping) it is lost (0.052 against 0.067 1/s).
+
 ## Additional validation scripts and literature basis
 
 The repository includes standalone validation scripts under `experiments/validation`:

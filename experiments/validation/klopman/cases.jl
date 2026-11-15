@@ -105,6 +105,34 @@ function klopman_model(case::Symbol; nx::Int=760, nz::Int=20, amplitude::Real=KL
     return model
 end
 
+const KL_TUNE_MARGIN_PERIODS = 2    # -, after the arrival of the full wave at the station, before the tuning average
+
+"""
+    arrival_periods(case) -> periods (-)
+
+Time (in wave periods) until the full incoming wave stands at the station: the ramp (KL_RAMP_PERIODS) plus the travel
+time from the generating face at the absolute group speed c_g + U_n (linear theory with the Doppler shift,
+(omega - k U_n)^2 = g k tanh(k h), U_n the current in the direction of the wave), rounded up, plus
+KL_TUNE_MARGIN_PERIODS. WHY: the tuning average must not see the arriving front (the opposing wave needs about 16
+periods; the former fixed 20 periods before the average left little margin).
+"""
+function arrival_periods(case)
+    spec = klopman_case(case)
+    h, T, g = KL_DEPTH, KL_PERIOD, KL_G
+    omega = 2pi / T
+    Un = spec.wave === :left ? spec.q / h : -spec.q / h   # m/s, current in the direction of the wave
+    k = omega^2 / g
+    for _ in 1:50   # Newton on (omega - k U)^2 - g k tanh(k h)
+        fk = (omega - k * Un)^2 - g * k * tanh(k * h)
+        dfk = -2Un * (omega - k * Un) - g * tanh(k * h) - g * k * h / cosh(k * h)^2
+        k -= fk / dfk
+    end
+    sigma = omega - k * Un
+    cg = sigma / k * 0.5 * (1 + 2k * h / sinh(2k * h)) + Un   # m/s, absolute group speed
+    dist = spec.wave === :left ? KL_STATION - KL_SECTION_START : KL_SECTION_END - KL_STATION   # m, face to station
+    return KL_RAMP_PERIODS + ceil(Int, dist / (cg * T)) + KL_TUNE_MARGIN_PERIODS
+end
+
 "Column index of the LDV station."
 klopman_station_column(model) = clamp(round(Int, (KL_STATION - KL_SECTION_START) / model.dx + 0.5), 1, model.config.nx)
 

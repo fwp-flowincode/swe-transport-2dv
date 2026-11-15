@@ -346,6 +346,65 @@ and the part above the trough, so these are indications, not budgets.
 `validate_klopman_wave_current.jl` (figures and a table), `README.md`, a fast `test_validate_klopman_*` on a coarse grid,
 a 2DV-13 row in `docs/validation_cases.md`, a section in `docs/TESTS_TECHNICAL_DOCUMENTATION.md`.
 
+### 3.6 Status 2026-11-15: work paused, results under review
+
+The results of 3.4a/3.4b are **not reliable yet**. Two problems were found; they are mixed in every comparison so far.
+All numbers below: λ₂ = 0.1, upper-half shear (1/s) by least squares over 0.25 m ≤ z ≤ z_max (validator) or
+0.25–0.36 m (marked *), station mean u over 0.02–0.36 m. Result files in `experiments/validation/klopman/results/`
+(tags `_t<θ>n<N>` and `_nx<nx>`, driver switches `KL_THETA_N` and `KL_NX`).
+
+**nz = 40 (θ = 0.6, N = 400, 760 columns):** SP +0.069, CMP −0.021 (data −0.135), CMN +0.167 (data +0.403); both signs
+right, about 44 % and 29 % of the measured change. WMN station amplitude only 0.046 m (tuning missed).
+
+**Problem 1: the wave effect depends on the time step and shrinks as Δt → 0.**
+
+| grid | θ | N | CMP shear | CMN shear |
+|---|---|---|---|---|
+| 760 × 20 | 0.6 | 400 | −0.011 | +0.100 |
+| 760 × 20 | 0.55 | 400 | −0.026 | +0.105 |
+| 760 × 20 | 0.55 | 200 | −0.058 | +0.144 |
+| 380 × 20 | 0.55 | 200 | −0.069* | +0.164* |
+| 380 × 20 | 0.55 | 400 | −0.031* | +0.134* |
+| 380 × 20 | 0.55 | 800 | −0.007* | +0.090* |
+
+(SP +0.072* on both grids.) On 380 columns the CMP discharge stays the same for N = 200/400/800 (mean u 0.074–0.076
+m/s), so the shift is a genuine Δt effect; the steps shrink only by a factor of about 1.6 per halving, and the
+extrapolation to Δt → 0 removes most of the following-wave effect. Findings so far:
+- not θ: θ 0.6 → 0.55 at N = 400 changes little;
+- not Δt/Δx (horizontal advection): the shift is the same on 380 and 760 columns;
+- not the k-ε dynamics: with ν_t, k, ε frozen at the SP state (k-ε step overridden by a no-op, scratch probe) the
+  shift remains (CMP −0.056 at N = 200, −0.023 at N = 400);
+- not the pressure solver tolerance (1e-8).
+Remaining candidates: the merged top layer and remap at the moving surface (it moves up to aωΔt per step), vertical
+advection near the surface, the explicit relaxation of the open faces.
+
+Cost note (for the search): the 380-column grid takes about 6 ms per step; CMP + CMN at N = 200 take 7 min. Larger
+steps are limited by θ ≥ (1 + 2Fr)/(2(1 + Fr)) (the model's Froude bound): θ = 0.525 is not allowed with the current;
+θ = 0.55 is borderline (instantaneous Fr 0.12 at the faces).
+
+**Problem 2: the model does not keep the flume discharge with waves.** The open faces relax the combination
+c·η − Q towards c·η_T − q (τ = 20 s), not the discharge itself; a hard discharge inflow would reflect the waves leaving
+through the face. Without waves the discharge is right (0.0797 against 0.0805 m²/s); with waves it drifts:
+
+| run | station mean u (m/s) | expected (q − M)/h |
+|---|---|---|
+| CMP 760 × 20, N 400 / 200 | 0.136 / 0.162 | 0.144 |
+| CMN 760 × 20, N 400 / 200 | 0.178 / 0.202 | 0.183 |
+| CMP 380 × 20 | 0.073–0.076 | 0.144 |
+| CMP 380 × 20, k-ε frozen | 0.017 (mean Q 0.016 m²/s) | 0.144 |
+
+The shear depends on the current strength, so part of every Δt difference on 760 columns is a discharge difference.
+The size of the drift is not understood: through the face condition alone it needs mean face levels about 3 cm below
+the target, which seems too large.
+
+**Next steps when resumed:**
+1. Diagnostic run (380 columns, about 10 min): period-mean level and discharge at both faces and at the station. Does
+   the face condition hold its combination (then the level shifted and a slow "pump" correction of the inflow target
+   level is needed), or does the face misbehave (then fix the face first)?
+2. Control the discharge (fix of 1) and repeat the Δt comparison (N = 200/400) on 380 columns.
+3. If the Δt effect remains: switch off the remaining candidates one at a time (scratch probe with method overrides).
+4. Then repeat the 20/40-layer runs and update the README, the 2DV-13 row, the slow test and the tests document.
+
 4 Acceptance tolerances
 -----------------------
 

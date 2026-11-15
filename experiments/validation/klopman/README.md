@@ -25,6 +25,7 @@ Files
 - `run_klopman_cases.jl`: runs #SP and the wave cases on one grid and writes the station profiles to `results/`.
 - `validate_klopman_wave_current.jl`: compares the profiles with the measurements (RMS of the mean velocity, the shear
   criterion, the first-harmonic amplitudes) and writes `figures/klopman_profiles_nz<nz><tag>.png`.
+- `probe_dt_split.jl`: Δt study (plan 3.6): CMP or CMN on 380 columns from the cached #SP state, optionally with the k-ε step frozen.
 - `references/`: the profiles digitised from the report's figures (with the method and the 7 % calibration note in the
   file headers) and `digitize_klopman.py`. The report itself is not in the repository.
 
@@ -42,6 +43,11 @@ settings (`KL_FRESH=true` recomputes them).
 
 Results (nz = 20, λ₂ = 0.1)
 --------------------------
+
+> **Under review (2026-11-15):** the wave effect on the mean profile depends on the time step (it shrinks as Δt → 0)
+> and the mean discharge drifts away from the flume's value once waves are on. The numbers below are not reliable yet;
+> see section 3.6 of the plan. Driver switches for the study: `KL_THETA_N=0.55:200` (θ and N of the wave runs) and
+> `KL_NX=380` (columns); both add a tag to the result files.
 
 ![Profiles](figures/klopman_profiles_nz20_l0.1.png)
 
