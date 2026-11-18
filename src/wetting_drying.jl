@@ -38,7 +38,8 @@ function WetDryState(cfg::ModelConfig; T::Type{<:Real}=Float64)
         Int[], Int[], T[], T[], fill(T(-1), nz, nx + 1), 0.0, 0.0, 0, 0, nothing, fill(T(Inf), nx + 1), ones(T, nx + 1), fill(false, nx + 1),
         nothing, nothing, nothing, nothing, spzeros(T, 0, 0), Int[], Int[], Int[], 0, 0, nothing, 0, 0, 0, 0,
         RemapWork(nz, nx; T=T), zeros(T, nz), zeros(T, nz), NaN, nothing, zeros(T, nz), zeros(T, nz),
-        CharacteristicFaceState(), CharacteristicFaceState())
+        CharacteristicFaceState(), CharacteristicFaceState(),
+        cfg.wave_bed_friction == "swart" ? WaveFrictionState(nx + 1) : nothing)
 end
 
 """
@@ -790,6 +791,73 @@ end
 # advection thickness hbar of the two cells) and log-law bed friction c_b |u^n| on the lowest open layer
 # (z1 = max(hf/2, WD_FRICTION_Z1_MIN_FACTOR z0)), on the open layers of the face. Replaces u_hat there by
 # A^{-1}(hf .* u_hat) and writes the column response ws.r_vert and the effective depth ws.H_face[f] = sum_k hf_k r_k.
+const SWART_AK_MIN = 1.57    # -, A/k_s below which Swart's f_w is capped (Swart 1974)
+const SWART_FW_MAX = 0.3     # -, the cap
+const NIKURADSE_KS_OVER_Z0 = 30.0   # -, k_s = 30 z0 (rough turbulent log law)
+const WAVE_FRICTION_VAR_MIN = 1e-12  # m^2/s^2 (u) and m^2/s^4 (a): no wave below this variance
+
+"""
+    swart_friction_factor(a_over_ks) -> f_w (-)
+
+Wave friction factor of a rough turbulent wave boundary layer (Swart 1974, Delft Hydraulics Publ. 131; also in
+Soulsby 1997, Dynamics of Marine Sands; equation numbers not checked): f_w = exp(5.213 (k_s/A)^0.194 - 5.977)
+for A/k_s > 1.57, 0.3 below, with the orbital excursion A (m) and the Nikuradse roughness k_s (m). The bed stress
+amplitude is tau_w = rho f_w U_w^2 / 2.
+"""
+swart_friction_factor(a_over_ks::Real) =
+    a_over_ks > SWART_AK_MIN ? exp(5.213 * (1 / a_over_ks)^0.194 - 5.977) : SWART_FW_MAX
+
+"""
+    _wd_wave_friction_factor!(wf, f, u1, dt, tau, z0, cb) -> factor (-)
+
+Wave-enhanced bed friction (ModelConfig.wave_bed_friction = "swart", issue #85): the factor c/c_b >= 1 on the log-law
+friction coefficient c_b (-) of face f,
+
+    c = c_b + max(f_w/2 - c_b, 0) r,   r = var u1 / (var u1 + mean(u1)^2),
+
+with Swart's f_w (`swart_friction_factor`) for the orbital excursion of the resolved bed velocity u1 (m/s, the friction
+layer at time n) and r (-) the wave share of the bed velocity. The statistics are running means over `tau` (s,
+exponential means of u1, u1^2, a and a^2 with a = du1/dt, weight dt/tau):
+
+    U_w = sqrt(2 var u1),  omega = sqrt(var a / var u1),  A = U_w / omega,  k_s = 30 z0 (z0 in m),
+
+exact for a sinusoidal wave on a current (var u1 = U_w^2/2, var a = omega^2 U_w^2/2). Waves only: r = 1, c = f_w/2.
+WHY the weight r: small fluctuations of a current (spin-up, residual noise of 0.5 mm/s) give a short apparent excursion
+and a large f_w; applied to the whole current that raised the friction of Klopman's current-only case by 5.5 (first
+version). With r the friction stays the log law unless the waves carry a real part of the bed velocity.
+WHY f_w/2 on the instantaneous velocity: the bed stress of a wave boundary layer is rho f_w/2 |u_b| u_b (u_b the
+velocity outside the layer, about the first-cell velocity); with a current U_c << U_w its mean is about
+rho f_w/2 (4/pi) U_w U_c, the wave-enhanced resistance the current feels (in the spirit of Grant & Madsen 1979, without
+their apparent-roughness iteration). Not included: the phase lead of the bed stress over u_b (10-25 deg in rough
+turbulent layers).
+"""
+function _wd_wave_friction_factor!(wf::WaveFrictionState, f::Int, u1::Real, dt::Real, tau::Real, z0::Real, cb::Real)
+    r = min(dt / tau, 1.0)   # -, weight of the exponential means
+    if isnan(wf.u_prev[f])
+        wf.mean_u[f], wf.mean_uu[f] = u1, u1^2
+        wf.u_prev[f] = u1
+        wf.factor[f] = 1.0
+        return 1.0
+    end
+    a = (u1 - wf.u_prev[f]) / dt
+    wf.u_prev[f] = u1
+    wf.mean_u[f] += r * (u1 - wf.mean_u[f])
+    wf.mean_uu[f] += r * (u1^2 - wf.mean_uu[f])
+    wf.mean_a[f] += r * (a - wf.mean_a[f])
+    wf.mean_aa[f] += r * (a^2 - wf.mean_aa[f])
+    var_u = wf.mean_uu[f] - wf.mean_u[f]^2
+    var_a = wf.mean_aa[f] - wf.mean_a[f]^2
+    factor = 1.0
+    if var_u > WAVE_FRICTION_VAR_MIN && var_a > WAVE_FRICTION_VAR_MIN && cb > 0.0
+        A = sqrt(2.0) * var_u / sqrt(var_a)   # m, U_w/omega
+        fw = swart_friction_factor(A / (NIKURADSE_KS_OVER_Z0 * z0))
+        share = var_u / (var_u + wf.mean_u[f]^2)   # -, wave share r of the bed velocity
+        factor = 1.0 + max(0.5 * fw / cb - 1.0, 0.0) * share
+    end
+    wf.factor[f] = factor
+    return factor
+end
+
 function _wd_implicit_vertical!(model::Model, wd::WetDryState, f::Int)
     cfg = model.config
     ws = model.ws
@@ -848,7 +916,11 @@ function _wd_implicit_vertical!(model::Model, wd::WetDryState, f::Int)
             friction_row = kw - klo + 1
         end
         z1 = max(below + 0.5 * wd.hf[kw, f], WD_FRICTION_Z1_MIN_FACTOR * cfg.bed_roughness_length)
-        gamma = bed_friction_coefficient(cfg.bed_roughness_length, z1) * abs(ws.u_old[kw, f])
+        cb = bed_friction_coefficient(cfg.bed_roughness_length, z1)
+        wd.wave_friction === nothing ||
+            (cb *= _wd_wave_friction_factor!(wd.wave_friction, f, ws.u_old[kw, f], cfg.dt, cfg.wave_friction_filter_time,
+                cfg.bed_roughness_length, cb))
+        gamma = cb * abs(ws.u_old[kw, f])
     end
     gamma_mean = 0.0   # m/s, Chezy: g |U^n| / C^2 with the depth-averaged velocity of time n over the open layers
     if cfg.chezy_coefficient > 0.0 && !gate
@@ -2326,6 +2398,7 @@ function _wd_k_epsilon_step!(model::Model, wd::WetDryState, ke::KEpsilonState)
             dwdx = ir == il ? 0.0 : (wc(kk, ir) - wc(kk, il)) / ((ir - il) * dx)
             dudx = (st.u[kk, i + 1] - st.u[kk, i]) / dx
             ke.strain2[kk, i] = (dudz + dwdx)^2 + 4 * dudx^2
+            ke.rotation2[kk, i] = (dudz - dwdx)^2
             ke.production[kk, i] = nu_t[kk, i] * ke.strain2[kk, i]
             n2 = kup == kdn ? 0.0 : -(cfg.g / cfg.rho0) * (rho_b[kup, i] - rho_b[kdn, i]) / (zc(kup, i) - zc(kdn, i))
             ke.buoyancy[kk, i] = -(nu_t[kk, i] / KE_SIGMA_RHO) * n2
@@ -2357,7 +2430,10 @@ function _wd_k_epsilon_step!(model::Model, wd::WetDryState, ke::KEpsilonState)
             end
         end
         z1 = max(below + 0.5 * h[kw, i], WD_FRICTION_Z1_MIN_FACTOR * z0)   # m, height of the wall-cell centre
-        ustar2 = (wall && !equilibrium) ? bed_friction_coefficient(z0, z1) * _wd_cell_velocity(model, wd, klo, i)^2 : 0.0   # m^2/s^2
+        # wave-enhanced bed friction (issue #85): the factor of the two faces of the cell, so that the wall cell has the bed
+        # stress of the momentum step
+        wfac = wd.wave_friction === nothing ? 1.0 : 0.5 * (wd.wave_friction.factor[i] + wd.wave_friction.factor[i + 1])
+        ustar2 = (wall && !equilibrium) ? wfac * bed_friction_coefficient(z0, z1) * _wd_cell_velocity(model, wd, klo, i)^2 : 0.0   # m^2/s^2
         for (field, sigma) in ((:k, KE_SIGMA_K), (:eps, KE_SIGMA_EPS))
             phi = field === :k ? k : eps
             floor_value = field === :k ? KE_K_MIN : KE_EPS_MIN
@@ -2396,7 +2472,7 @@ function _wd_k_epsilon_step!(model::Model, wd::WetDryState, ke::KEpsilonState)
                     # (m^2/s^2), production tau dU/dz = tau^2 / (kappa u_k z1), dissipation u_k^3 / (kappa z1) as the sink
                     # u_k^3 / (kappa z1 k). WHY: u_k stays finite where the bed velocity changes sign (reattachment).
                     uk = KE_C_MU^0.25 * sqrt(k[kk, i])   # m/s
-                    tau = KE_KARMAN * uk * abs(_wd_cell_velocity(model, wd, kk, i)) / log(z1 / z0)
+                    tau = sqrt(wfac) * KE_KARMAN * uk * abs(_wd_cell_velocity(model, wd, kk, i)) / log(z1 / z0)
                     source = tau^2 / (KE_KARMAN * uk * z1) + max(gb, 0.0) + ke.cfk * pv
                     sink = KE_C_MU^0.75 * sqrt(k[kk, i]) / (KE_KARMAN * z1) + max(-gb, 0.0) / k[kk, i]
                 end
@@ -2425,7 +2501,7 @@ function _wd_k_epsilon_step!(model::Model, wd::WetDryState, ke::KEpsilonState)
         end
     end
     @inbounds for i in 1:nx, kk in 1:nz
-        nu_t[kk, i] = h[kk, i] > WD_EMPTY_CELL_THICKNESS ? KE_C_MU * k[kk, i] * _ke_time(ke, k[kk, i], eps[kk, i], ke.strain2[kk, i]) : 0.0
+        nu_t[kk, i] = h[kk, i] > WD_EMPTY_CELL_THICKNESS ? ke_eddy_viscosity(ke, k[kk, i], eps[kk, i], ke.strain2[kk, i], ke.rotation2[kk, i]) : 0.0
     end
     return nothing
 end

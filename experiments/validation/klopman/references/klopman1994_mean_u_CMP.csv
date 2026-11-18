@@ -1,0 +1,39 @@
+# Test #CMP: regular waves following the current. Wave-averaged (mean) horizontal velocity U(z).
+# z < 0.015 m from Fig. 4.10 (log z, report page index 71 of the scan), above from Fig. 4.7 (linear, index 68).
+# Digitised from Klopman (1994), Delft Hydraulics report H840.30 Part II (scanned figures; template matching of the
+# markers on 300 dpi renders, grid lines as the axis calibration; digitising error about 0.001 m/s and 0.5 mm in z,
+# below 1 mm the heights of the log figure). Preliminary data (report section 4.1): the LDV calibration factor used
+# (0.0913 instead of 0.0968 m/s/V) underestimates all velocities by about 7 %; no cross-talk correction; valid from
+# 35 mm below the wave trough downwards. Overlapping markers of the two LDVs near z = 0.25 m are partly merged.
+# z: height above the (false) bed in m; station x = 22.50 m, flume centre line.
+z_m,u_mean_m_per_s,source_figure
+0.00040,0.0428,4.10
+0.00061,0.0436,4.10
+0.00071,0.0467,4.10
+0.00081,0.0467,4.10
+0.00101,0.0480,4.10
+0.00121,0.0503,4.10
+0.00152,0.0456,4.10
+0.00182,0.0544,4.10
+0.00273,0.0578,4.10
+0.00384,0.0647,4.10
+0.00606,0.0685,4.10
+0.01007,0.0852,4.10
+0.01524,0.1092,4.7
+0.03017,0.1239,4.7
+0.05014,0.1270,4.7
+0.07515,0.1399,4.7
+0.10017,0.1455,4.7
+0.12539,0.1446,4.7
+0.15020,0.1503,4.7
+0.17522,0.1496,4.7
+0.20023,0.1487,4.7
+0.25615,0.1442,4.7
+0.26035,0.1457,4.7
+0.26519,0.1428,4.7
+0.28032,0.1412,4.7
+0.30008,0.1388,4.7
+0.32510,0.1367,4.7
+0.35012,0.1315,4.7
+0.37513,0.1284,4.7
+0.40015,0.1225,4.7

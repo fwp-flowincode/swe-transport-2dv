@@ -3384,6 +3384,15 @@ $\nabla^2p=-\pi^2(1/L^2+1/(H-d)^2)\thinspace p$ ($L=2$ m, $H=1$ m, $d=0.25$ m). 
   density mass to round-off, k and $\varepsilon$ positive and finite, max $\nu_t<10^{-2}$ m²/s.
 - `test_verify_k_epsilon_realizability_bound`: the time scale is $k/\varepsilon$ without strain and in equilibrium shear,
   the bound above; on by default.
+- `test_verify_k_epsilon_wave_stabilization_kernel` (issue #85): the stabilised eddy viscosity of Larsen & Fuhrman
+  (2018), $\nu_t=C_\mu k^2/\max(\varepsilon,\lambda_2 C p_{rat}\varepsilon)$, $p_{rat}=S_{ij}S_{ij}/\Omega_{ij}\Omega_{ij}$,
+  $C=C_2/C_1$ (`ke_eddy_viscosity`, `ModelConfig(ke_wave_stabilization=`$\lambda_2$`)`): unchanged with $\lambda_2=0$ and in
+  simple shear ($p_{rat}=1$), reduced by exactly $\lambda_2 C p_{rat}$ for $p_{rat}=100$, smaller still without rotation;
+  $\lambda_2<0$ rejected; the option reaches the k-epsilon state.
+- `test_verify_k_epsilon_wave_stabilization_stops_growth` (issue #85): standing wave of the Klopman flume ($h$ = 0.5 m,
+  $T$ = 1.44 s, $ka$ = 0.13) in a closed basin without bed friction, wetting-drying step, 60 x 20 cells, 20 periods: the
+  mean $\nu_t$ at mid-depth grows by more than 2 from period 12 to 20 without the stabilisation (measured 4.1), by less
+  than 1.5 with $\lambda_2=0.1$ (measured 1.0): the instability of two-equation closures in nearly potential flow.
 - `test_verify_k_epsilon_realizability_switch`: without the bound the dam-break front exceeds $\nu_t=1$ m²/s within ten
   steps, with it $\nu_t$ stays below $10^{-2}$ m²/s.
 - `test_verify_clear_vegetation_resets_k_epsilon_production`: the vegetation production $P_v$ is zero after
@@ -3408,6 +3417,13 @@ Exactness, conservation and positivity tests run for the four variants hydrostat
   cuts the layers at bed and surface correctly. With `merge` = 0.1 a top layer thinner than 0.1 $\Delta z$ joins the layer
   below (also one cut by the bed), a thicker one is kept, a column thinner than the threshold keeps its one layer, and
   the sum stays $\max(\zeta-z_b,0)$.
+- `test_verify_wd_wave_bed_friction_kernel` (issue #85): Swart's (1974) wave friction factor (formula, 0.035 at
+  Klopman's $A/k_s=34$, the cap 0.3 below $A/k_s=1.57$); the running statistics of the bed velocity recover the orbital
+  excursion $A=U_w/\omega$ of $u=U_c+U_w\sin\omega t$, and the factor $1+(f_w/(2c_b)-1)\,r$ with the wave share
+  $r=\mathrm{var}\,u/(\mathrm{var}\,u+\bar u^2)$, to within 2 % (the exponential means pass 1.1 % of the $2\omega$
+  oscillation of the variances); a steady current keeps the factor 1, a current with 0.5 mm/s of fast noise within
+  $10^{-3}$ of 1 (without the wave share the current-only Klopman case had 5.5); `wave_bed_friction="swart"` needs a
+  rough bed and the implicit vertical terms and builds the state.
 - `test_verify_wd_merged_face_remap` (issue #88): the overlap remap of the face velocities conserves the face momentum
   $\sum h_f u$ when the top layer is merged, gives both parts of a split top layer the velocity of the old one, sets
   closed layers to 0 and leaves a face with unchanged layering bit for bit.
@@ -3877,6 +3893,24 @@ $x=0$. Measured values in brackets.
   ($\tau=20T$): amplitude within 1 % (1.0009, 0.9983), $|R|$ below 0.5 % (0.27 %, 0.38 %).
 - `test_validate_incoming_relaxation_does_not_reflect`: $\tau=2T$: the level relaxation reflects above 2 % (5.1 %;
   theory 4.0 %), the incoming relaxation below 0.6 % (0.22 %).
+
+### Klopman flume tests (`test_klopman.jl`, validation case 2DV-13, issue #85)
+
+Waves following and opposing a current in the flume of Klopman (1994); case module and full runs in
+`experiments/validation/klopman/` (README there, plan `docs/plan_issue_85_klopman_flume.md`).
+
+- `test_verify_klopman_setup`: the arrival time of the full wave at the station used by the amplitude tuning (15, 12
+  and 17 periods for waves only, following, opposing: ramp, travel at the Doppler group speed, margin); the case
+  settings (θ, Δt, merged top layer and limited face level, k-ε with z₀, free left face); the initial uniform current
+  carries the target discharge 0.0805 m²/s through every interior face (round-off); the start from a saved state copies
+  u, η and k; the station averages of 20 steps are finite and positive; the seven reference profiles read with heights
+  increasing from the bed. About 30 s (190 × 10 cells).
+- `test_validate_klopman_shear_sign_coarse` (only with `SWE_SLOW_TESTS=true`, about 10 min): the primary criterion of
+  #85 on a coarse grid (380 × 10 cells, waves at N = 200, λ₂ = 0.1, the incoming amplitudes of the tuned nz = 20 runs,
+  100 periods from the current-only state, averages over the last 30): relative to the current only, the upper-half
+  shear (least squares over 0.25–0.40 m) decreases for following waves (measured −0.002 against 0.067 1/s, tested)
+  and increases for opposing waves. The opposing check is `@test_broken`: on 20 layers the increase is only about 10 % of
+  the measured change, and on this grid (50 mm layers, twice the θ damping) it is lost (0.052 against 0.067 1/s).
 
 ## Additional validation scripts and literature basis
 

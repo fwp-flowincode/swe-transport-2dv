@@ -218,6 +218,19 @@ Base.@kwdef mutable struct ModelConfig
     # -, merge threshold of wd_top_layer = "merged", as a fraction of dz (0 < fraction < 1): the top layer is then between
     # wd_merge_fraction dz and (1 + wd_merge_fraction) dz thick (unless the column is shallower)
     wd_merge_fraction::Float64 = 0.1
+    # k-epsilon: stabilisation of the eddy viscosity under waves, lambda_2 of Larsen & Fuhrman (2018) (-, 0 = off;
+    # `ke_eddy_viscosity`). WHY 0 default: keeps the validated results; 0.05 to 0.1 are the values of the paper and of
+    # OpenFOAM (issue #85: nu_t under the Klopman waves 5 to 7 times that of the current only without it).
+    ke_wave_stabilization::Float64 = 0.0
+    # Wave-enhanced bed friction of the wetting-drying step (issue #85): "none" (the steady log law at the first cell
+    # centre) or "swart" (the friction coefficient at least f_w/2 with the wave friction factor of Swart (1974) for the
+    # orbital excursion of the resolved flow at the bed, `_wd_wave_friction_factor!`). Requires bed_roughness_length > 0.
+    # WHY: the log law at z1 = dz/2 gives a wave friction factor of 30-40 % of Swart's at dz = 12.5-25 mm, so the current
+    # under waves feels too little bed resistance (Klopman opposing case 0.03-0.05 m/s too fast).
+    wave_bed_friction::String = "none"
+    # s, time scale of the running statistics of the bed velocity (orbital velocity and frequency) of "swart"; several
+    # wave periods (long enough to average a wave, short against changes of the wave climate)
+    wave_friction_filter_time::Float64 = 10.0
     # Relative residual |r| / |rhs| at which the multigrid CG stops (-). The pressure solve makes the theta fluxes of the
     # cells below the surface divergence-free; the residual is a divergence error of this relative size. WHY 1e-8: the
     # pressure then differs from the direct solution by about 1e-9 relative, well below the splitting error of the step
@@ -341,6 +354,9 @@ function copy_config(cfg::ModelConfig)
         wd_face_level=cfg.wd_face_level,
         wd_top_layer=cfg.wd_top_layer,
         wd_merge_fraction=cfg.wd_merge_fraction,
+        ke_wave_stabilization=cfg.ke_wave_stabilization,
+        wave_bed_friction=cfg.wave_bed_friction,
+        wave_friction_filter_time=cfg.wave_friction_filter_time,
     )
 end
 
@@ -1089,7 +1105,7 @@ function Model(cfg::ModelConfig; T::Type{<:Real}=Float64)
         0.0,
         Inf,
         geometry,
-        turbulence_closure(cfg) == "k_epsilon" ? KEpsilonState(cfg.nz, cfg.nx; T=T) : nothing,
+        turbulence_closure(cfg) == "k_epsilon" ? KEpsilonState(cfg.nz, cfg.nx; T=T, wave_stabilization=cfg.ke_wave_stabilization) : nothing,
         cfg.wetting_drying ? WetDryState(cfg; T=T) : nothing,
         0.0,
         false,
@@ -1534,6 +1550,11 @@ function _check_wetting_drying_config(cfg::ModelConfig)
     cfg.wd_top_layer in ("cut", "merged") ||
         throw(ArgumentError("wd_top_layer must be \"cut\" or \"merged\", got \"$(cfg.wd_top_layer)\""))
     0.0 < cfg.wd_merge_fraction < 1.0 || throw(ArgumentError("wd_merge_fraction must lie in (0, 1)"))
+    cfg.wave_bed_friction in ("none", "swart") ||
+        throw(ArgumentError("wave_bed_friction must be \"none\" or \"swart\", got \"$(cfg.wave_bed_friction)\""))
+    cfg.wave_bed_friction == "none" || (cfg.bed_roughness_length > 0.0 && cfg.implicit_vertical_terms) ||
+        throw(ArgumentError("wave_bed_friction=\"swart\" needs bed_roughness_length > 0 and implicit_vertical_terms=true"))
+    cfg.wave_friction_filter_time > 0.0 || throw(ArgumentError("wave_friction_filter_time must be > 0"))
     cfg.nonhydro_solver in ("auto", "direct", "multigrid") ||
         throw(ArgumentError("nonhydro_solver must be \"auto\", \"direct\" or \"multigrid\", got \"$(cfg.nonhydro_solver)\""))
     0.0 < cfg.nonhydro_solver_tolerance < NH_MULTIGRID_TOLERANCE_MAX ||

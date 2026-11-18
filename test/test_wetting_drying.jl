@@ -108,6 +108,50 @@ wd_x_centres(cfg) = [(i - 0.5) * cfg.length / cfg.nx for i in 1:cfg.nx]
         @test u[:, f] == [0.1, 0.2, 0.3, 0.4]
     end
 
+    # Wave-enhanced bed friction (wave_bed_friction = "swart", issue #85)
+    # -, friction factor from the running statistics of a sinusoid: the exponential means pass 1/sqrt(1 + (2 omega tau)^2)
+    # = 1.1 % of the 2 omega oscillation of the variances (tau = 10 s, T = 1.44 s); measured deviation 0.8 %
+    WF_STATS_RTOL = 0.02
+    WF_NOISE_TOL = 1e-3    # -, friction factor - 1 for a current with 0.5 mm/s of fast noise (wave share 6e-6)
+    @testset "test_verify_wd_wave_bed_friction_kernel" begin
+        M = SweTransport2DV
+        # Swart (1974): f_w = exp(5.213 (k_s/A)^0.194 - 5.977) above A/k_s = 1.57, 0.3 below; Klopman: A/k_s = 34 -> 0.035
+        @test M.swart_friction_factor(34.0) ≈ exp(5.213 * 34.0^-0.194 - 5.977) rtol = TOL_IDENTITY
+        @test 0.034 < M.swart_friction_factor(34.0) < 0.036
+        @test M.swart_friction_factor(1.0) == M.SWART_FW_MAX
+        # running statistics: u1 = U_c + U_w sin(omega t) over many filter times gives A = U_w/omega
+        Uc, Uw, T, z0, z1 = 0.15, 0.18, 1.44, 4e-5, 0.0125
+        omega, dt, tau = 2pi / T, T / 400, 10.0
+        cb = bed_friction_coefficient(z0, z1)
+        wf = M.WaveFrictionState(1)
+        factor = 0.0
+        for n in 0:round(Int, 20 * tau / dt)
+            factor = M._wd_wave_friction_factor!(wf, 1, Uc + Uw * sin(omega * n * dt), dt, tau, z0, cb)
+        end
+        A_exact = Uw / omega
+        share = 0.5Uw^2 / (0.5Uw^2 + Uc^2)   # -, wave share of the bed velocity
+        @test factor ≈ 1 + (0.5 * M.swart_friction_factor(A_exact / (30z0)) / cb - 1) * share rtol = WF_STATS_RTOL
+        @test factor > 1   # Klopman's waves: f_w/2 = 0.018 against c_b = 0.005
+        # a steady current: the log law unchanged; a current with small fast fluctuations (0.5 mm/s at 10 Hz, the residual
+        # noise of a spun-up current): factor within WF_NOISE_TOL of 1 (the first version, without the wave share, gave 5.5)
+        wf0 = M.WaveFrictionState(1)
+        for n in 0:1000
+            factor = M._wd_wave_friction_factor!(wf0, 1, Uc, dt, tau, z0, cb)
+        end
+        @test factor == 1.0
+        wfn = M.WaveFrictionState(1)
+        for n in 0:round(Int, 20 * tau / dt)
+            factor = M._wd_wave_friction_factor!(wfn, 1, Uc + 5e-4 * sin(2pi * 10 * n * dt), dt, tau, z0, cb)
+        end
+        @test abs(factor - 1) < WF_NOISE_TOL
+        # configuration: needs a rough bed and the implicit vertical terms; the option builds the state
+        @test_throws ArgumentError Model(wd_config(nx=4, nz=4, wave_bed_friction="swart"))
+        @test_throws ArgumentError Model(wd_config(nx=4, nz=4, wave_bed_friction="other"))
+        model = Model(wd_config(nx=4, nz=4, wave_bed_friction="swart", bed_roughness_length=z0, implicit_vertical_terms=true))
+        @test model.wetdry.wave_friction isa M.WaveFrictionState
+        @test Model(wd_config(nx=4, nz=4)).wetdry.wave_friction === nothing
+    end
+
     @testset "test_verify_wd_configuration_checks" begin
         @test_throws ArgumentError Model(wd_config(nx=20, nz=4, momentum_advection_scheme="weno5"))
         @test_throws ArgumentError Model(wd_config(nx=20, nz=4, periodic_x=true, pressure_solver_method="sparse"))
